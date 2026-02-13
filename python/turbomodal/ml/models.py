@@ -232,12 +232,12 @@ def _train_pytorch_model(
             xb, mode_b, whirl_b, amp_b, vel_b = [b.to(device) for b in batch]
             if reshape_fn is not None:
                 xb = reshape_fn(xb)
-            out_mode, out_whirl, out_amp, out_vel = model(xb)
+            out_mode, out_whirl, out_amp, out_vel = model(xb)[:4]
             loss = (
-                ce_loss(out_mode, mode_b)
-                + ce_loss(out_whirl, whirl_b)
-                + mse_loss(out_amp.squeeze(-1), amp_b)
-                + mse_loss(out_vel.squeeze(-1), vel_b)
+                ce_loss(out_mode, mode_b.long())
+                + ce_loss(out_whirl, whirl_b.long())
+                + mse_loss(out_amp.squeeze(-1), amp_b.float())
+                + mse_loss(out_vel.squeeze(-1), vel_b.float())
             )
             optimizer.zero_grad()
             loss.backward()
@@ -254,12 +254,12 @@ def _train_pytorch_model(
                 xv = X_val_t
                 if reshape_fn is not None:
                     xv = reshape_fn(xv)
-                om, ow, oa, ov = model(xv)
+                om, ow, oa, ov = model(xv)[:4]
                 val_loss = (
-                    ce_loss(om, mode_val_t).item()
-                    + ce_loss(ow, whirl_val_t).item()
-                    + mse_loss(oa.squeeze(-1), amp_val_t).item()
-                    + mse_loss(ov.squeeze(-1), vel_val_t).item()
+                    ce_loss(om, mode_val_t.long()).item()
+                    + ce_loss(ow, whirl_val_t.long()).item()
+                    + mse_loss(oa.squeeze(-1), amp_val_t.float()).item()
+                    + mse_loss(ov.squeeze(-1), vel_val_t.float()).item()
                 )
             model.train()
             if val_loss < best_val_loss:
@@ -811,6 +811,8 @@ class TreeModeIDModel:
         self._amp_reg: Any = None
         self._vel_reg: Any = None
         self._backend: str = "sklearn"  # "lightgbm", "xgboost", or "sklearn"
+        self._mode_label_encoder: dict[int, int] | None = None
+        self._mode_label_decoder: dict[int, int] | None = None
         self._is_fitted: bool = False
 
     # --------------------------------------------------------------------- #
@@ -886,7 +888,13 @@ class TreeModeIDModel:
                 self._vel_reg = RandomForestRegressor(n_estimators=100, n_jobs=-1)
                 self._backend = "sklearn"
 
-        mode_labels = _encode_mode_labels(y["nodal_diameter"], y["nodal_circle"])
+        mode_labels_raw = _encode_mode_labels(y["nodal_diameter"], y["nodal_circle"])
+        unique_labels = np.unique(mode_labels_raw)
+        self._mode_label_encoder = {int(v): i for i, v in enumerate(unique_labels)}
+        self._mode_label_decoder = {i: int(v) for i, v in enumerate(unique_labels)}
+        mode_labels = np.array(
+            [self._mode_label_encoder[int(v)] for v in mode_labels_raw], dtype=np.int64
+        )
         whirl = np.asarray(y["whirl_direction"], dtype=np.int64)
         amplitude = np.asarray(y["amplitude"], dtype=np.float64)
         velocity = np.asarray(y["wave_velocity"], dtype=np.float64)
@@ -941,7 +949,10 @@ class TreeModeIDModel:
         if not self._is_fitted:
             raise RuntimeError("Model has not been trained. Call train() first.")
 
-        mode_pred = self._mode_clf.predict(X)
+        mode_pred_idx = self._mode_clf.predict(X)
+        mode_pred = np.array(
+            [self._mode_label_decoder[int(i)] for i in mode_pred_idx], dtype=np.int64
+        )
         nd, nc = _decode_mode_labels(mode_pred)
         whirl_pred = self._whirl_clf.predict(X)
         amp_pred = self._amp_reg.predict(X)
@@ -984,6 +995,8 @@ class TreeModeIDModel:
                 "amp_reg": self._amp_reg,
                 "vel_reg": self._vel_reg,
                 "backend": self._backend,
+                "mode_label_encoder": self._mode_label_encoder,
+                "mode_label_decoder": self._mode_label_decoder,
             },
             path,
         )
@@ -1003,6 +1016,8 @@ class TreeModeIDModel:
         self._amp_reg = data["amp_reg"]
         self._vel_reg = data["vel_reg"]
         self._backend = data.get("backend", "xgboost" if data.get("use_xgb") else "sklearn")
+        self._mode_label_encoder = data.get("mode_label_encoder")
+        self._mode_label_decoder = data.get("mode_label_decoder")
         self._is_fitted = True
 
 
