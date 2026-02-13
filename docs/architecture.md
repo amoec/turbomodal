@@ -72,16 +72,19 @@ The four subsystems are:
                   |    ML Pipeline (Python)        |
                   |                                |
                   |                    |    (STFT, mel, order tracking, |
-                  |     TWD, cross-spectral)       |
+                  |     TWD, cross-spectral,       |
+                  |     physics-informed)          |
                   |          |                     |
                   |          v                     |
                   |                    |          |                     |
                   |          v                     |
                   |                    |    Complexity ladder           |
-                  |    Tiers 1-6                   |
+                  |    Tiers 1-6 + variants        |
+                  |    Internal HPO / GroupKFold CV  |
                   |          |                     |
                   |          v                     |
                   |  _RemovedClass.predict()         |
+                  |                    |  _RemovedClass                |
                   |    -> nodal_diameter           |
                   |    -> whirl_direction          |
                   |    -> amplitude                |
@@ -96,7 +99,10 @@ The four subsystems are:
                   |  Optimisation &               |
                   |  Explainability (Python)      |
                   |                               |
-                  |                    |                    |  compute_grad_cam()           |
+                  |                    |    (minimize_sensors mode)    |
+                  |                    |  compute_grad_cam()           |
+                  |                    |                    |  generate_model_selection_    |
+                  |      report()                 |
                   |                    |                    +-------------------------------+
 ```
 
@@ -254,13 +260,19 @@ approaches fail to meet performance targets. This design provides:
 | Tier | Class                   | Architecture                            | Interpretability |
 |------|-------------------------|-----------------------------------------|------------------|
 | 1    | `Linear_RemovedClass`     | LogisticRegression + Ridge              | Full             |
-| 2    | `Tree_RemovedClass`       | Internal model (RandomForest fallback)         | High             |
+| 2    | `Tree_RemovedClass`       | Internal model / Internal model / RandomForest       | High             |
 | 3    | `SVM_RemovedClass`        | SVC + SVR with RBF kernel, StandardScaler | Medium         |
 | 4    | `ShallowNN_RemovedClass`  | 2-hidden-layer MLP (128 -> 64), PyTorch | Medium           |
 | 5    | `CNN_RemovedClass`        | 1-D CNN (Conv-BN-ReLU x2 + pool), PyTorch | Low            |
 | 6    | `Temporal_RemovedClass`   | Conv front-end + BiLSTM, PyTorch        | Low              |
 
 All tiers implement the `_RemovedClass` protocol, which defines four methods:
+
+Tiers 1, 5, and 6 support architectural variants:
+
+- **Tier 1**: `Linear_RemovedClass(variant="lasso")` -- uses Lasso (L1) instead of Ridge (L2).
+- **Tier 5**: `CNN_RemovedClass(variant="resnet")` -- 1-D ResNet with residual blocks.
+- **Tier 6**: `Temporal_RemovedClass(variant="transformer")` -- Transformer encoder with sinusoidal positional encoding.
 
 ```python
 class _RemovedClass(Protocol):
@@ -288,6 +300,10 @@ four feature types:
 An optional cross-spectral density overlay (`include_cross_spectra=True`)
 appends coherence-thresholded CSD magnitudes for all sensor pairs.
 
+A fifth feature type, `"physics"`, computes domain-specific features
+including frequency ratios relative to blade-alone frequencies, centrifugal
+stiffening corrections, and temperature-dependent Young's modulus scaling.
+
 The `returns a 1-D feature vector. The `automates the full loop: load HDF5 dataset, generate signals per condition,
 extract features, and collect ground-truth labels into `(X, y)` arrays.
 
@@ -306,6 +322,20 @@ Defined in `internal`. The `complexity ladder:
 5. **Internal tracker logging** -- all metrics, parameters, and timing are logged
    automatically. The `_Internal trackerProxy` class silently no-ops when internal tracker is
    not installed.
+
+Additional pipeline features:
+
+- **Internal HPO** -- when `use_internal=True`, each tier's hyperparameters are
+  tuned via Internal TPE sampling with cross-validated scoring before training.
+- **GroupKFold CV** -- cross-validation uses `GroupKFold` to prevent condition
+  leakage across folds.
+- **_RemovedClass** -- when `independent_subtasks=True`, each of the four
+  sub-tasks runs its own complexity ladder, potentially selecting different
+  tiers.
+- **OOD evaluation** -- when `ood_fraction > 0`, extreme operating conditions
+  are held out as an out-of-distribution test set.
+- **ECE and latency** -- `evaluate_model` reports Expected Calibration Error
+  and per-sample inference latency alongside the six standard metrics.
 
 ### Performance Targets
 
@@ -366,6 +396,20 @@ The `_RemovedClass` dataclass provides `sensor_positions`,
 `num_sensors`, `objective_value`, `observability_matrix`,
 `condition_number`, `robustness_score`, and `dropout_degradation`.
 
+**Minimize-sensors mode**: when `config.mode="minimize_sensors"`, the
+optimizer uses binary search over the sensor count to find the minimum
+number of sensors that achieve acceptable conditioning, rather than
+maximizing performance with a fixed count.
+
+**ML model factory**: when an `ml_model_factory` callable is provided,
+greedy selection uses it as the objective once enough sensors are selected,
+allowing the optimizer to directly optimize ML prediction quality.
+
+**Observability penalty**: during Bayesian refinement, the objective
+includes a penalty term `−weight * log(condition_number)` controlled by
+`config.observability_penalty_weight`, discouraging ill-conditioned
+configurations.
+
 ### Observability Analysis
 
 `compute_observability()` computes the condition number and singular values
@@ -405,6 +449,44 @@ applies five rule-based constraints:
 
 Returns `is_consistent`, `violations`, `consistency_score`, and
 `anomaly_flag` arrays.
+
+A sixth check is available when epistemic uncertainty is provided:
+
+6. **Epistemic uncertainty threshold** -- when `epistemic_uncertainty` is
+   passed, predictions with uncertainty exceeding `epistemic_threshold`
+   (default 0.1) are flagged as violations.
+
+### Uncertainty Quantification
+
+Three mechanisms provide prediction uncertainty:
+
+- **MC Dropout** (`mc_dropout_predict`): stochastic forward passes with
+  dropout enabled at inference time (Tiers 4-6).
+- **Deep Ensembles** (`_RemovedClass`): independently trained model ensemble
+  with majority-vote classification and mean regression.
+- **Heteroscedastic output heads**: optional log-variance heads on all
+  PyTorch architectures for per-sample aleatoric uncertainty.
+
+The `_removed_func(model, X, method)` function returns standard
+predictions plus aleatoric/epistemic/total variance decomposition.
+
+### Model Selection Report and Explanation Cards
+
+`_removed_func(training_report)` produces a structured
+summary of the complexity ladder results, including per-tier metrics, score
+gap analysis, and the rationale for tier selection.
+
+`_removed_func(model, X_single, predictions, ...)` generates a
+per-prediction card with SHAP_REMOVEDattributions, physics consistency results,
+confidence intervals from uncertainty, and a human-readable summary.
+
+### Visualization Extensions
+
+- `plot_campbell` and `plot_zzenf` accept `confidence_bands` (dict with
+  `upper`/`lower` keys) and `crossing_markers=True` to overlay uncertainty
+  bands and engine-order crossing annotations.
+- `_removed_func(internal analysis_values, sensor_names, mode_names)` renders
+  a heatmap of per-sensor SHAP_REMOVEDcontributions across mode families.
 
 ### Confidence Calibration
 
