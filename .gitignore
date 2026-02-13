@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+.eggs/
+
+# C++ build artifacts
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.pyd
+*.a
+*.lib
+
+# Build directories (keep build/ scripts, ignore CMake output)
+build/_deps/
+build/CMakeFiles/
+build/CMakeCache.txt
+build/cmake_install.cmake
+build/Makefile
+build/*.cbp
+build/compile_commands.json
+build/CTestTestfile.cmake
+build/test_*
+build/Testing/
+build/lib*/
+build/_core*
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.gcov
+*.gcda
+*.gcno
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Jupyter
+.ipynb_checkpoints/
+.cache
