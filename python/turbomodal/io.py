@@ -73,9 +73,12 @@ def load_cad(
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
 
-        # Import geometry via OpenCASCADE
-        gmsh.model.occ.importShapes(str(filepath))
-        gmsh.model.occ.synchronize()
+        # Import geometry — STL is a mesh format, not CAD, so use merge()
+        if ext == ".stl":
+            gmsh.merge(str(filepath))
+        else:
+            gmsh.model.occ.importShapes(str(filepath))
+            gmsh.model.occ.synchronize()
 
         # Set mesh size
         if mesh_size is not None:
