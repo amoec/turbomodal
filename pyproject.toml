@@ -32,3 +32,19 @@ ml = [
 cmake.build-type = "Release"
 cmake.args = ["-DBUILD_TESTS=OFF", "-DBUILD_PYTHON=ON", "-DUSE_OPENMP=OFF"]
 wheel.packages = ["python/turbomodal"]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-*"
+skip = "*-musllinux_*"
+test-command = "python -c \"import turbomodal\""
+
+[tool.cibuildwheel.linux]
+before-all = "git submodule update --init --recursive"
+
+[tool.cibuildwheel.macos]
+before-all = "git submodule update --init --recursive"
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+archs = "x86_64 arm64"
+
+[tool.cibuildwheel.windows]
+before-all = "git submodule update --init --recursive"
