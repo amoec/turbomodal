@@ -48,3 +48,4 @@ archs = "x86_64 arm64"
 
 [tool.cibuildwheel.windows]
 before-all = "git submodule update --init --recursive"
+archs = "AMD64"
