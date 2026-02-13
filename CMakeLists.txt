@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(turbomodal VERSION 1.0.0 LANGUAGES CXX)
+
+# macOS: must be set BEFORE project() so the compiler is configured correctly.
+# Targets 11.0 (Big Sur, first Apple Silicon release) to avoid newer libc++
+# symbols (e.g. __hash_memory from LLVM 19) that break conda/older runtimes.
+if(APPLE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS deployment target" FORCE)
+endif()
+
+project(turbomodal VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -139,7 +147,7 @@ endif()
 # --- Python bindings ---
 if(BUILD_PYTHON)
   find_package(pybind11 CONFIG REQUIRED)
-  pybind11_add_module(_core src/python_bindings.cpp)
+  pybind11_add_module(_core src/python_bindings.cpp src/compat_hash.c)
   target_link_libraries(_core PRIVATE turbomodal_core)
   if(DEFINED SKBUILD)
     install(TARGETS _core DESTINATION turbomodal)
