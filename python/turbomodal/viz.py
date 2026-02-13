@@ -454,6 +454,8 @@ def plot_campbell(
     engine_orders: Sequence[int] | None = None,
     max_freq: float | None = None,
     figsize: tuple[float, float] = (12, 8),
+    confidence_bands: dict | None = None,
+    crossing_markers: bool = False,
 ):
     """Plot Campbell diagram from RPM sweep results.
 
@@ -571,6 +573,60 @@ def plot_campbell(
                     color=color, linewidth=1.2, label=label,
                     marker=".", markersize=3)
 
+            # D11: Confidence bands
+            if confidence_bands is not None:
+                upper = confidence_bands.get("upper", {})
+                lower = confidence_bands.get("lower", {})
+                key = (nd, track_id)
+                if key in upper and key in lower:
+                    u = np.array(upper[key])
+                    l = np.array(lower[key])
+                    if len(u) == len(track_rpms):
+                        ax.fill_between(
+                            track_rpms[valid], l[valid], u[valid],
+                            alpha=0.15, color=color,
+                        )
+
+    # D11: Crossing markers — detect where mode tracks cross EO lines
+    all_track_data: list[tuple[np.ndarray, np.ndarray]] = []
+    if crossing_markers and engine_orders:
+        # Collect all valid track data for crossing detection
+        for nd in all_nds:
+            perm = _track_modes_for_harmonic(results, nd)
+            first_r = None
+            for row in results:
+                first_r = _find_harmonic(row, nd)
+                if first_r is not None:
+                    break
+            if first_r is None:
+                continue
+            n_modes = len(first_r.frequencies)
+            for track_id in range(n_modes):
+                tr, tf = [], []
+                for i in range(n_rpm):
+                    if i >= len(perm):
+                        break
+                    mode_idx = perm[i][track_id] if track_id < len(perm[i]) else -1
+                    r = _find_harmonic(results[i], nd)
+                    if mode_idx >= 0 and r is not None and mode_idx < len(r.frequencies):
+                        tr.append(rpms[i])
+                        tf.append(r.frequencies[mode_idx])
+                if len(tr) > 1:
+                    all_track_data.append((np.array(tr), np.array(tf)))
+
+        for tr_rpms, tr_freqs in all_track_data:
+            for eo in engine_orders:
+                eo_freqs = eo * tr_rpms / 60.0
+                diff = tr_freqs - eo_freqs
+                for j in range(len(diff) - 1):
+                    if diff[j] * diff[j + 1] < 0:
+                        # Linear interpolation
+                        frac = abs(diff[j]) / (abs(diff[j]) + abs(diff[j + 1]))
+                        cross_rpm = tr_rpms[j] + frac * (tr_rpms[j + 1] - tr_rpms[j])
+                        cross_freq = eo * cross_rpm / 60.0
+                        ax.plot(cross_rpm, cross_freq, "rx", markersize=10,
+                                markeredgewidth=2, zorder=5)
+
     # Engine order lines
     if engine_orders:
         for eo in engine_orders:
@@ -628,6 +684,8 @@ def plot_zzenf(
     num_sectors: int,
     max_freq: float | None = None,
     figsize: tuple[float, float] = (10, 8),
+    confidence_bands: dict | None = None,
+    crossing_markers: bool = False,
 ):
     """Plot ZZENF (zig-zag) interference diagram.
 
@@ -682,5 +740,59 @@ def plot_zzenf(
                markersize=8, label="Standing wave"),
     ]
     ax.legend(handles=legend_elements, loc="upper right")
+    fig.tight_layout()
+    return fig
+
+
+def plot_sensor_contribution(
+    shap_values: np.ndarray,
+    sensor_names: list[str],
+    mode_names: list[str],
+    features_per_sensor: int,
+    figsize: tuple[float, float] = (10, 8),
+):
+    """Plot sensor contribution heatmap from SHAP values (D8).
+
+    Parameters
+    ----------
+    shap_values : (n_samples, n_features, n_outputs) SHAP values.
+    sensor_names : list of sensor names.
+    mode_names : list of mode/output names.
+    features_per_sensor : number of features per sensor.
+    figsize : figure size.
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    import matplotlib.pyplot as plt
+
+    # Group SHAP values by sensor: mean absolute across samples and features within sensor
+    n_sensors = len(sensor_names)
+    n_modes = len(mode_names)
+
+    if shap_values.ndim == 2:
+        shap_values = shap_values[:, :, np.newaxis]
+
+    n_samples, n_features, n_out = shap_values.shape
+    n_out = min(n_out, n_modes)
+
+    contribution = np.zeros((n_sensors, n_out))
+    for s in range(n_sensors):
+        start = s * features_per_sensor
+        end = min(start + features_per_sensor, n_features)
+        if start < n_features:
+            contribution[s] = np.mean(np.abs(shap_values[:, start:end, :n_out]), axis=(0, 1))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(contribution, aspect="auto", cmap="YlOrRd")
+    ax.set_xticks(range(n_out))
+    ax.set_xticklabels(mode_names[:n_out], rotation=45, ha="right")
+    ax.set_yticks(range(n_sensors))
+    ax.set_yticklabels(sensor_names)
+    ax.set_xlabel("Mode / Output")
+    ax.set_ylabel("Sensor")
+    ax.set_title("Sensor Contribution Heatmap (Mean |SHAP|)")
+    fig.colorbar(im, ax=ax, label="Mean |SHAP value|")
     fig.tight_layout()
     return fig

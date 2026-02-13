@@ -32,15 +32,25 @@ The project is organised around four subsystems:
   and signal dropout via `NoiseConfig` and `apply_noise`.
 - **6-tier ML complexity ladder** that trains models in order of complexity and
   stops as soon as performance targets are met:
-  Tier 1 Linear, Tier 2 XGBoost/RandomForest, Tier 3 SVM,
+  Tier 1 Linear, Tier 2 LightGBM/XGBoost/RandomForest, Tier 3 SVM,
   Tier 4 Shallow Neural Net, Tier 5 1-D CNN, Tier 6 Conv+BiLSTM.
+- **Model variants**: Lasso regression (Tier 1), 1-D ResNet (Tier 5),
+  and Transformer encoder (Tier 6).
+- **Physics-informed feature extraction** with frequency ratios, centrifugal
+  stiffening corrections, and temperature-dependent Young's modulus scaling.
+- **Automatic hyperparameter optimization** via Optuna TPE sampling with
+  GroupKFold cross-validation.
+- **Uncertainty quantification** via MC Dropout, Deep Ensembles, and
+  heteroscedastic output heads with aleatoric/epistemic variance decomposition.
 - **Sensor placement optimisation** using Fisher Information Matrix
-  pre-screening, greedy forward selection, and Bayesian refinement via Optuna.
+  pre-screening, greedy forward selection, and Bayesian refinement via Optuna,
+  with a minimize-sensors optimization mode.
 - **Model explainability** -- SHAP values for feature importance, Grad-CAM
-  attribution for CNN-based models, and four confidence calibration methods
-  (Platt, isotonic, temperature scaling, conformal prediction).
-- **Physics consistency validation** -- five rule-based checks that flag
-  anomalous predictions.
+  attribution for CNN-based models, four confidence calibration methods
+  (Platt, isotonic, temperature scaling, conformal prediction), model
+  selection reports, and per-prediction explanation cards.
+- **Physics consistency validation** -- six rule-based checks (including
+  epistemic uncertainty threshold) that flag anomalous predictions.
 - **HDF5 dataset management** with parametric sweeps driven by Latin Hypercube
   Sampling via `run_parametric_sweep`.
 - **MLflow experiment tracking** integration with automatic no-op fallback
@@ -69,11 +79,10 @@ The project is organised around four subsystems:
 |                           +<------+  extract_features           |
 |  optimize_sensor_         | preds |  train_mode_id_model        |
 |      placement            |       |  TIER_MODELS (1-6)          |
-|  compute_shap_values      |       |  evaluate_model             |
-|  compute_grad_cam         |       |  build_feature_matrix       |
-|  physics_consistency_     |       |  MLflow integration         |
-|      check                |       |                             |
-|  calibrate_confidence     |       |                             |
+|  compute_shap_values      |       |  predict_with_uncertainty   |
+|  compute_grad_cam         |       |  evaluate_model             |
+|  physics_consistency_     |       |  build_feature_matrix       |
+|  calibrate_confidence     |       |  MLflow / Optuna            |
 +---------------------------+       +-----------------------------+
 ```
 

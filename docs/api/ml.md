@@ -41,7 +41,7 @@ class FeatureConfig:
 | `fft_size` | `int` | `2048` | FFT window size |
 | `hop_size` | `int` | `512` | STFT hop size |
 | `window` | `str` | `"hann"` | Window function name |
-| `feature_type` | `str` | `"spectrogram"` | Feature extraction type: `"spectrogram"`, `"mel"`, `"order_tracking"`, `"twd"` |
+| `feature_type` | `str` | `"spectrogram"` | Feature extraction type: `"spectrogram"`, `"mel"`, `"order_tracking"`, `"twd"`, `"physics"` |
 | `n_mels` | `int` | `128` | Number of mel bands (for `"mel"` type) |
 | `f_min` | `float` | `0.0` | Minimum frequency for mel filterbank |
 | `f_max` | `float` | `0.0` | Maximum frequency for mel filterbank (0 = Nyquist) |
@@ -50,6 +50,11 @@ class FeatureConfig:
 | `sensor_angles` | `ndarray \| None` | `None` | Circumferential sensor positions in radians (required for `"twd"` type) |
 | `include_cross_spectra` | `bool` | `False` | Append cross-spectral density features |
 | `coherence_threshold` | `float` | `0.5` | Coherence threshold for cross-spectral features |
+| `blade_alone_frequencies` | `ndarray \| None` | `None` | Blade-alone natural frequencies in Hz (for `"physics"` type) |
+| `centrifugal_alpha` | `float` | `0.0` | Centrifugal stiffening coefficient |
+| `reference_temperature` | `float` | `293.0` | Reference temperature in K |
+| `temperature` | `float` | `293.0` | Current temperature in K |
+| `youngs_modulus_ratio_fn` | `callable \| None` | `None` | Callable `T -> E(T)/E_ref` for temperature correction |
 
 ### extract_features
 
@@ -210,6 +215,8 @@ class TrainingConfig:
     whirl_accuracy_min: float = 0.95
     amplitude_mape_max: float = 0.08
     velocity_r2_min: float = 0.93
+    independent_subtasks: bool = False
+    ood_fraction: float = 0.0
 ```
 
 **Fields:**
@@ -235,6 +242,8 @@ class TrainingConfig:
 | `whirl_accuracy_min` | `float` | `0.95` | Target: whirl classification accuracy |
 | `amplitude_mape_max` | `float` | `0.08` | Target: amplitude MAPE upper bound |
 | `velocity_r2_min` | `float` | `0.93` | Target: velocity R-squared lower bound |
+| `independent_subtasks` | `bool` | `False` | Run complexity ladder independently per sub-task |
+| `ood_fraction` | `float` | `0.0` | Fraction of extreme conditions held out as OOD test set |
 
 ### ModeIDModel (Protocol)
 
@@ -349,6 +358,9 @@ def evaluate_model(
 - `"amplitude_r2"` -- R-squared for amplitude
 - `"velocity_rmse"` -- RMSE for wave velocity
 - `"velocity_r2"` -- R-squared for wave velocity
+- `"ece"` -- Expected Calibration Error (15-bin confidence histogram)
+- `"inference_latency_mean_ms"` -- Mean single-sample inference latency in ms
+- `"inference_latency_p95_ms"` -- 95th-percentile inference latency in ms
 
 ---
 
@@ -382,6 +394,12 @@ class LinearModeIDModel:
 
 Uses four independent scikit-learn estimators:
 - `LogisticRegression` for mode classification (encoded ND*100+NC labels, OVR)
+- `Ridge` or `Lasso` regression for amplitude and velocity
+
+**Parameter:**
+- `variant` : `str` -- `"ridge"` (default) or `"lasso"`. Lasso uses L1
+  regularization for sparser coefficients.
+
 - `LogisticRegression` for whirl direction classification
 - `Ridge` regression for amplitude
 - `Ridge` regression for wave velocity
@@ -404,9 +422,9 @@ class TreeModeIDModel:
     def load(self, path: str) -> None: ...
 ```
 
-Falls back from `XGBClassifier`/`XGBRegressor` (100 estimators) to
-scikit-learn `RandomForestClassifier`/`RandomForestRegressor` when the
-`xgboost` package is not installed.
+Three-level fallback: tries `LGBMClassifier`/`LGBMRegressor` (LightGBM)
+first, falls back to `XGBClassifier`/`XGBRegressor` (XGBoost), then to
+scikit-learn `RandomForestClassifier`/`RandomForestRegressor`.
 
 **Property:**
 - `feature_importances_` : `ndarray` -- Average feature importances across
@@ -465,6 +483,10 @@ via gradient-based attribution.
 
 1-D CNN on spectral inputs (PyTorch).
 
+**Parameter:**
+- `variant` : `str` -- `"cnn"` (default) or `"resnet"`. The ResNet variant
+  uses two residual blocks with skip connections for deeper feature extraction.
+
 ```python
 class CNNModeIDModel:
     def __init__(self) -> None: ...
@@ -497,6 +519,11 @@ explainability.
 
 Temporal CNN + Bidirectional LSTM (PyTorch).
 
+**Parameter:**
+- `variant` : `str` -- `"lstm"` (default) or `"transformer"`. The
+  Transformer variant uses a 2-layer encoder with 4 attention heads and
+  sinusoidal positional encoding.
+
 ```python
 class TemporalModeIDModel:
     def __init__(self) -> None: ...
@@ -518,6 +545,96 @@ run-up/run-down data. Highest complexity, lowest interpretability.
 Use SHAP or attention-based methods for explanation.
 
 **Persistence:** PyTorch `state_dict` + scaler/shape parameters.
+
+### CompositeModel
+
+Wraps four independent sub-task models into a single predict interface.
+
+```python
+class CompositeModel:
+    def __init__(
+        self,
+        mode_model: ModeIDModel,
+        whirl_model: ModeIDModel,
+        amp_model: ModeIDModel,
+        vel_model: ModeIDModel,
+        subtask_tiers: dict[str, int] | None = None,
+    ) -> None: ...
+
+    def predict(self, X: np.ndarray) -> dict[str, np.ndarray]: ...
+    def save(self, path: str) -> None: ...
+    def load(self, path: str) -> None: ...
+```
+
+Used when `config.independent_subtasks=True` causes the complexity ladder to
+run independently per sub-task, potentially selecting different tiers for
+each. The `subtask_tiers` dict records which tier was selected for each task.
+
+### DeepEnsemble
+
+Ensemble of independently trained models for uncertainty estimation.
+
+```python
+class DeepEnsemble:
+    def __init__(self, n_members: int = 5, tier: int = 4) -> None: ...
+
+    def train(self, X, y, config) -> dict[str, float]: ...
+    def predict(self, X: np.ndarray) -> dict[str, np.ndarray]: ...
+    def save(self, path: str) -> None: ...
+    def load(self, path: str) -> None: ...
+```
+
+**Parameters:**
+- `n_members` : `int` -- Number of ensemble members (default 5).
+- `tier` : `int` -- Complexity tier for each member (4, 5, or 6).
+
+`predict()` returns standard keys plus `amplitude_epistemic_var` and
+`velocity_epistemic_var` (variance across ensemble members).
+
+### mc_dropout_predict
+
+```python
+def mc_dropout_predict(
+    model: Any,
+    X: np.ndarray,
+    n_forward_passes: int = 30,
+) -> dict[str, np.ndarray]
+```
+
+Run MC Dropout inference for epistemic uncertainty estimation. Enables
+dropout at inference time, runs `n_forward_passes` stochastic forward
+passes, and returns mean predictions plus `amplitude_epistemic_var`,
+`velocity_epistemic_var`, and `mode_entropy`.
+
+Requires a PyTorch-based model (Tier 4-6).
+
+### predict_with_uncertainty
+
+```python
+def predict_with_uncertainty(
+    model: Any,
+    X: np.ndarray,
+    method: str = "mc_dropout",
+    n_forward_passes: int = 30,
+) -> dict[str, np.ndarray]
+```
+
+Unified entry point for uncertainty-aware prediction. Returns standard
+prediction keys plus aleatoric/epistemic/total variance decomposition:
+
+| Key | Description |
+|-----|-------------|
+| `amplitude_aleatoric_var` | Data noise variance (heteroscedastic) |
+| `amplitude_epistemic_var` | Model uncertainty variance |
+| `amplitude_total_var` | Aleatoric + epistemic |
+| `velocity_aleatoric_var` | Data noise variance |
+| `velocity_epistemic_var` | Model uncertainty variance |
+| `velocity_total_var` | Aleatoric + epistemic |
+| `mode_entropy` | Classification entropy (MC Dropout only) |
+
+**Parameters:**
+- `method` : `str` -- `"mc_dropout"` or `"deep_ensemble"`.
+- `n_forward_passes` : `int` -- Number of stochastic passes (MC Dropout only).
 
 ---
 

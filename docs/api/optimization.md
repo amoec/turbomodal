@@ -52,6 +52,12 @@ class SensorOptimizationConfig:
 | `robustness_trials` | `int` | `100` | Number of Monte Carlo robustness validation trials |
 | `dropout_probability` | `float` | `0.0` | Probability of single sensor failure in robustness test |
 | `position_tolerance` | `float` | `0.0` | Angular position tolerance in degrees for robustness test |
+| `mode` | `str` | `"maximize_performance"` | Optimization mode: `"maximize_performance"` or `"minimize_sensors"` |
+| `target_f1_min` | `float` | `0.92` | Target mode detection F1 (minimize_sensors mode) |
+| `target_whirl_acc_min` | `float` | `0.95` | Target whirl accuracy (minimize_sensors mode) |
+| `target_amp_mape_max` | `float` | `0.08` | Target amplitude MAPE (minimize_sensors mode) |
+| `target_vel_r2_min` | `float` | `0.93` | Target velocity R2 (minimize_sensors mode) |
+| `observability_penalty_weight` | `float` | `0.1` | Weight for condition-number penalty in Bayesian refinement |
 
 ### SensorOptimizationResult
 
@@ -160,6 +166,7 @@ def optimize_sensor_placement(
 | `mesh` | `Mesh \| None` | required | Mesh with `.nodes` (n_nodes, 3) or None |
 | `modal_results` | `list` | required | List of ModalResult with `.mode_shapes` and `.frequencies` |
 | `config` | `SensorOptimizationConfig` | `SensorOptimizationConfig()` | Optimization configuration |
+| `ml_model_factory` | `callable \| None` | `None` | Optional callable `(positions) -> float` for ML-based objective in greedy selection |
 
 **Returns:** `SensorOptimizationResult`
 
@@ -293,6 +300,8 @@ def physics_consistency_check(
 | `num_sectors` | `int` | required | Number of blades/sectors |
 | `rpm` | `float` | `0.0` | Rotational speed (0 = skip whirl ordering check) |
 | `blade_radius` | `float` | `0.3` | Nominal blade tip radius in metres |
+| `epistemic_uncertainty` | `ndarray \| None` | `None` | Per-sample epistemic uncertainty values |
+| `epistemic_threshold` | `float` | `0.1` | Flag predictions with uncertainty above this threshold |
 
 **Constraints checked:**
 
@@ -303,6 +312,7 @@ def physics_consistency_check(
    RPM > 0).
 5. Wave velocity consistent with `v = 2*pi*f*R / ND` within 50% tolerance
    (when ND > 0).
+6. Epistemic uncertainty below threshold (when `epistemic_uncertainty` is provided).
 
 **Returns:** dict with keys:
 
@@ -406,6 +416,67 @@ calibrated = calibrate_confidence(model, X_val, y_val, method="temperature")
 preds = calibrated.predict(X_test)
 print(preds["confidence"][:5])  # Calibrated confidence scores
 ```
+
+### generate_model_selection_report
+
+Generate a structured model selection report from training results.
+
+```python
+def generate_model_selection_report(
+    training_report: dict,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `training_report` | `dict` | Report dict from `train_mode_id_model()` |
+
+**Returns:** dict with keys:
+- `"summary"` -- Human-readable summary of selected tier and metrics.
+- `"per_tier_metrics"` -- Dict mapping tier number to validation metrics.
+- `"gap_analysis"` -- List of score deltas between consecutive tiers.
+- `"selected_tier"` -- Tier number of the best model.
+
+### generate_explanation_card
+
+Generate a per-prediction explanation card.
+
+```python
+def generate_explanation_card(
+    model: Any,
+    X_single: np.ndarray,
+    predictions: dict[str, np.ndarray],
+    sample_idx: int = 0,
+    num_sectors: int = 36,
+    rpm: float = 0.0,
+    feature_names: Optional[list[str]] = None,
+    uncertainty: Optional[dict[str, np.ndarray]] = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | `ModeIDModel` | required | Trained model |
+| `X_single` | `ndarray` | required | `(1, n_features)` or `(n_features,)` single sample |
+| `predictions` | `dict` | required | Full predictions dict from `model.predict()` |
+| `sample_idx` | `int` | `0` | Index into predictions arrays |
+| `num_sectors` | `int` | `36` | Number of sectors for physics check |
+| `rpm` | `float` | `0.0` | RPM for physics check |
+| `feature_names` | `list[str] \| None` | `None` | Feature names for SHAP labeling |
+| `uncertainty` | `dict \| None` | `None` | Uncertainty dict from `predict_with_uncertainty()` |
+
+**Returns:** dict with keys:
+- `"predicted_values"` -- Predicted ND, whirl, amplitude, velocity.
+- `"confidence"` -- Confidence score.
+- `"physics_check"` -- Physics consistency results.
+- `"shap_values"` -- SHAP attributions (None if unavailable).
+- `"confidence_interval"` -- 95% CI from uncertainty.
+- `"anomaly_flag"` -- True if flagged by physics or uncertainty.
+- `"explanation_text"` -- Human-readable summary.
 
 ---
 

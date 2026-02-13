@@ -24,7 +24,13 @@ from turbomodal.ml.pipeline import (
     predict_mode_id,
     evaluate_model,
 )
-from turbomodal.ml.models import TIER_MODELS
+from turbomodal.ml.models import (
+    TIER_MODELS,
+    CompositeModel,
+    DeepEnsemble,
+    mc_dropout_predict,
+    predict_with_uncertainty,
+)
 
 __all__ = [
     "FeatureConfig",
@@ -38,4 +44,8 @@ __all__ = [
     "predict_mode_id",
     "evaluate_model",
     "TIER_MODELS",
+    "CompositeModel",
+    "DeepEnsemble",
+    "mc_dropout_predict",
+    "predict_with_uncertainty",
 ]

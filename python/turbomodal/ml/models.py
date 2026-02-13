@@ -312,33 +312,45 @@ def _get_nn_class(name: str) -> type:
 
 def _build_all_nn_classes() -> None:
     """Construct all nn.Module subclasses and store them in the cache."""
+    import torch
     import torch.nn as nn
     import torch.nn.functional as F  # noqa: N812
+    import math
 
     class ShallowNet(nn.Module):
         """Two-hidden-layer multi-task net (Tier 4)."""
 
-        def __init__(self, n_features: int, n_mode_classes: int, n_whirl_classes: int = 3):
+        def __init__(self, n_features: int, n_mode_classes: int, n_whirl_classes: int = 3,
+                     dropout: float = 0.1, heteroscedastic: bool = False):
             super().__init__()
+            self.heteroscedastic = heteroscedastic
             self.backbone = nn.Sequential(
                 nn.Linear(n_features, 128),
                 nn.ReLU(),
+                nn.Dropout(dropout),
                 nn.Linear(128, 64),
                 nn.ReLU(),
+                nn.Dropout(dropout),
             )
             self.mode_head = nn.Linear(64, n_mode_classes)
             self.whirl_head = nn.Linear(64, n_whirl_classes)
             self.amp_head = nn.Linear(64, 1)
             self.vel_head = nn.Linear(64, 1)
+            if heteroscedastic:
+                self.amp_logvar_head = nn.Linear(64, 1)
+                self.vel_logvar_head = nn.Linear(64, 1)
 
         def forward(self, x):
             h = self.backbone(x)
-            return (
+            outputs = (
                 self.mode_head(h),
                 self.whirl_head(h),
                 self.amp_head(h),
                 self.vel_head(h),
             )
+            if self.heteroscedastic:
+                outputs = outputs + (self.amp_logvar_head(h), self.vel_logvar_head(h))
+            return outputs
 
     class CNN1DNet(nn.Module):
         """1-D convolutional multi-task net (Tier 5)."""
@@ -349,32 +361,177 @@ def _build_all_nn_classes() -> None:
             n_freq_bins: int,
             n_mode_classes: int,
             n_whirl_classes: int = 3,
+            dropout: float = 0.1,
+            heteroscedastic: bool = False,
         ):
             super().__init__()
+            self.heteroscedastic = heteroscedastic
             self.features = nn.Sequential(
                 nn.Conv1d(n_channels, 32, kernel_size=7, padding=3),
                 nn.BatchNorm1d(32),
                 nn.ReLU(),
+                nn.Dropout(dropout),
                 nn.Conv1d(32, 64, kernel_size=5, padding=2),
                 nn.BatchNorm1d(64),
                 nn.ReLU(),
+                nn.Dropout(dropout),
                 nn.AdaptiveAvgPool1d(1),
             )
             self.mode_head = nn.Linear(64, n_mode_classes)
             self.whirl_head = nn.Linear(64, n_whirl_classes)
             self.amp_head = nn.Linear(64, 1)
             self.vel_head = nn.Linear(64, 1)
+            if heteroscedastic:
+                self.amp_logvar_head = nn.Linear(64, 1)
+                self.vel_logvar_head = nn.Linear(64, 1)
 
         def forward(self, x):
             # x: (batch, n_channels, n_freq_bins)
             h = self.features(x)          # (batch, 64, 1)
             h = h.squeeze(-1)             # (batch, 64)
-            return (
+            outputs = (
                 self.mode_head(h),
                 self.whirl_head(h),
                 self.amp_head(h),
                 self.vel_head(h),
             )
+            if self.heteroscedastic:
+                outputs = outputs + (self.amp_logvar_head(h), self.vel_logvar_head(h))
+            return outputs
+
+    class ResBlock1D(nn.Module):
+        """1-D residual block with two Conv1d layers."""
+
+        def __init__(self, channels: int, dropout: float = 0.1):
+            super().__init__()
+            self.block = nn.Sequential(
+                nn.Conv1d(channels, channels, kernel_size=3, padding=1),
+                nn.BatchNorm1d(channels),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Conv1d(channels, channels, kernel_size=3, padding=1),
+                nn.BatchNorm1d(channels),
+            )
+            self.relu = nn.ReLU()
+
+        def forward(self, x):
+            return self.relu(x + self.block(x))
+
+    class ResNet1DNet(nn.Module):
+        """1-D ResNet multi-task net (Tier 5 variant)."""
+
+        def __init__(
+            self,
+            n_channels: int,
+            n_freq_bins: int,
+            n_mode_classes: int,
+            n_whirl_classes: int = 3,
+            dropout: float = 0.1,
+            heteroscedastic: bool = False,
+        ):
+            super().__init__()
+            self.heteroscedastic = heteroscedastic
+            self.stem = nn.Sequential(
+                nn.Conv1d(n_channels, 64, kernel_size=7, padding=3),
+                nn.BatchNorm1d(64),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+            self.res_blocks = nn.Sequential(
+                ResBlock1D(64, dropout),
+                ResBlock1D(64, dropout),
+            )
+            self.pool = nn.AdaptiveAvgPool1d(1)
+            self.mode_head = nn.Linear(64, n_mode_classes)
+            self.whirl_head = nn.Linear(64, n_whirl_classes)
+            self.amp_head = nn.Linear(64, 1)
+            self.vel_head = nn.Linear(64, 1)
+            if heteroscedastic:
+                self.amp_logvar_head = nn.Linear(64, 1)
+                self.vel_logvar_head = nn.Linear(64, 1)
+
+        def forward(self, x):
+            h = self.stem(x)
+            h = self.res_blocks(h)
+            h = self.pool(h).squeeze(-1)
+            outputs = (
+                self.mode_head(h),
+                self.whirl_head(h),
+                self.amp_head(h),
+                self.vel_head(h),
+            )
+            if self.heteroscedastic:
+                outputs = outputs + (self.amp_logvar_head(h), self.vel_logvar_head(h))
+            return outputs
+
+    class PositionalEncoding(nn.Module):
+        """Sinusoidal positional encoding for Transformer."""
+
+        def __init__(self, d_model: int, max_len: int = 5000):
+            super().__init__()
+            pe = torch.zeros(max_len, d_model)
+            position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+            pe[:, 0::2] = torch.sin(position * div_term)
+            if d_model > 1:
+                pe[:, 1::2] = torch.cos(position * div_term[:d_model // 2])
+            self.register_buffer("pe", pe.unsqueeze(0))
+
+        def forward(self, x):
+            return x + self.pe[:, :x.size(1)]
+
+    class TransformerNet(nn.Module):
+        """Transformer-based multi-task net (Tier 6 variant)."""
+
+        def __init__(
+            self,
+            n_channels: int,
+            seq_len: int,
+            n_mode_classes: int,
+            n_whirl_classes: int = 3,
+            dropout: float = 0.1,
+            d_model: int = 64,
+            nhead: int = 4,
+            num_layers: int = 2,
+            heteroscedastic: bool = False,
+        ):
+            super().__init__()
+            self.heteroscedastic = heteroscedastic
+            self.input_proj = nn.Linear(n_channels, d_model)
+            self.pos_enc = PositionalEncoding(d_model, max_len=seq_len)
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model, nhead=nhead, dim_feedforward=128,
+                dropout=dropout, batch_first=True,
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            self.fc = nn.Linear(d_model, 64)
+            self.dropout = nn.Dropout(dropout)
+            self.mode_head = nn.Linear(64, n_mode_classes)
+            self.whirl_head = nn.Linear(64, n_whirl_classes)
+            self.amp_head = nn.Linear(64, 1)
+            self.vel_head = nn.Linear(64, 1)
+            if heteroscedastic:
+                self.amp_logvar_head = nn.Linear(64, 1)
+                self.vel_logvar_head = nn.Linear(64, 1)
+
+        def forward(self, x):
+            # x: (batch, n_channels, seq_len)
+            x = x.permute(0, 2, 1)  # (batch, seq_len, n_channels)
+            x = self.input_proj(x)  # (batch, seq_len, d_model)
+            x = self.pos_enc(x)
+            x = self.transformer(x)  # (batch, seq_len, d_model)
+            x = x.mean(dim=1)  # global average -> (batch, d_model)
+            h = F.relu(self.fc(x))
+            h = self.dropout(h)
+            outputs = (
+                self.mode_head(h),
+                self.whirl_head(h),
+                self.amp_head(h),
+                self.vel_head(h),
+            )
+            if self.heteroscedastic:
+                outputs = outputs + (self.amp_logvar_head(h), self.vel_logvar_head(h))
+            return outputs
 
     class TemporalNet(nn.Module):
         """Conv + BiLSTM multi-task net (Tier 6)."""
@@ -385,22 +542,31 @@ def _build_all_nn_classes() -> None:
             seq_len: int,
             n_mode_classes: int,
             n_whirl_classes: int = 3,
+            dropout: float = 0.1,
+            heteroscedastic: bool = False,
         ):
             super().__init__()
+            self.heteroscedastic = heteroscedastic
             self.conv = nn.Sequential(
                 nn.Conv1d(n_channels, 32, kernel_size=15, padding=7),
                 nn.BatchNorm1d(32),
                 nn.ReLU(),
+                nn.Dropout(dropout),
                 nn.Conv1d(32, 64, kernel_size=7, padding=3),
                 nn.BatchNorm1d(64),
                 nn.ReLU(),
+                nn.Dropout(dropout),
             )
             self.lstm = nn.LSTM(64, 32, batch_first=True, bidirectional=True)
             self.fc = nn.Linear(64, 64)  # 32*2 from bidirectional
+            self.dropout_layer = nn.Dropout(dropout)
             self.mode_head = nn.Linear(64, n_mode_classes)
             self.whirl_head = nn.Linear(64, n_whirl_classes)
             self.amp_head = nn.Linear(64, 1)
             self.vel_head = nn.Linear(64, 1)
+            if heteroscedastic:
+                self.amp_logvar_head = nn.Linear(64, 1)
+                self.vel_logvar_head = nn.Linear(64, 1)
 
         def forward(self, x):
             # x: (batch, n_channels, seq_len)
@@ -409,15 +575,23 @@ def _build_all_nn_classes() -> None:
             h, _ = self.lstm(h)            # (batch, seq_len, 64)
             h = h[:, -1, :]               # last timestep -> (batch, 64)
             h = F.relu(self.fc(h))         # (batch, 64)
-            return (
+            h = self.dropout_layer(h)
+            outputs = (
                 self.mode_head(h),
                 self.whirl_head(h),
                 self.amp_head(h),
                 self.vel_head(h),
             )
+            if self.heteroscedastic:
+                outputs = outputs + (self.amp_logvar_head(h), self.vel_logvar_head(h))
+            return outputs
 
     _NN_CLASS_CACHE["ShallowNet"] = ShallowNet
     _NN_CLASS_CACHE["CNN1DNet"] = CNN1DNet
+    _NN_CLASS_CACHE["ResBlock1D"] = ResBlock1D
+    _NN_CLASS_CACHE["ResNet1DNet"] = ResNet1DNet
+    _NN_CLASS_CACHE["PositionalEncoding"] = PositionalEncoding
+    _NN_CLASS_CACHE["TransformerNet"] = TransformerNet
     _NN_CLASS_CACHE["TemporalNet"] = TemporalNet
 
 
@@ -427,19 +601,23 @@ def _build_all_nn_classes() -> None:
 
 
 class LinearModeIDModel:
-    """Logistic Regression + Ridge for mode identification.
+    """Logistic Regression + Ridge/Lasso for mode identification.
 
     Uses four independent estimators:
 
     * ``_mode_clf`` -- ``LogisticRegression`` on encoded (ND, NC) labels.
     * ``_whirl_clf`` -- ``LogisticRegression`` on whirl direction.
-    * ``_amp_reg`` -- ``Ridge`` regression on amplitude.
-    * ``_vel_reg`` -- ``Ridge`` regression on wave velocity.
+    * ``_amp_reg`` -- ``Ridge`` or ``Lasso`` regression on amplitude.
+    * ``_vel_reg`` -- ``Ridge`` or ``Lasso`` regression on wave velocity.
 
-    Full interpretability via coefficient weights.
+    Parameters
+    ----------
+    variant : str
+        ``"ridge"`` (default) or ``"lasso"``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, variant: str = "ridge") -> None:
+        self._variant = variant
         self._mode_clf: Any = None
         self._whirl_clf: Any = None
         self._amp_reg: Any = None
@@ -467,7 +645,7 @@ class LinearModeIDModel:
         dict[str, float]
             Training metrics including accuracy and R-squared scores.
         """
-        from sklearn.linear_model import LogisticRegression, Ridge
+        from sklearn.linear_model import LogisticRegression, Ridge, Lasso
         from sklearn.metrics import (
             accuracy_score,
             f1_score,
@@ -480,10 +658,14 @@ class LinearModeIDModel:
         amplitude = np.asarray(y["amplitude"], dtype=np.float64)
         velocity = np.asarray(y["wave_velocity"], dtype=np.float64)
 
-        self._mode_clf = LogisticRegression(max_iter=1000, multi_class="ovr", C=1.0)
+        self._mode_clf = LogisticRegression(max_iter=1000, C=1.0)
         self._whirl_clf = LogisticRegression(max_iter=1000)
-        self._amp_reg = Ridge(alpha=1.0)
-        self._vel_reg = Ridge(alpha=1.0)
+        if self._variant == "lasso":
+            self._amp_reg = Lasso(alpha=1.0, max_iter=2000)
+            self._vel_reg = Lasso(alpha=1.0, max_iter=2000)
+        else:
+            self._amp_reg = Ridge(alpha=1.0)
+            self._vel_reg = Ridge(alpha=1.0)
 
         self._mode_clf.fit(X, mode_labels)
         self._whirl_clf.fit(X, whirl)
@@ -628,7 +810,7 @@ class TreeModeIDModel:
         self._whirl_clf: Any = None
         self._amp_reg: Any = None
         self._vel_reg: Any = None
-        self._use_xgb: bool = False
+        self._backend: str = "sklearn"  # "lightgbm", "xgboost", or "sklearn"
         self._is_fitted: bool = False
 
     # --------------------------------------------------------------------- #
@@ -673,27 +855,36 @@ class TreeModeIDModel:
             r2_score,
         )
 
-        # Try XGBoost first, fall back to sklearn RandomForest
+        # Three-level fallback: LightGBM -> XGBoost -> RandomForest
         try:
-            from xgboost import XGBClassifier, XGBRegressor
+            from lightgbm import LGBMClassifier, LGBMRegressor
 
-            self._mode_clf = XGBClassifier(
-                n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
-            )
-            self._whirl_clf = XGBClassifier(
-                n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
-            )
-            self._amp_reg = XGBRegressor(n_estimators=100)
-            self._vel_reg = XGBRegressor(n_estimators=100)
-            self._use_xgb = True
+            self._mode_clf = LGBMClassifier(n_estimators=100, verbose=-1)
+            self._whirl_clf = LGBMClassifier(n_estimators=100, verbose=-1)
+            self._amp_reg = LGBMRegressor(n_estimators=100, verbose=-1)
+            self._vel_reg = LGBMRegressor(n_estimators=100, verbose=-1)
+            self._backend = "lightgbm"
         except ImportError:
-            from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+            try:
+                from xgboost import XGBClassifier, XGBRegressor
 
-            self._mode_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)
-            self._whirl_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)
-            self._amp_reg = RandomForestRegressor(n_estimators=100, n_jobs=-1)
-            self._vel_reg = RandomForestRegressor(n_estimators=100, n_jobs=-1)
-            self._use_xgb = False
+                self._mode_clf = XGBClassifier(
+                    n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
+                )
+                self._whirl_clf = XGBClassifier(
+                    n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
+                )
+                self._amp_reg = XGBRegressor(n_estimators=100)
+                self._vel_reg = XGBRegressor(n_estimators=100)
+                self._backend = "xgboost"
+            except ImportError:
+                from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+                self._mode_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)
+                self._whirl_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)
+                self._amp_reg = RandomForestRegressor(n_estimators=100, n_jobs=-1)
+                self._vel_reg = RandomForestRegressor(n_estimators=100, n_jobs=-1)
+                self._backend = "sklearn"
 
         mode_labels = _encode_mode_labels(y["nodal_diameter"], y["nodal_circle"])
         whirl = np.asarray(y["whirl_direction"], dtype=np.int64)
@@ -792,7 +983,7 @@ class TreeModeIDModel:
                 "whirl_clf": self._whirl_clf,
                 "amp_reg": self._amp_reg,
                 "vel_reg": self._vel_reg,
-                "use_xgb": self._use_xgb,
+                "backend": self._backend,
             },
             path,
         )
@@ -811,7 +1002,7 @@ class TreeModeIDModel:
         self._whirl_clf = data["whirl_clf"]
         self._amp_reg = data["amp_reg"]
         self._vel_reg = data["vel_reg"]
-        self._use_xgb = data.get("use_xgb", False)
+        self._backend = data.get("backend", "xgboost" if data.get("use_xgb") else "sklearn")
         self._is_fitted = True
 
 
@@ -1222,17 +1413,20 @@ def _make_reshape_fn(n_channels: int, spatial_dim: int):
 
 
 class CNNModeIDModel:
-    """1-D CNN on spectral inputs for mode identification.
+    """1-D CNN / ResNet on spectral inputs for mode identification.
 
     Input features are reshaped from ``(batch, n_features)`` to
     ``(batch, n_channels, n_freq_bins)`` before being fed to the
     convolutional backbone.
 
-    Supports Grad-CAM via stored last-conv activations (accessed through
-    ``last_conv_activations`` after a forward pass).
+    Parameters
+    ----------
+    variant : str
+        ``"cnn"`` (default) or ``"resnet"``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, variant: str = "cnn") -> None:
+        self._variant = variant
         self._model: Any = None
         self._scaler: Any = None
         self._mode_label_encoder: dict[int, int] | None = None
@@ -1285,18 +1479,27 @@ class CNNModeIDModel:
         device = _get_device(config.device)
         self._device_str = str(device)
 
-        CNN1DNet = _get_nn_class("CNN1DNet")
-        self._model = CNN1DNet(
-            self._n_channels, self._n_freq_bins, self._n_mode_classes
-        ).to(device)
+        if self._variant == "resnet":
+            ResNet1DNet = _get_nn_class("ResNet1DNet")
+            self._model = ResNet1DNet(
+                self._n_channels, self._n_freq_bins, self._n_mode_classes
+            ).to(device)
+        else:
+            CNN1DNet = _get_nn_class("CNN1DNet")
+            self._model = CNN1DNet(
+                self._n_channels, self._n_freq_bins, self._n_mode_classes
+            ).to(device)
 
-        # Register Grad-CAM hook on the AdaptiveAvgPool1d layer (last in features)
+        # Register Grad-CAM hook
         self.last_conv_activations = None
 
         def _hook_fn(module, input, output):
             self.last_conv_activations = output.detach()
 
-        self._model.features[-1].register_forward_hook(_hook_fn)
+        if self._variant == "resnet":
+            self._model.pool.register_forward_hook(_hook_fn)
+        else:
+            self._model.features[-1].register_forward_hook(_hook_fn)
 
         reshape_fn = _make_reshape_fn(self._n_channels, self._n_freq_bins)
 
@@ -1434,18 +1637,19 @@ class CNNModeIDModel:
 
 
 class TemporalModeIDModel:
-    """Temporal CNN + bidirectional LSTM for mode identification.
+    """Temporal CNN + bidirectional LSTM / Transformer for mode identification.
 
     Input features are reshaped to ``(batch, n_channels, seq_len)`` and
-    processed by a 1-D convolutional front-end followed by a
-    bidirectional LSTM.  The last hidden state is passed to
-    task-specific heads.
+    processed by the selected backend.
 
-    Low interpretability (attention weights, SHAP).
-    Suitable for temporal sequence modeling of transient events.
+    Parameters
+    ----------
+    variant : str
+        ``"lstm"`` (default) or ``"transformer"``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, variant: str = "lstm") -> None:
+        self._variant = variant
         self._model: Any = None
         self._scaler: Any = None
         self._mode_label_encoder: dict[int, int] | None = None
@@ -1496,10 +1700,16 @@ class TemporalModeIDModel:
         device = _get_device(config.device)
         self._device_str = str(device)
 
-        TemporalNet = _get_nn_class("TemporalNet")
-        self._model = TemporalNet(
-            self._n_channels, self._seq_len, self._n_mode_classes
-        ).to(device)
+        if self._variant == "transformer":
+            TransformerNet = _get_nn_class("TransformerNet")
+            self._model = TransformerNet(
+                self._n_channels, self._seq_len, self._n_mode_classes
+            ).to(device)
+        else:
+            TemporalNet = _get_nn_class("TemporalNet")
+            self._model = TemporalNet(
+                self._n_channels, self._seq_len, self._n_mode_classes
+            ).to(device)
 
         reshape_fn = _make_reshape_fn(self._n_channels, self._seq_len)
 
@@ -1571,32 +1781,6 @@ class TemporalModeIDModel:
 
     # --------------------------------------------------------------------- #
 
-    def save(self, path: str) -> None:
-        """Persist model to disk.
-
-        Parameters
-        ----------
-        path : str
-        """
-        import torch
-
-        if not self._is_fitted:
-            raise RuntimeError("Cannot save an unfitted model.")
-        torch.save(
-            {
-                "state_dict": self._model.state_dict(),
-                "n_channels": self._n_channels,
-                "seq_len": self._seq_len,
-                "n_mode_classes": self._n_mode_classes,
-                "mode_label_encoder": self._mode_label_encoder,
-                "mode_label_decoder": self._mode_label_decoder,
-                "scaler_mean": self._scaler.mean_,
-                "scaler_scale": self._scaler.scale_,
-                "device": self._device_str,
-            },
-            path,
-        )
-
     def load(self, path: str) -> None:
         """Load model from disk.
 
@@ -1622,13 +1806,354 @@ class TemporalModeIDModel:
         self._scaler.n_features_in_ = self._n_channels * self._seq_len
 
         device = torch.device(self._device_str)
-        TemporalNet = _get_nn_class("TemporalNet")
-        self._model = TemporalNet(
-            self._n_channels, self._seq_len, self._n_mode_classes
-        ).to(device)
+        variant = data.get("variant", self._variant)
+        self._variant = variant
+        if variant == "transformer":
+            TransformerNet = _get_nn_class("TransformerNet")
+            self._model = TransformerNet(
+                self._n_channels, self._seq_len, self._n_mode_classes
+            ).to(device)
+        else:
+            TemporalNet = _get_nn_class("TemporalNet")
+            self._model = TemporalNet(
+                self._n_channels, self._seq_len, self._n_mode_classes
+            ).to(device)
         self._model.load_state_dict(data["state_dict"])
         self._model.eval()
         self._is_fitted = True
+
+    def save(self, path: str) -> None:
+        """Persist model to disk.
+
+        Parameters
+        ----------
+        path : str
+        """
+        import torch
+
+        if not self._is_fitted:
+            raise RuntimeError("Cannot save an unfitted model.")
+        torch.save(
+            {
+                "state_dict": self._model.state_dict(),
+                "n_channels": self._n_channels,
+                "seq_len": self._seq_len,
+                "n_mode_classes": self._n_mode_classes,
+                "mode_label_encoder": self._mode_label_encoder,
+                "mode_label_decoder": self._mode_label_decoder,
+                "scaler_mean": self._scaler.mean_,
+                "scaler_scale": self._scaler.scale_,
+                "device": self._device_str,
+                "variant": self._variant,
+            },
+            path,
+        )
+
+
+# ============================================================================
+# CompositeModel (C5: independent per-sub-task ladder)
+# ============================================================================
+
+
+class CompositeModel:
+    """Wraps 4 independent sub-task models into a single predict interface.
+
+    Used when the complexity ladder runs independently per sub-task,
+    potentially selecting different tiers for each.
+    """
+
+    def __init__(
+        self,
+        mode_model: Any,
+        whirl_model: Any,
+        amp_model: Any,
+        vel_model: Any,
+        subtask_tiers: dict[str, int] | None = None,
+    ) -> None:
+        self._mode_model = mode_model
+        self._whirl_model = whirl_model
+        self._amp_model = amp_model
+        self._vel_model = vel_model
+        self.subtask_tiers = subtask_tiers or {}
+        self._is_fitted = True
+
+    def predict(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """Merge predictions from each sub-task model."""
+        mode_preds = self._mode_model.predict(X)
+        whirl_preds = self._whirl_model.predict(X)
+        amp_preds = self._amp_model.predict(X)
+        vel_preds = self._vel_model.predict(X)
+        return {
+            "nodal_diameter": mode_preds["nodal_diameter"],
+            "nodal_circle": mode_preds["nodal_circle"],
+            "frequency": mode_preds.get("frequency", np.zeros(X.shape[0])),
+            "whirl_direction": whirl_preds["whirl_direction"],
+            "amplitude": amp_preds["amplitude"],
+            "wave_velocity": vel_preds["wave_velocity"],
+            "confidence": mode_preds.get("confidence", np.ones(X.shape[0])),
+        }
+
+    def save(self, path: str) -> None:
+        """Save all sub-task models via joblib."""
+        import joblib
+        joblib.dump({
+            "mode_model": self._mode_model,
+            "whirl_model": self._whirl_model,
+            "amp_model": self._amp_model,
+            "vel_model": self._vel_model,
+            "subtask_tiers": self.subtask_tiers,
+        }, path)
+
+    def load(self, path: str) -> None:
+        """Load sub-task models from disk."""
+        import joblib
+        data = joblib.load(path)
+        self._mode_model = data["mode_model"]
+        self._whirl_model = data["whirl_model"]
+        self._amp_model = data["amp_model"]
+        self._vel_model = data["vel_model"]
+        self.subtask_tiers = data.get("subtask_tiers", {})
+        self._is_fitted = True
+
+    def train(self, X: np.ndarray, y: dict[str, np.ndarray],
+              config: Any) -> dict[str, float]:
+        """No-op: sub-task models are already trained."""
+        return {}
+
+
+# ============================================================================
+# MC Dropout (D4)
+# ============================================================================
+
+
+def mc_dropout_predict(
+    model: Any,
+    X: np.ndarray,
+    n_forward_passes: int = 30,
+) -> dict[str, np.ndarray]:
+    """Run MC Dropout inference for epistemic uncertainty estimation.
+
+    Enables dropout at inference time, runs *n_forward_passes* stochastic
+    forward passes, and returns mean predictions plus epistemic variance.
+
+    Parameters
+    ----------
+    model : PyTorch-based model (Tier 4-6).
+    X : (N, n_features) input features.
+    n_forward_passes : number of stochastic forward passes.
+
+    Returns
+    -------
+    dict with standard prediction keys plus ``amplitude_epistemic_var``,
+    ``velocity_epistemic_var``, ``mode_entropy``.
+    """
+    import torch
+
+    nn_model = model._model
+    device = torch.device(model._device_str)
+    X_scaled = model._scaler.transform(X).astype(np.float32)
+    X_t = torch.as_tensor(X_scaled, dtype=torch.float32).to(device)
+
+    # Reshape if needed (CNN/Temporal models)
+    reshape_fn = None
+    if hasattr(model, "_n_channels") and hasattr(model, "_n_freq_bins"):
+        reshape_fn = _make_reshape_fn(model._n_channels, model._n_freq_bins)
+    elif hasattr(model, "_n_channels") and hasattr(model, "_seq_len"):
+        reshape_fn = _make_reshape_fn(model._n_channels, model._seq_len)
+
+    if reshape_fn is not None:
+        X_t = reshape_fn(X_t)
+
+    # Enable dropout
+    nn_model.train()
+
+    all_mode_probs = []
+    all_amp = []
+    all_vel = []
+
+    with torch.no_grad():
+        for _ in range(n_forward_passes):
+            outputs = nn_model(X_t)
+            out_mode, out_whirl, out_amp, out_vel = outputs[:4]
+            mode_proba = torch.softmax(out_mode, dim=1).cpu().numpy()
+            all_mode_probs.append(mode_proba)
+            all_amp.append(out_amp.squeeze(-1).cpu().numpy())
+            all_vel.append(out_vel.squeeze(-1).cpu().numpy())
+
+    nn_model.eval()
+
+    all_mode_probs = np.array(all_mode_probs)  # (T, N, C)
+    all_amp = np.array(all_amp)  # (T, N)
+    all_vel = np.array(all_vel)  # (T, N)
+
+    mean_mode_probs = all_mode_probs.mean(axis=0)
+    mode_idx = np.argmax(mean_mode_probs, axis=1)
+    confidence = np.max(mean_mode_probs, axis=1)
+
+    # Mode entropy
+    mode_entropy = -np.sum(
+        mean_mode_probs * np.log(np.clip(mean_mode_probs, 1e-12, 1.0)), axis=1
+    )
+
+    # Decode mode labels
+    mode_raw = np.array(
+        [model._mode_label_decoder[int(i)] for i in mode_idx], dtype=np.int64
+    )
+    nd, nc = _decode_mode_labels(mode_raw)
+
+    return {
+        "nodal_diameter": nd,
+        "nodal_circle": nc,
+        "frequency": np.zeros(X.shape[0], dtype=np.float64),
+        "whirl_direction": np.zeros(X.shape[0], dtype=np.int64),  # averaged
+        "amplitude": all_amp.mean(axis=0),
+        "wave_velocity": all_vel.mean(axis=0),
+        "confidence": confidence,
+        "amplitude_epistemic_var": all_amp.var(axis=0),
+        "velocity_epistemic_var": all_vel.var(axis=0),
+        "mode_entropy": mode_entropy,
+    }
+
+
+# ============================================================================
+# Deep Ensembles (D5)
+# ============================================================================
+
+
+class DeepEnsemble:
+    """Ensemble of independently trained models for uncertainty estimation.
+
+    Parameters
+    ----------
+    n_members : int
+        Number of ensemble members (default 5).
+    tier : int
+        Complexity tier to use for each member (4, 5, or 6).
+    """
+
+    def __init__(self, n_members: int = 5, tier: int = 4) -> None:
+        self._n_members = n_members
+        self._tier = tier
+        self._members: list[Any] = []
+        self._is_fitted = False
+
+    def train(
+        self,
+        X: np.ndarray,
+        y: dict[str, np.ndarray],
+        config: Any,
+    ) -> dict[str, float]:
+        """Train N independent models with different random seeds."""
+        self._members = []
+        all_metrics: list[dict[str, float]] = []
+        for i in range(self._n_members):
+            np.random.seed(i * 1000)
+            member = TIER_MODELS[self._tier]()
+            metrics = member.train(X, y, config)
+            self._members.append(member)
+            all_metrics.append(metrics)
+        self._is_fitted = True
+        # Average training metrics
+        if all_metrics:
+            return {k: float(np.mean([m.get(k, 0) for m in all_metrics]))
+                    for k in all_metrics[0]}
+        return {}
+
+    def predict(self, X: np.ndarray) -> dict[str, np.ndarray]:
+        """Predict with ensemble: mean + variance across members."""
+        if not self._is_fitted:
+            raise RuntimeError("Ensemble not trained.")
+        all_preds = [m.predict(X) for m in self._members]
+        # Majority vote for classification
+        nd_stack = np.array([p["nodal_diameter"] for p in all_preds])
+        nc_stack = np.array([p["nodal_circle"] for p in all_preds])
+        whirl_stack = np.array([p["whirl_direction"] for p in all_preds])
+        amp_stack = np.array([p["amplitude"] for p in all_preds])
+        vel_stack = np.array([p["wave_velocity"] for p in all_preds])
+
+        from scipy.stats import mode as _scipy_mode
+        nd_vote = _scipy_mode(nd_stack, axis=0, keepdims=False).mode
+        nc_vote = _scipy_mode(nc_stack, axis=0, keepdims=False).mode
+        whirl_vote = _scipy_mode(whirl_stack, axis=0, keepdims=False).mode
+
+        return {
+            "nodal_diameter": nd_vote.astype(np.int64),
+            "nodal_circle": nc_vote.astype(np.int64),
+            "frequency": np.zeros(X.shape[0], dtype=np.float64),
+            "whirl_direction": whirl_vote.astype(np.int64),
+            "amplitude": amp_stack.mean(axis=0),
+            "wave_velocity": vel_stack.mean(axis=0),
+            "confidence": np.array([p["confidence"] for p in all_preds]).mean(axis=0),
+            "amplitude_epistemic_var": amp_stack.var(axis=0),
+            "velocity_epistemic_var": vel_stack.var(axis=0),
+        }
+
+    def save(self, path: str) -> None:
+        """Save ensemble via joblib."""
+        import joblib
+        joblib.dump({"members": self._members, "tier": self._tier,
+                      "n_members": self._n_members}, path)
+
+    def load(self, path: str) -> None:
+        """Load ensemble from disk."""
+        import joblib
+        data = joblib.load(path)
+        self._members = data["members"]
+        self._tier = data["tier"]
+        self._n_members = data["n_members"]
+        self._is_fitted = True
+
+
+# ============================================================================
+# Uncertainty decomposition (D7)
+# ============================================================================
+
+
+def predict_with_uncertainty(
+    model: Any,
+    X: np.ndarray,
+    method: str = "mc_dropout",
+    n_forward_passes: int = 30,
+) -> dict[str, np.ndarray]:
+    """Predict with uncertainty decomposition.
+
+    Parameters
+    ----------
+    model : trained model (PyTorch-based for mc_dropout, DeepEnsemble for deep_ensemble).
+    X : (N, n_features) input features.
+    method : ``"mc_dropout"`` or ``"deep_ensemble"``.
+    n_forward_passes : number of forward passes (mc_dropout only).
+
+    Returns
+    -------
+    dict with standard prediction keys plus aleatoric/epistemic variance keys.
+    """
+    if method == "mc_dropout":
+        preds = mc_dropout_predict(model, X, n_forward_passes)
+    elif method == "deep_ensemble":
+        if isinstance(model, DeepEnsemble):
+            preds = model.predict(X)
+        else:
+            raise TypeError("deep_ensemble method requires a DeepEnsemble model.")
+    else:
+        raise ValueError(f"Unknown method '{method}'. Use 'mc_dropout' or 'deep_ensemble'.")
+
+    # If heteroscedastic outputs available, decompose
+    result = dict(preds)
+    amp_epi = result.get("amplitude_epistemic_var", np.zeros(X.shape[0]))
+    vel_epi = result.get("velocity_epistemic_var", np.zeros(X.shape[0]))
+
+    # Aleatoric from heteroscedastic heads (if available, zeros otherwise)
+    amp_ale = result.pop("amplitude_aleatoric_var", np.zeros(X.shape[0]))
+    vel_ale = result.pop("velocity_aleatoric_var", np.zeros(X.shape[0]))
+
+    result["amplitude_aleatoric_var"] = amp_ale
+    result["amplitude_epistemic_var"] = amp_epi
+    result["amplitude_total_var"] = amp_ale + amp_epi
+    result["velocity_aleatoric_var"] = vel_ale
+    result["velocity_epistemic_var"] = vel_epi
+    result["velocity_total_var"] = vel_ale + vel_epi
+    return result
 
 
 # ============================================================================

@@ -287,6 +287,8 @@ def physics_consistency_check(
     num_sectors: int,
     rpm: float = 0.0,
     blade_radius: float = 0.3,
+    epistemic_uncertainty: Optional[np.ndarray] = None,
+    epistemic_threshold: float = 0.1,
 ) -> dict[str, np.ndarray]:
     """Check predictions against known physical constraints.
 
@@ -407,6 +409,21 @@ def physics_consistency_check(
                         f"expected {v_expected:.2f} m/s "
                         f"(relative error {relative_error:.1%} > {tolerance:.0%})"
                     )
+
+    # ------------------------------------------------------------------
+    # Check 6: Epistemic uncertainty threshold (D12)
+    # ------------------------------------------------------------------
+    if epistemic_uncertainty is not None:
+        epistemic_uncertainty = np.asarray(epistemic_uncertainty, dtype=np.float64)
+        for i in range(min(n, len(epistemic_uncertainty))):
+            total_checks[i] += 1
+            if epistemic_uncertainty[i] <= epistemic_threshold:
+                checks_passed[i] += 1
+            else:
+                violations[i].append(
+                    f"High epistemic uncertainty: {epistemic_uncertainty[i]:.4f} "
+                    f"> threshold {epistemic_threshold:.4f}"
+                )
 
     consistency_score = np.where(total_checks > 0,
                                   checks_passed / total_checks, 1.0)
@@ -596,3 +613,152 @@ def calibrate_confidence(
         f"Unknown calibration method '{method}'. "
         "Choose from: 'platt', 'isotonic', 'temperature', 'conformal'."
     )
+
+
+# ---------------------------------------------------------------------------
+# Model selection report (D9)
+# ---------------------------------------------------------------------------
+
+
+def generate_model_selection_report(
+    training_report: dict,
+) -> dict[str, Any]:
+    """Generate a structured model selection report from training results.
+
+    Parameters
+    ----------
+    training_report : dict from ``train_mode_id_model()``.
+
+    Returns
+    -------
+    dict with keys: ``summary``, ``per_tier_metrics``, ``gap_analysis``,
+    ``selected_tier``.
+    """
+    tier_history = training_report.get("tier_history", [])
+    best_tier = training_report.get("best_tier", 0)
+
+    per_tier_metrics = {}
+    for entry in tier_history:
+        per_tier_metrics[entry["tier"]] = entry["val_metrics"]
+
+    # Gap analysis: score delta between consecutive tiers
+    gap_analysis: list[dict] = []
+    for i in range(1, len(tier_history)):
+        delta = tier_history[i]["composite_score"] - tier_history[i - 1]["composite_score"]
+        gap_analysis.append({
+            "from_tier": tier_history[i - 1]["tier"],
+            "to_tier": tier_history[i]["tier"],
+            "score_delta": delta,
+        })
+
+    best_metrics = training_report.get("val_metrics", {})
+    summary = (
+        f"Selected Tier {best_tier} with composite score "
+        f"{best_metrics.get('mode_detection_f1', 0):.3f} F1, "
+        f"{best_metrics.get('whirl_accuracy', 0):.3f} whirl acc, "
+        f"{best_metrics.get('amplitude_mape', 1):.3f} MAPE, "
+        f"{best_metrics.get('velocity_r2', 0):.3f} vel R2."
+    )
+
+    return {
+        "summary": summary,
+        "per_tier_metrics": per_tier_metrics,
+        "gap_analysis": gap_analysis,
+        "selected_tier": best_tier,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-prediction explanation card (D10)
+# ---------------------------------------------------------------------------
+
+
+def generate_explanation_card(
+    model: Any,
+    X_single: np.ndarray,
+    predictions: dict[str, np.ndarray],
+    sample_idx: int = 0,
+    num_sectors: int = 36,
+    rpm: float = 0.0,
+    feature_names: Optional[list[str]] = None,
+    uncertainty: Optional[dict[str, np.ndarray]] = None,
+) -> dict[str, Any]:
+    """Generate a per-prediction explanation card.
+
+    Parameters
+    ----------
+    model : trained model
+    X_single : (1, n_features) or (n_features,) single sample
+    predictions : full predictions dict from model.predict()
+    sample_idx : index into predictions arrays
+    num_sectors : number of sectors
+    rpm : RPM for physics check
+    feature_names : optional feature names for SHAP
+    uncertainty : optional uncertainty dict from predict_with_uncertainty()
+
+    Returns
+    -------
+    dict with keys: ``predicted_values``, ``confidence``, ``physics_check``,
+    ``shap_values``, ``confidence_interval``, ``anomaly_flag``,
+    ``explanation_text``.
+    """
+    X_single = np.atleast_2d(X_single)
+
+    # Predicted values
+    predicted_values = {
+        k: float(predictions[k][sample_idx])
+        for k in ("nodal_diameter", "whirl_direction", "amplitude", "wave_velocity")
+        if k in predictions
+    }
+
+    confidence = float(predictions.get("confidence", np.ones(1))[sample_idx])
+
+    # Physics check
+    single_preds = {k: v[sample_idx:sample_idx + 1] for k, v in predictions.items()
+                    if isinstance(v, np.ndarray) and v.ndim >= 1}
+    physics = physics_consistency_check(single_preds, num_sectors, rpm)
+    anomaly_flag = bool(physics["anomaly_flag"][0]) if len(physics["anomaly_flag"]) > 0 else False
+
+    # SHAP values (best-effort)
+    shap_vals = None
+    try:
+        sv = compute_shap_values(model, X_single, feature_names)
+        shap_vals = sv[0] if sv.ndim > 1 else sv
+    except Exception:
+        pass
+
+    # Confidence interval from uncertainty
+    confidence_interval = None
+    if uncertainty is not None:
+        amp_var = uncertainty.get("amplitude_total_var", np.zeros(1))
+        vel_var = uncertainty.get("velocity_total_var", np.zeros(1))
+        amp_std = np.sqrt(amp_var[sample_idx]) if sample_idx < len(amp_var) else 0
+        vel_std = np.sqrt(vel_var[sample_idx]) if sample_idx < len(vel_var) else 0
+        confidence_interval = {
+            "amplitude_pm": float(1.96 * amp_std),
+            "velocity_pm": float(1.96 * vel_std),
+        }
+
+    # Check epistemic anomaly
+    if uncertainty is not None:
+        epi = uncertainty.get("amplitude_epistemic_var", None)
+        if epi is not None and sample_idx < len(epi) and epi[sample_idx] > 0.1:
+            anomaly_flag = True
+
+    explanation_text = (
+        f"Predicted ND={predicted_values.get('nodal_diameter', '?')}, "
+        f"whirl={'FW' if predicted_values.get('whirl_direction', 0) > 0 else 'BW' if predicted_values.get('whirl_direction', 0) < 0 else 'standing'}, "
+        f"amp={predicted_values.get('amplitude', 0):.4f}, "
+        f"vel={predicted_values.get('wave_velocity', 0):.2f} m/s "
+        f"(confidence={confidence:.2f})."
+    )
+
+    return {
+        "predicted_values": predicted_values,
+        "confidence": confidence,
+        "physics_check": physics,
+        "shap_values": shap_vals,
+        "confidence_interval": confidence_interval,
+        "anomaly_flag": anomaly_flag,
+        "explanation_text": explanation_text,
+    }

@@ -73,7 +73,8 @@ The four subsystems are:
                   |                                |
                   |  extract_features()            |
                   |    (STFT, mel, order tracking, |
-                  |     TWD, cross-spectral)       |
+                  |     TWD, cross-spectral,       |
+                  |     physics-informed)          |
                   |          |                     |
                   |          v                     |
                   |  build_feature_matrix()        |
@@ -81,10 +82,13 @@ The four subsystems are:
                   |          v                     |
                   |  train_mode_id_model()         |
                   |    Complexity ladder           |
-                  |    Tiers 1-6                   |
+                  |    Tiers 1-6 + variants        |
+                  |    Optuna HPO / GroupKFold CV  |
                   |          |                     |
                   |          v                     |
                   |  ModeIDModel.predict()         |
+                  |  predict_with_uncertainty()    |
+                  |  CompositeModel                |
                   |    -> nodal_diameter           |
                   |    -> whirl_direction          |
                   |    -> amplitude                |
@@ -100,10 +104,15 @@ The four subsystems are:
                   |  Explainability (Python)      |
                   |                               |
                   |  optimize_sensor_placement()  |
+                  |    (minimize_sensors mode)    |
                   |  compute_shap_values()        |
                   |  compute_grad_cam()           |
                   |  physics_consistency_check()  |
                   |  calibrate_confidence()       |
+                  |  generate_model_selection_    |
+                  |      report()                 |
+                  |  generate_explanation_card()  |
+                  |  plot_sensor_contribution()   |
                   +-------------------------------+
 ```
 
@@ -261,13 +270,19 @@ approaches fail to meet performance targets. This design provides:
 | Tier | Class                   | Architecture                            | Interpretability |
 |------|-------------------------|-----------------------------------------|------------------|
 | 1    | `LinearModeIDModel`     | LogisticRegression + Ridge              | Full             |
-| 2    | `TreeModeIDModel`       | XGBoost (RandomForest fallback)         | High             |
+| 2    | `TreeModeIDModel`       | LightGBM / XGBoost / RandomForest       | High             |
 | 3    | `SVMModeIDModel`        | SVC + SVR with RBF kernel, StandardScaler | Medium         |
 | 4    | `ShallowNNModeIDModel`  | 2-hidden-layer MLP (128 -> 64), PyTorch | Medium           |
 | 5    | `CNNModeIDModel`        | 1-D CNN (Conv-BN-ReLU x2 + pool), PyTorch | Low            |
 | 6    | `TemporalModeIDModel`   | Conv front-end + BiLSTM, PyTorch        | Low              |
 
 All tiers implement the `ModeIDModel` protocol, which defines four methods:
+
+Tiers 1, 5, and 6 support architectural variants:
+
+- **Tier 1**: `LinearModeIDModel(variant="lasso")` -- uses Lasso (L1) instead of Ridge (L2).
+- **Tier 5**: `CNNModeIDModel(variant="resnet")` -- 1-D ResNet with residual blocks.
+- **Tier 6**: `TemporalModeIDModel(variant="transformer")` -- Transformer encoder with sinusoidal positional encoding.
 
 ```python
 class ModeIDModel(Protocol):
@@ -295,6 +310,10 @@ four feature types:
 An optional cross-spectral density overlay (`include_cross_spectra=True`)
 appends coherence-thresholded CSD magnitudes for all sensor pairs.
 
+A fifth feature type, `"physics"`, computes domain-specific features
+including frequency ratios relative to blade-alone frequencies, centrifugal
+stiffening corrections, and temperature-dependent Young's modulus scaling.
+
 The `extract_features()` function takes `(n_sensors, n_samples)` signals and
 returns a 1-D feature vector. The `build_feature_matrix()` function
 automates the full loop: load HDF5 dataset, generate signals per condition,
@@ -316,6 +335,20 @@ complexity ladder:
 5. **MLflow logging** -- all metrics, parameters, and timing are logged
    automatically. The `_MLflowProxy` class silently no-ops when mlflow is
    not installed.
+
+Additional pipeline features:
+
+- **Optuna HPO** -- when `use_optuna=True`, each tier's hyperparameters are
+  tuned via Optuna TPE sampling with cross-validated scoring before training.
+- **GroupKFold CV** -- cross-validation uses `GroupKFold` to prevent condition
+  leakage across folds.
+- **CompositeModel** -- when `independent_subtasks=True`, each of the four
+  sub-tasks runs its own complexity ladder, potentially selecting different
+  tiers.
+- **OOD evaluation** -- when `ood_fraction > 0`, extreme operating conditions
+  are held out as an out-of-distribution test set.
+- **ECE and latency** -- `evaluate_model` reports Expected Calibration Error
+  and per-sample inference latency alongside the six standard metrics.
 
 ### Performance Targets
 
@@ -377,6 +410,20 @@ The `SensorOptimizationResult` dataclass provides `sensor_positions`,
 `num_sensors`, `objective_value`, `observability_matrix`,
 `condition_number`, `robustness_score`, and `dropout_degradation`.
 
+**Minimize-sensors mode**: when `config.mode="minimize_sensors"`, the
+optimizer uses binary search over the sensor count to find the minimum
+number of sensors that achieve acceptable conditioning, rather than
+maximizing performance with a fixed count.
+
+**ML model factory**: when an `ml_model_factory` callable is provided,
+greedy selection uses it as the objective once enough sensors are selected,
+allowing the optimizer to directly optimize ML prediction quality.
+
+**Observability penalty**: during Bayesian refinement, the objective
+includes a penalty term `−weight * log(condition_number)` controlled by
+`config.observability_penalty_weight`, discouraging ill-conditioned
+configurations.
+
 ### Observability Analysis
 
 `compute_observability()` computes the condition number and singular values
@@ -416,6 +463,44 @@ applies five rule-based constraints:
 
 Returns `is_consistent`, `violations`, `consistency_score`, and
 `anomaly_flag` arrays.
+
+A sixth check is available when epistemic uncertainty is provided:
+
+6. **Epistemic uncertainty threshold** -- when `epistemic_uncertainty` is
+   passed, predictions with uncertainty exceeding `epistemic_threshold`
+   (default 0.1) are flagged as violations.
+
+### Uncertainty Quantification
+
+Three mechanisms provide prediction uncertainty:
+
+- **MC Dropout** (`mc_dropout_predict`): stochastic forward passes with
+  dropout enabled at inference time (Tiers 4-6).
+- **Deep Ensembles** (`DeepEnsemble`): independently trained model ensemble
+  with majority-vote classification and mean regression.
+- **Heteroscedastic output heads**: optional log-variance heads on all
+  PyTorch architectures for per-sample aleatoric uncertainty.
+
+The `predict_with_uncertainty(model, X, method)` function returns standard
+predictions plus aleatoric/epistemic/total variance decomposition.
+
+### Model Selection Report and Explanation Cards
+
+`generate_model_selection_report(training_report)` produces a structured
+summary of the complexity ladder results, including per-tier metrics, score
+gap analysis, and the rationale for tier selection.
+
+`generate_explanation_card(model, X_single, predictions, ...)` generates a
+per-prediction card with SHAP attributions, physics consistency results,
+confidence intervals from uncertainty, and a human-readable summary.
+
+### Visualization Extensions
+
+- `plot_campbell` and `plot_zzenf` accept `confidence_bands` (dict with
+  `upper`/`lower` keys) and `crossing_markers=True` to overlay uncertainty
+  bands and engine-order crossing annotations.
+- `plot_sensor_contribution(shap_values, sensor_names, mode_names)` renders
+  a heatmap of per-sensor SHAP contributions across mode families.
 
 ### Confidence Calibration
 

@@ -468,3 +468,243 @@ class TestTierModels:
             assert hasattr(model, "predict")
             assert hasattr(model, "save")
             assert hasattr(model, "load")
+
+
+# ---------------------------------------------------------------------------
+# C1: Physics-informed features
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFeaturesPhysics:
+    """extract_features with feature_type='physics'."""
+
+    def test_shape(self):
+        from turbomodal.ml.features import extract_features, FeatureConfig
+
+        rng = np.random.default_rng(10)
+        signals = rng.standard_normal((4, 4096))
+        config = FeatureConfig(
+            fft_size=256, feature_type="physics", rpm=6000.0,
+            blade_alone_frequencies=np.array([500.0, 1000.0]),
+            centrifugal_alpha=1e-8,
+            temperature=500.0,
+        )
+        feat = extract_features(signals, 10000.0, config)
+        assert feat.ndim == 1
+        # base spectrogram + 2 freq ratios + 1 centrifugal + 1 temperature
+        n_freq_bins = 256 // 2 + 1
+        expected_min = 4 * n_freq_bins + 2 + 1 + 1
+        assert len(feat) == expected_min
+
+    def test_missing_rpm_raises(self):
+        from turbomodal.ml.features import extract_features, FeatureConfig
+
+        config = FeatureConfig(feature_type="physics", rpm=0.0)
+        with pytest.raises(ValueError, match="rpm"):
+            extract_features(np.ones((2, 1000)), 10000.0, config)
+
+
+# ---------------------------------------------------------------------------
+# C2a: Lasso variant
+# ---------------------------------------------------------------------------
+
+
+class TestLassoVariant:
+    """LinearModeIDModel with variant='lasso'."""
+
+    def test_train_predict(self):
+        from turbomodal.ml.models import LinearModeIDModel
+        from turbomodal.ml.pipeline import TrainingConfig
+
+        X, y = _make_synthetic_dataset()
+        model = LinearModeIDModel(variant="lasso")
+        metrics = model.train(X, y, TrainingConfig())
+        assert "mode_f1" in metrics
+        preds = model.predict(X)
+        assert preds["amplitude"].shape == (X.shape[0],)
+
+
+# ---------------------------------------------------------------------------
+# C2c: ResNet variant
+# ---------------------------------------------------------------------------
+
+
+class TestResNetVariant:
+    """CNNModeIDModel with variant='resnet' instantiation."""
+
+    def test_instantiation(self):
+        from turbomodal.ml.models import CNNModeIDModel
+        model = CNNModeIDModel(variant="resnet")
+        assert model._variant == "resnet"
+
+
+# ---------------------------------------------------------------------------
+# C2d: Transformer variant
+# ---------------------------------------------------------------------------
+
+
+class TestTransformerVariant:
+    """TemporalModeIDModel with variant='transformer' instantiation."""
+
+    def test_instantiation(self):
+        from turbomodal.ml.models import TemporalModeIDModel
+        model = TemporalModeIDModel(variant="transformer")
+        assert model._variant == "transformer"
+
+
+# ---------------------------------------------------------------------------
+# C4: Cross-validation
+# ---------------------------------------------------------------------------
+
+
+class TestCrossValidate:
+    """_cross_validate returns correct number of fold scores."""
+
+    def test_fold_count(self):
+        from turbomodal.ml.pipeline import _cross_validate, TrainingConfig
+
+        X, y = _make_synthetic_dataset(n_samples=100)
+        config = TrainingConfig(cv_folds=3, epochs=2, max_tier=1)
+        scores = _cross_validate(1, X, y, config)
+        assert len(scores) == 3
+        assert all(isinstance(s, float) for s in scores)
+
+
+# ---------------------------------------------------------------------------
+# C5: CompositeModel
+# ---------------------------------------------------------------------------
+
+
+class TestCompositeModel:
+    """CompositeModel merges predictions from 4 sub-task models."""
+
+    def test_predict_merges(self):
+        from turbomodal.ml.models import LinearModeIDModel, CompositeModel
+        from turbomodal.ml.pipeline import TrainingConfig
+
+        X, y = _make_synthetic_dataset()
+        cfg = TrainingConfig()
+        models = []
+        for _ in range(4):
+            m = LinearModeIDModel()
+            m.train(X, y, cfg)
+            models.append(m)
+
+        comp = CompositeModel(*models, subtask_tiers={"mode": 1, "whirl": 1, "amp": 1, "vel": 1})
+        preds = comp.predict(X)
+        assert "nodal_diameter" in preds
+        assert "amplitude" in preds
+        assert preds["amplitude"].shape == (X.shape[0],)
+
+
+# ---------------------------------------------------------------------------
+# C7: ECE metric
+# ---------------------------------------------------------------------------
+
+
+class TestECEMetric:
+    """_compute_ece correctness checks."""
+
+    def test_perfect_calibration(self):
+        from turbomodal.ml.pipeline import _compute_ece
+
+        # Perfect calibration: confidence matches accuracy
+        confidences = np.array([0.9, 0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1])
+        correct = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=float)
+        ece = _compute_ece(confidences, correct)
+        assert ece < 0.15  # approximately calibrated
+
+    def test_miscalibrated(self):
+        from turbomodal.ml.pipeline import _compute_ece
+
+        # All high confidence but all wrong
+        confidences = np.ones(10) * 0.95
+        correct = np.zeros(10)
+        ece = _compute_ece(confidences, correct)
+        assert ece > 0.5
+
+
+# ---------------------------------------------------------------------------
+# C8: Inference latency
+# ---------------------------------------------------------------------------
+
+
+class TestInferenceLatency:
+    """evaluate_model includes latency metrics."""
+
+    def test_latency_keys(self):
+        from turbomodal.ml.models import LinearModeIDModel
+        from turbomodal.ml.pipeline import TrainingConfig, evaluate_model
+
+        X, y = _make_synthetic_dataset(n_samples=50)
+        model = LinearModeIDModel()
+        model.train(X, y, TrainingConfig())
+        metrics = evaluate_model(model, X, y)
+        assert "inference_latency_mean_ms" in metrics
+        assert "inference_latency_p95_ms" in metrics
+        assert metrics["inference_latency_mean_ms"] > 0
+        assert metrics["inference_latency_p95_ms"] > 0
+
+
+# ---------------------------------------------------------------------------
+# D4: MC Dropout
+# ---------------------------------------------------------------------------
+
+
+class TestMCDropout:
+    """mc_dropout_predict returns variance keys."""
+
+    def test_variance_keys(self):
+        pytest.importorskip("torch")
+        from turbomodal.ml.models import ShallowNNModeIDModel, mc_dropout_predict
+        from turbomodal.ml.pipeline import TrainingConfig
+
+        X, y = _make_synthetic_dataset(n_samples=50)
+        model = ShallowNNModeIDModel()
+        model.train(X, y, TrainingConfig(epochs=3, device="cpu"))
+        result = mc_dropout_predict(model, X[:5], n_forward_passes=5)
+        assert "amplitude_epistemic_var" in result
+        assert "velocity_epistemic_var" in result
+        assert np.all(result["amplitude_epistemic_var"] >= 0)
+
+
+# ---------------------------------------------------------------------------
+# D5: Deep Ensemble
+# ---------------------------------------------------------------------------
+
+
+class TestDeepEnsemble:
+    """DeepEnsemble train and predict."""
+
+    def test_predictions_have_variance(self):
+        from turbomodal.ml.models import DeepEnsemble
+        from turbomodal.ml.pipeline import TrainingConfig
+
+        X, y = _make_synthetic_dataset(n_samples=50)
+        ensemble = DeepEnsemble(n_members=2, tier=1)
+        ensemble.train(X, y, TrainingConfig())
+        preds = ensemble.predict(X)
+        assert "amplitude_epistemic_var" in preds
+        assert "velocity_epistemic_var" in preds
+
+
+# ---------------------------------------------------------------------------
+# D7: predict_with_uncertainty
+# ---------------------------------------------------------------------------
+
+
+class TestPredictWithUncertainty:
+    """predict_with_uncertainty returns all variance keys."""
+
+    def test_all_variance_keys(self):
+        from turbomodal.ml.models import DeepEnsemble, predict_with_uncertainty
+        from turbomodal.ml.pipeline import TrainingConfig
+
+        X, y = _make_synthetic_dataset(n_samples=50)
+        ensemble = DeepEnsemble(n_members=2, tier=1)
+        ensemble.train(X, y, TrainingConfig())
+        result = predict_with_uncertainty(ensemble, X, method="deep_ensemble")
+        for key in ("amplitude_aleatoric_var", "amplitude_epistemic_var",
+                     "amplitude_total_var", "velocity_aleatoric_var",
+                     "velocity_epistemic_var", "velocity_total_var"):
+            assert key in result

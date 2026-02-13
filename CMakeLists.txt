@@ -20,6 +20,7 @@ endif()
 
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTS "Build unit tests" ON)
+option(BUILD_VALIDATION_TESTS "Build slow validation tests (requires mesh files)" OFF)
 option(USE_OPENMP "Enable OpenMP parallelism" ON)
 
 # --- Eigen 3.4.0 via FetchContent ---
@@ -74,7 +75,15 @@ endif()
 # --- Unit tests ---
 if(BUILD_TESTS)
   enable_testing()
-  find_package(GTest REQUIRED)
+
+  # Fetch GTest via FetchContent (self-contained, works on all platforms)
+  FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
 
   add_executable(test_material tests/test_material.cpp)
   target_link_libraries(test_material turbomodal_core GTest::gtest_main)
@@ -118,11 +127,13 @@ if(BUILD_TESTS)
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
   add_test(NAME RotatingTests COMMAND test_rotating)
 
-  add_executable(test_validation tests/test_validation.cpp)
-  target_link_libraries(test_validation turbomodal_core GTest::gtest_main)
-  target_compile_definitions(test_validation PRIVATE
-    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
-  add_test(NAME ValidationTests COMMAND test_validation)
+  if(BUILD_VALIDATION_TESTS)
+    add_executable(test_validation tests/test_validation.cpp)
+    target_link_libraries(test_validation turbomodal_core GTest::gtest_main)
+    target_compile_definitions(test_validation PRIVATE
+      TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
+    add_test(NAME ValidationTests COMMAND test_validation)
+  endif()
 endif()
 
 # --- Python bindings ---

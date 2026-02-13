@@ -204,6 +204,19 @@ X, y = build_feature_matrix(
 # y keys: 'nodal_diameter', 'nodal_circle', 'whirl_direction', 'frequency', 'wave_velocity'
 ```
 
+### Physics-Informed Features
+
+```python
+physics_config = FeatureConfig(
+    feature_type="physics",
+    blade_alone_frequencies=np.array([500, 1200, 2800]),  # Hz
+    centrifugal_alpha=0.02,
+    temperature=800.0,
+    reference_temperature=293.0,
+)
+physics_features = extract_features(sig_result['signals'], sample_rate=500_000.0, config=physics_config)
+```
+
 ---
 
 ## Step 7: Train an ML Model
@@ -262,6 +275,38 @@ predictions = predict_mode_id(
 #        'whirl_direction', 'amplitude', 'wave_velocity', 'confidence'
 ```
 
+### Uncertainty Quantification
+
+```python
+from turbomodal.ml.models import predict_with_uncertainty, DeepEnsemble
+
+# MC Dropout (requires PyTorch-based model, Tier 4-6)
+uq_preds = predict_with_uncertainty(best_model, X_test, method="mc_dropout")
+print(f"Amplitude epistemic std: {np.sqrt(uq_preds['amplitude_epistemic_var']).mean():.4f}")
+
+# Deep Ensemble
+ensemble = DeepEnsemble(n_members=5, tier=4)
+ensemble.train(X, y, config)
+ens_preds = predict_with_uncertainty(ensemble, X_test, method="deep_ensemble")
+```
+
+### Model Selection Report and Explanation Cards
+
+```python
+from turbomodal.optimization import generate_model_selection_report, generate_explanation_card
+
+report_summary = generate_model_selection_report(report)
+print(report_summary["summary"])
+
+# Per-prediction explanation
+card = generate_explanation_card(
+    best_model, X_test[0:1], predictions, sample_idx=0,
+    num_sectors=36, rpm=5000.0,
+)
+print(card["explanation_text"])
+print(f"Anomaly: {card['anomaly_flag']}")
+```
+
 ---
 
 ## Step 9: Optimize Sensor Placement
@@ -287,6 +332,20 @@ opt_result = optimize_sensor_placement(mesh, results, config=opt_config)
 print(f"Sensors: {opt_result.num_sensors}, Objective: {opt_result.objective_value:.4f}")
 print(f"Condition number: {opt_result.condition_number:.2f}")
 print(f"Robustness: {opt_result.robustness_score:.2%}")
+```
+
+### Minimize Sensors Mode
+
+```python
+min_config = SensorOptimizationConfig(
+    mode="minimize_sensors",
+    max_sensors=24, min_sensors=4,
+    target_f1_min=0.92,
+    target_whirl_acc_min=0.95,
+    min_angular_spacing=10.0,
+)
+min_result = optimize_sensor_placement(mesh, results, config=min_config)
+print(f"Minimum sensors needed: {min_result.num_sensors}")
 ```
 
 ---

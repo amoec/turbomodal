@@ -190,6 +190,8 @@ def plot_campbell(
 | `engine_orders` | `Sequence[int] \| None` | `None` | Engine order lines to overlay (e.g. `[1, 2, 24]`) |
 | `max_freq` | `float \| None` | `None` | Maximum frequency for y-axis (None = auto) |
 | `figsize` | `tuple[float, float]` | `(12, 8)` | Matplotlib figure size |
+| `confidence_bands` | `dict \| None` | `None` | Dict with `"upper"` and `"lower"` keys mapping `(nd, track_id)` to frequency arrays for uncertainty bands |
+| `crossing_markers` | `bool` | `False` | Overlay markers at engine-order crossing points |
 
 **Returns:** `matplotlib.figure.Figure`
 
@@ -244,6 +246,8 @@ def plot_zzenf(
 | `num_sectors` | `int` | required | Number of sectors in the full annulus |
 | `max_freq` | `float \| None` | `None` | Max frequency for y-axis |
 | `figsize` | `tuple[float, float]` | `(10, 8)` | Figure size |
+| `confidence_bands` | `dict \| None` | `None` | Confidence band data for uncertainty visualization |
+| `crossing_markers` | `bool` | `False` | Mark engine-order crossings |
 
 **Returns:** `matplotlib.figure.Figure`
 
@@ -268,6 +272,31 @@ fig.savefig("zzenf_10000rpm.png", dpi=150)
 **Expected output:** A scatter plot of frequency vs. nodal diameter with
 triangular markers indicating whirl direction. Title reads
 `ZZENF Diagram @ 10000 RPM`.
+
+### plot_sensor_contribution
+
+Plot a heatmap of per-sensor SHAP contributions across mode families.
+
+```python
+def plot_sensor_contribution(
+    shap_values: np.ndarray,
+    sensor_names: list[str],
+    mode_names: list[str],
+    figsize: tuple[float, float] = (10, 6),
+) -> matplotlib.figure.Figure
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `shap_values` | `ndarray` | required | SHAP values from `compute_shap_values()` |
+| `sensor_names` | `list[str]` | required | Sensor labels for y-axis |
+| `mode_names` | `list[str]` | required | Mode family labels for x-axis |
+| `figsize` | `tuple[float, float]` | `(10, 6)` | Figure size |
+
+**Returns:** `matplotlib.figure.Figure` with a color-mapped heatmap
+showing which sensors contribute most to identifying each mode family.
 
 ---
 

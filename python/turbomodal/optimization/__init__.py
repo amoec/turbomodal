@@ -21,6 +21,8 @@ from turbomodal.optimization.explainability import (
     compute_grad_cam,
     physics_consistency_check,
     calibrate_confidence,
+    generate_model_selection_report,
+    generate_explanation_card,
 )
 
 __all__ = [
@@ -34,4 +36,6 @@ __all__ = [
     "compute_grad_cam",
     "physics_consistency_check",
     "calibrate_confidence",
+    "generate_model_selection_report",
+    "generate_explanation_card",
 ]

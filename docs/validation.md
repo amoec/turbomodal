@@ -173,6 +173,19 @@ frequency and nodal diameter. The tolerance is 50% relative error, which
 accounts for the fact that the predicted velocity and predicted ND/frequency
 may all contain independent errors.
 
+### Check 6: Epistemic Uncertainty Threshold
+
+```
+When epistemic_uncertainty is provided:
+    epistemic_uncertainty[i] <= epistemic_threshold (default 0.1)
+```
+
+When uncertainty estimates are available (from MC Dropout, Deep Ensembles,
+or heteroscedastic output heads), predictions with high epistemic
+uncertainty are flagged. This catches cases where the model is extrapolating
+beyond its training distribution, even if the other five physics checks
+pass. The threshold is configurable via the `epistemic_threshold` parameter.
+
 ### Output Format
 
 `physics_consistency_check` returns a dict with four keys:
@@ -222,8 +235,8 @@ The project has five Python test files under
 
 | File                     | Subsystem | Description                                  |
 |--------------------------|-----------|----------------------------------------------|
-| `test_ml.py`             | C         | Feature extraction, all 6 model tiers, evaluation, pipeline, label encoding |
-| `test_optimization.py`   | D         | Fisher information, observability, sensor placement, physics checks, calibration |
+| `test_ml.py`             | C         | Feature extraction, all 6 model tiers + variants, evaluation, pipeline, label encoding, Optuna HPO, CompositeModel, OOD |
+| `test_optimization.py`   | D         | Fisher information, observability, sensor placement, physics checks, calibration, UQ, model selection report, explanation cards |
 | `test_python_bindings.py`| A         | C++ binding tests: Material, Mesh, Solver    |
 | `test_io.py`             | A         | Mesh import (Gmsh `.msh`), CAD loading       |
 | `test_viz.py`            | A         | Visualization: mesh plots, mode shape animation |
@@ -285,6 +298,38 @@ pytest python/tests/ --cov=turbomodal --cov-report=term-missing
 | `TestTrainModeIdModel`       | Returns `(model, report)` with correct structure; diminishing returns stops early when gap threshold is set very high |
 | `TestPredictModeId`          | End-to-end inference from raw signals through feature extraction to predictions |
 | `TestEvaluateModel`          | All 6 metric keys returned; F1 and accuracy in [0, 1]; MAPE and RMSE non-negative |
+
+#### Advanced ML Tests (test_ml.py)
+
+| Test class                    | What it validates                                      |
+|-------------------------------|--------------------------------------------------------|
+| `TestLinearLasso`             | Lasso variant trains and predicts correctly             |
+| `TestTreeLightGBM`           | LightGBM fallback chain (LightGBM -> XGBoost -> RF)   |
+| `TestCNNResNet`              | ResNet variant architecture and train/predict cycle    |
+| `TestTemporalTransformer`    | Transformer variant architecture and train/predict     |
+| `TestOptunaHPO`              | Optuna integration runs trials and returns hyperparams |
+| `TestGroupKFoldCV`           | Cross-validation respects condition grouping            |
+| `TestCompositeModel`         | Independent sub-task training produces valid CompositeModel |
+| `TestOODSplit`               | OOD fraction extracts extreme conditions correctly     |
+| `TestECE`                    | Expected Calibration Error computation                 |
+| `TestInferenceLatency`       | Latency measurement included in evaluate_model output  |
+
+#### Uncertainty and Explainability Tests (test_optimization.py)
+
+| Test class                        | What it validates                                  |
+|-----------------------------------|----------------------------------------------------|
+| `TestMCDropout`                   | MC Dropout returns epistemic variance keys         |
+| `TestDeepEnsemble`                | Ensemble training and variance-aware predictions   |
+| `TestPredictWithUncertainty`      | Unified UQ interface with variance decomposition   |
+| `TestPhysicsCheckEpistemic`       | Check 6: epistemic uncertainty threshold           |
+| `TestMinimizeSensorsMode`         | Binary search finds minimum sensor count           |
+| `TestMLModelFactory`              | ML-based objective in greedy selection              |
+| `TestObservabilityPenalty`        | Condition number penalty in Bayesian refinement    |
+| `TestModelSelectionReport`        | Report generation from training results            |
+| `TestExplanationCard`             | Per-prediction card with SHAP and physics checks   |
+| `TestPlotSensorContribution`     | Heatmap visualization of sensor contributions      |
+| `TestCampbellConfidenceBands`     | Confidence bands on Campbell diagram               |
+| `TestCampbellCrossingMarkers`     | Engine-order crossing detection and marking        |
 
 #### Sensor Optimization Tests (test_optimization.py)
 

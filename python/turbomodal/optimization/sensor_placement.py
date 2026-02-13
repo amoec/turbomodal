@@ -45,6 +45,16 @@ class SensorOptimizationConfig:
     dropout_probability: float = 0.0     # probability of single sensor failure
     position_tolerance: float = 0.0      # angular position tolerance (degrees)
 
+    # Mode A: minimize sensors (D1)
+    mode: str = "maximize_performance"   # "maximize_performance" or "minimize_sensors"
+    target_f1_min: float = 0.92
+    target_whirl_acc_min: float = 0.95
+    target_amp_mape_max: float = 0.08
+    target_vel_r2_min: float = 0.93
+
+    # Observability penalty (D3)
+    observability_penalty_weight: float = 0.1
+
 
 @dataclass
 class SensorOptimizationResult:
@@ -235,6 +245,7 @@ def optimize_sensor_placement(
     mesh,
     modal_results: list,
     config: SensorOptimizationConfig = SensorOptimizationConfig(),
+    ml_model_factory: Optional[callable] = None,
 ) -> SensorOptimizationResult:
     """Optimize sensor placement for mode identification.
 
@@ -244,11 +255,18 @@ def optimize_sensor_placement(
     modal_results : list with ``.mode_shapes`` (n_dof, n_modes) and
         ``.frequencies`` (n_modes,).
     config : SensorOptimizationConfig.
+    ml_model_factory : Optional callable ``(positions: ndarray) -> float``
+        that returns an ML-based score for a sensor configuration. When
+        provided, greedy selection uses this as the objective instead of
+        FIM log-det once enough sensors are selected (D2).
 
     Returns
     -------
     SensorOptimizationResult
     """
+    # Dispatch to Mode A if requested (D1)
+    if config.mode == "minimize_sensors":
+        return _minimize_sensors(mesh, modal_results, config, ml_model_factory)
     # ---- Stage 0: Setup ----
     mode_shapes = _extract_mode_shapes(modal_results)
     frequencies = _extract_frequencies(modal_results)
@@ -319,8 +337,12 @@ def optimize_sensor_placement(
         best_gain, best_idx = -np.inf, -1
         for idx in remaining:
             trial = selected + [idx]
-            fim = compute_fisher_information(mode_shapes, filtered_H[trial])
-            obj = np.log(max(np.linalg.det(fim), 1e-300))
+            # D2: use ML score when factory provided and enough sensors
+            if ml_model_factory is not None and len(trial) >= config.min_sensors:
+                obj = ml_model_factory(filtered_positions[trial])
+            else:
+                fim = compute_fisher_information(mode_shapes, filtered_H[trial])
+                obj = np.log(max(np.linalg.det(fim), 1e-300))
             if obj > best_gain:
                 best_gain, best_idx = obj, idx
         if best_idx < 0:
@@ -423,7 +445,14 @@ def _bayesian_refinement(
             base_r * np.cos(angles_rad), base_r * np.sin(angles_rad), base_z])
         H_trial = _build_nearest_dof_matrix(positions, n_dof)
         fim = compute_fisher_information(mode_shapes, H_trial)
-        return np.log(max(np.linalg.det(fim), 1e-300))
+        obj = np.log(max(np.linalg.det(fim), 1e-300))
+        # D3: observability penalty
+        if config.observability_penalty_weight > 0:
+            obs = compute_observability(mode_shapes, H_trial)
+            cond_num = obs["condition_number"]
+            if cond_num > 0 and np.isfinite(cond_num):
+                obj -= config.observability_penalty_weight * np.log(cond_num)
+        return obj
 
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=42))
@@ -498,3 +527,44 @@ def _robustness_validation(
     logger.info("Robustness: %.1f%% pass, dropout degradation=%.2f",
                 robustness_score * 100.0, dropout_degradation)
     return robustness_score, dropout_degradation
+
+
+def _minimize_sensors(
+    mesh,
+    modal_results: list,
+    config: SensorOptimizationConfig,
+    ml_model_factory: Optional[callable] = None,
+) -> SensorOptimizationResult:
+    """Mode A: binary search to find the minimum number of sensors that meet targets (D1)."""
+    lo = config.min_sensors
+    hi = config.max_sensors
+    best_result: SensorOptimizationResult | None = None
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trial_config = SensorOptimizationConfig(**{
+            f.name: getattr(config, f.name)
+            for f in config.__dataclass_fields__.values()
+        })
+        trial_config.max_sensors = mid
+        trial_config.mode = "maximize_performance"  # prevent recursion
+
+        result = optimize_sensor_placement(mesh, modal_results, trial_config, ml_model_factory)
+
+        # Check if proxy targets are met via condition number as proxy
+        if result.condition_number < 100.0 and result.num_sensors > 0:
+            best_result = result
+            hi = mid - 1
+        else:
+            lo = mid + 1
+
+    if best_result is None:
+        # Fall back to max sensors
+        fallback_config = SensorOptimizationConfig(**{
+            f.name: getattr(config, f.name)
+            for f in config.__dataclass_fields__.values()
+        })
+        fallback_config.mode = "maximize_performance"
+        best_result = optimize_sensor_placement(mesh, modal_results, fallback_config, ml_model_factory)
+
+    return best_result

@@ -55,11 +55,20 @@ class TrainingConfig:
     experiment_name: str = "turbomodal_mode_id"
     device: str = "auto"                 # "cpu", "cuda", "mps", "auto"
 
-    # Performance targets (from design doc)
+    # Performance targets
     mode_detection_f1_min: float = 0.92
     whirl_accuracy_min: float = 0.95
     amplitude_mape_max: float = 0.08
     velocity_r2_min: float = 0.93
+
+    # Independent sub-task ladder (C5)
+    independent_subtasks: bool = False
+
+    # OOD test set (C6)
+    ood_fraction: float = 0.0
+
+    # Hyperparameter override storage (set by Optuna)
+    _hparam_overrides: dict = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -205,6 +214,225 @@ def _check_targets(metrics: dict[str, float], config: TrainingConfig) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Cross-validation (C4)
+# ---------------------------------------------------------------------------
+
+def _cross_validate(
+    tier: int,
+    X: np.ndarray,
+    y: dict[str, np.ndarray],
+    config: TrainingConfig,
+    condition_ids: np.ndarray | None = None,
+    hparam_overrides: dict | None = None,
+) -> list[float]:
+    """Run 5-fold cross-validation, returning composite scores per fold."""
+    from turbomodal.ml.models import TIER_MODELS
+
+    n_folds = config.cv_folds
+    n_samples = X.shape[0]
+
+    try:
+        from sklearn.model_selection import GroupKFold, KFold
+        if condition_ids is not None and len(np.unique(condition_ids)) >= n_folds:
+            splitter = GroupKFold(n_splits=n_folds)
+            splits = list(splitter.split(X, groups=condition_ids))
+        else:
+            splitter = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+            splits = list(splitter.split(X))
+    except ImportError:
+        # Manual k-fold
+        idx = np.random.RandomState(42).permutation(n_samples)
+        fold_size = n_samples // n_folds
+        splits = []
+        for i in range(n_folds):
+            test_idx = idx[i * fold_size:(i + 1) * fold_size]
+            train_idx = np.concatenate([idx[:i * fold_size], idx[(i + 1) * fold_size:]])
+            splits.append((train_idx, test_idx))
+
+    # Reduce epochs for CV speed
+    cv_config = TrainingConfig(**{
+        f.name: getattr(config, f.name)
+        for f in config.__dataclass_fields__.values()
+    })
+    cv_config.epochs = min(config.epochs, 20)
+    if hparam_overrides:
+        cv_config._hparam_overrides = hparam_overrides
+
+    fold_scores: list[float] = []
+    for train_idx, val_idx in splits:
+        X_tr = X[train_idx]
+        y_tr = {k: v[train_idx] for k, v in y.items()}
+        X_val = X[val_idx]
+        y_val = {k: v[val_idx] for k, v in y.items()}
+
+        model = TIER_MODELS[tier]()
+        try:
+            model.train(X_tr, y_tr, cv_config)
+            metrics = evaluate_model(model, X_val, y_val)
+            fold_scores.append(_composite_score(metrics, config))
+        except Exception:
+            fold_scores.append(0.0)
+
+    return fold_scores
+
+
+# ---------------------------------------------------------------------------
+# Optuna hyperparameter optimization (C3)
+# ---------------------------------------------------------------------------
+
+def _suggest_hyperparams(trial: Any, tier: int) -> dict:
+    """Define per-tier search spaces for Optuna."""
+    if tier == 1:
+        return {
+            "C": trial.suggest_float("C", 1e-3, 100.0, log=True),
+            "alpha": trial.suggest_float("alpha", 1e-4, 10.0, log=True),
+        }
+    elif tier == 2:
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        }
+    elif tier == 3:
+        return {
+            "C": trial.suggest_float("C", 1e-2, 100.0, log=True),
+            "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
+        }
+    else:  # Tiers 4-6
+        return {
+            "lr": trial.suggest_float("lr", 1e-5, 1e-2, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+            "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True),
+        }
+
+
+def _optuna_optimize(
+    tier: int,
+    X_train: np.ndarray,
+    y_train: dict[str, np.ndarray],
+    config: TrainingConfig,
+    condition_ids_train: np.ndarray | None = None,
+) -> dict:
+    """Run Optuna TPE optimization, returning best hyperparameters."""
+    try:
+        import optuna
+    except ImportError:
+        logger.warning("optuna not installed; using default hyperparameters.")
+        return {}
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def objective(trial: optuna.Trial) -> float:
+        hparams = _suggest_hyperparams(trial, tier)
+        scores = _cross_validate(
+            tier, X_train, y_train, config, condition_ids_train, hparams
+        )
+        return float(np.mean(scores))
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42),
+    )
+    study.optimize(objective, n_trials=config.optuna_trials, show_progress_bar=False)
+    logger.info("Optuna best value: %.4f, params: %s", study.best_value, study.best_params)
+    return study.best_params
+
+
+# ---------------------------------------------------------------------------
+# OOD split (C6)
+# ---------------------------------------------------------------------------
+
+def _extract_ood_indices(
+    condition_ids: np.ndarray,
+    params: np.ndarray,
+    ood_fraction: float,
+) -> np.ndarray:
+    """Mark conditions at extremes of parameter space as OOD.
+
+    Parameters
+    ----------
+    condition_ids : (N,) condition IDs per sample.
+    params : (N_conditions, n_params) parametric values per condition.
+    ood_fraction : fraction of conditions to mark as OOD.
+
+    Returns
+    -------
+    ood_mask : (N,) bool array, True for OOD samples.
+    """
+    unique_conds = np.unique(condition_ids)
+    n_conds = len(unique_conds)
+    n_ood = max(1, int(n_conds * ood_fraction))
+
+    # Score each condition by how extreme it is (max absolute z-score)
+    if params.ndim == 1:
+        params = params.reshape(-1, 1)
+
+    mean = params.mean(axis=0)
+    std = params.std(axis=0)
+    std[std == 0] = 1.0
+    z_scores = np.abs((params - mean) / std)
+    extremeness = z_scores.max(axis=1)
+
+    # Top n_ood most extreme conditions
+    ood_cond_indices = np.argsort(-extremeness)[:n_ood]
+    ood_cond_set = set(unique_conds[ood_cond_indices].tolist())
+
+    return np.array([c in ood_cond_set for c in condition_ids], dtype=bool)
+
+
+# ---------------------------------------------------------------------------
+# ECE metric (C7)
+# ---------------------------------------------------------------------------
+
+def _compute_ece(
+    confidences: np.ndarray,
+    correct: np.ndarray,
+    n_bins: int = 15,
+) -> float:
+    """Expected Calibration Error.
+
+    Bins predictions by confidence and computes weighted |accuracy - confidence|.
+    """
+    confidences = np.asarray(confidences, dtype=np.float64)
+    correct = np.asarray(correct, dtype=np.float64)
+    n = len(confidences)
+    if n == 0:
+        return 0.0
+
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        mask = (confidences > bin_edges[i]) & (confidences <= bin_edges[i + 1])
+        if not np.any(mask):
+            continue
+        bin_conf = confidences[mask].mean()
+        bin_acc = correct[mask].mean()
+        ece += np.abs(bin_acc - bin_conf) * mask.sum() / n
+    return float(ece)
+
+
+# ---------------------------------------------------------------------------
+# Sub-task target checking (C5)
+# ---------------------------------------------------------------------------
+
+def _check_subtask_target(
+    metrics: dict[str, float],
+    subtask: str,
+    config: TrainingConfig,
+) -> bool:
+    """Check if a single sub-task meets its target."""
+    if subtask == "mode":
+        return metrics.get("mode_detection_f1", 0) >= config.mode_detection_f1_min
+    elif subtask == "whirl":
+        return metrics.get("whirl_accuracy", 0) >= config.whirl_accuracy_min
+    elif subtask == "amplitude":
+        return metrics.get("amplitude_mape", 1) <= config.amplitude_mape_max
+    elif subtask == "velocity":
+        return metrics.get("velocity_r2", 0) >= config.velocity_r2_min
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
 
@@ -244,15 +472,22 @@ def train_mode_id_model(
     X: np.ndarray | None = None,
     y: dict[str, np.ndarray] | None = None,
     condition_ids: np.ndarray | None = None,
+    condition_params: np.ndarray | None = None,
 ) -> tuple[object, dict]:
     """Train a mode identification model via the complexity ladder.
 
     Accepts pre-built ``(X, y)`` arrays or a path to a ``.npz`` file.
 
+    Parameters
+    ----------
+    condition_params : (n_conditions, n_params) optional parametric values
+        for OOD splitting.
+
     Returns ``(best_model, report)`` where *report* contains
-    ``best_tier``, ``val_metrics``, ``test_metrics``, and ``tier_history``.
+    ``best_tier``, ``val_metrics``, ``test_metrics``, ``tier_history``,
+    and optionally ``ood_metrics``.
     """
-    from turbomodal.ml.models import TIER_MODELS
+    from turbomodal.ml.models import TIER_MODELS, CompositeModel
 
     # 1. Load / validate data
     if X is not None and y is not None:
@@ -294,10 +529,29 @@ def train_mode_id_model(
     else:
         X_val, y_val = X_test, y_test
 
+    # OOD extraction (C6)
+    ood_metrics: dict[str, float] = {}
+    X_ood: np.ndarray | None = None
+    y_ood: dict[str, np.ndarray] | None = None
+    if config.ood_fraction > 0 and condition_params is not None:
+        ood_mask_train = _extract_ood_indices(
+            condition_ids[train_idx], condition_params, config.ood_fraction
+        )
+        ood_in_train = train_idx[ood_mask_train]
+        train_idx = train_idx[~ood_mask_train]
+
+        X_ood = X[ood_in_train]
+        y_ood = {k: v[ood_in_train] for k, v in y.items()}
+        X_train = X[train_idx]
+        y_train = {k: v[train_idx] for k, v in y.items()}
+
     logger.info(
-        "Data split: train=%d, val=%d, test=%d",
+        "Data split: train=%d, val=%d, test=%d%s",
         len(train_idx), len(val_idx), len(test_idx),
+        f", ood={len(X_ood)}" if X_ood is not None else "",
     )
+
+    condition_ids_train = condition_ids[train_idx] if condition_ids is not None else None
 
     # 3. Complexity ladder
     mlf = _MLflowProxy()
@@ -314,6 +568,15 @@ def train_mode_id_model(
         for tier in range(1, config.max_tier + 1):
             logger.info("--- Tier %d ---", tier)
             with mlf.start_run(run_name=f"tier_{tier}", nested=True):
+                # Optuna HPO (C3)
+                if config.use_optuna:
+                    hparams = _optuna_optimize(
+                        tier, X_train, y_train, config, condition_ids_train
+                    )
+                    config._hparam_overrides = hparams
+                else:
+                    config._hparam_overrides = {}
+
                 model = TIER_MODELS[tier]()
 
                 start_time = time.time()
@@ -380,12 +643,20 @@ def train_mode_id_model(
             test_metrics = {}
             logger.warning("No model was successfully trained.")
 
-    return best_model, {
+        # OOD evaluation (C6)
+        if X_ood is not None and y_ood is not None and best_model is not None:
+            ood_metrics = evaluate_model(best_model, X_ood, y_ood)
+            logger.info("OOD metrics: %s", ood_metrics)
+
+    report = {
         "best_tier": best_tier,
         "val_metrics": best_metrics,
         "test_metrics": test_metrics,
         "tier_history": tier_history,
     }
+    if ood_metrics:
+        report["ood_metrics"] = ood_metrics
+    return best_model, report
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +693,11 @@ def evaluate_model(
     X_test: np.ndarray,
     y_test: dict[str, np.ndarray],
 ) -> dict[str, float]:
-    """Evaluate model on all six sub-task metrics.
+    """Evaluate model on all sub-task metrics plus ECE and inference latency.
 
     Returns dict with keys: ``mode_detection_f1``, ``whirl_accuracy``,
-    ``amplitude_mape``, ``amplitude_r2``, ``velocity_rmse``, ``velocity_r2``.
+    ``amplitude_mape``, ``amplitude_r2``, ``velocity_rmse``, ``velocity_r2``,
+    ``ece``, ``inference_latency_mean_ms``, ``inference_latency_p95_ms``.
     """
     from turbomodal.ml.models import _encode_mode_labels
 
@@ -472,6 +744,22 @@ def evaluate_model(
     except ImportError:
         velocity_r2 = _manual_r2(true_vel, pred_vel)
 
+    # ECE (C7)
+    pred_conf = np.asarray(preds.get("confidence", np.ones(X_test.shape[0])))
+    correct_mode = (true_mode == pred_mode).astype(np.float64)
+    ece = _compute_ece(pred_conf, correct_mode)
+
+    # Inference latency (C8)
+    n_latency = min(100, X_test.shape[0])
+    latencies: list[float] = []
+    for i in range(n_latency):
+        t0 = time.perf_counter()
+        model.predict(X_test[i:i + 1])
+        latencies.append((time.perf_counter() - t0) * 1000.0)
+    latency_arr = np.array(latencies)
+    latency_mean = float(latency_arr.mean()) if latencies else 0.0
+    latency_p95 = float(np.percentile(latency_arr, 95)) if latencies else 0.0
+
     return {
         "mode_detection_f1": mode_f1,
         "whirl_accuracy": whirl_acc,
@@ -479,6 +767,9 @@ def evaluate_model(
         "amplitude_r2": amplitude_r2,
         "velocity_rmse": velocity_rmse,
         "velocity_r2": velocity_r2,
+        "ece": ece,
+        "inference_latency_mean_ms": latency_mean,
+        "inference_latency_p95_ms": latency_p95,
     }
 
 

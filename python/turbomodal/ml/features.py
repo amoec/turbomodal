@@ -26,7 +26,7 @@ class FeatureConfig:
     window: str = "hann"
 
     # Feature type
-    feature_type: str = "spectrogram"  # "spectrogram", "mel", "order_tracking", "twd"
+    feature_type: str = "spectrogram"  # "spectrogram", "mel", "order_tracking", "twd", "physics"
 
     # Mel spectrogram (if feature_type == "mel")
     n_mels: int = 128
@@ -43,6 +43,13 @@ class FeatureConfig:
     # Cross-spectral features
     include_cross_spectra: bool = False
     coherence_threshold: float = 0.5
+
+    # Physics-informed features (if feature_type == "physics")
+    blade_alone_frequencies: Optional[np.ndarray] = None  # Hz
+    centrifugal_alpha: float = 0.0  # centrifugal stiffening coefficient
+    reference_temperature: float = 293.0  # K
+    temperature: float = 293.0  # K
+    youngs_modulus_ratio_fn: Optional[object] = None  # callable(T) -> E(T)/E_ref
 
 
 def _hz_to_mel(f: float) -> float:
@@ -274,10 +281,71 @@ def extract_features(
             np.abs(backward).ravel(),
         ])
 
+    # ------------------------------------------------------------------
+    # Physics-informed features
+    # ------------------------------------------------------------------
+    elif feature_type == "physics":
+        if config.rpm <= 0.0:
+            raise ValueError(
+                "Physics features require config.rpm > 0, "
+                f"got rpm={config.rpm}"
+            )
+        # Base spectrogram per sensor
+        parts = []
+        for ch in range(n_sensors):
+            _, _, Zxx = stft(
+                signals[ch],
+                fs=sample_rate,
+                window=config.window,
+                nperseg=config.fft_size,
+                noverlap=config.fft_size - config.hop_size,
+            )
+            mag = np.abs(Zxx)
+            mean_mag = mag.mean(axis=1)
+            parts.append(mean_mag)
+        base_spec = np.concatenate(parts)
+
+        # Frequency ratio features: f_measured / f_blade_alone
+        freq_ratio_feats = np.array([], dtype=np.float64)
+        if config.blade_alone_frequencies is not None:
+            blade_freqs = np.asarray(config.blade_alone_frequencies, dtype=np.float64)
+            # Use dominant frequency from averaged spectrogram as f_measured
+            n_freq_bins = config.fft_size // 2 + 1
+            avg_spec = np.zeros(n_freq_bins)
+            for ch in range(n_sensors):
+                avg_spec += parts[ch] if ch < len(parts) else np.zeros(n_freq_bins)
+            avg_spec /= max(n_sensors, 1)
+            f_measured = float(np.argmax(avg_spec)) * sample_rate / config.fft_size
+            if f_measured <= 0:
+                f_measured = 1.0  # avoid division by zero
+            freq_ratio_feats = np.array(
+                [f_measured / bf if bf > 0 else 0.0 for bf in blade_freqs],
+                dtype=np.float64,
+            )
+
+        # Centrifugal correction: 1 + alpha * omega^2
+        omega = config.rpm * 2.0 * np.pi / 60.0
+        centrifugal_factor = np.array(
+            [1.0 + config.centrifugal_alpha * omega ** 2], dtype=np.float64,
+        )
+
+        # Temperature compensation: sqrt(E(T)/E_ref)
+        if config.youngs_modulus_ratio_fn is not None:
+            e_ratio = float(config.youngs_modulus_ratio_fn(config.temperature))
+        else:
+            # Default linear model: E(T) = E_ref * (1 - 3e-4 * (T - T_ref))
+            e_ratio = 1.0 - 3e-4 * (config.temperature - config.reference_temperature)
+            e_ratio = max(e_ratio, 0.01)
+        temp_factor = np.array([np.sqrt(e_ratio)], dtype=np.float64)
+
+        feature_vec = np.concatenate([
+            base_spec, freq_ratio_feats, centrifugal_factor, temp_factor,
+        ])
+
     else:
         raise ValueError(
             f"Unknown feature_type '{feature_type}'. "
-            "Supported: 'spectrogram', 'mel', 'order_tracking', 'twd'."
+            "Supported: 'spectrogram', 'mel', 'order_tracking', 'twd', 'physics'."
         )
 
     # ------------------------------------------------------------------

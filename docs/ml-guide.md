@@ -69,8 +69,8 @@ default 6) and stops when either:
 #### Tier 1 -- LinearModeIDModel
 
 - **Architecture**: four independent scikit-learn estimators.
-  - `LogisticRegression(max_iter=1000, multi_class="ovr", C=1.0)` for mode
-    classification (encoded `(ND, NC)` labels).
+  - `LogisticRegression(max_iter=1000, C=1.0)` for mode classification
+    (encoded `(ND, NC)` labels, OVR strategy by default).
   - `LogisticRegression(max_iter=1000)` for whirl direction.
   - `Ridge(alpha=1.0)` for amplitude.
   - `Ridge(alpha=1.0)` for wave velocity.
@@ -79,12 +79,17 @@ default 6) and stops when either:
 - **Weaknesses**: cannot capture nonlinear feature interactions.
 - **Persistence**: `joblib` (`.joblib` files).
 
+**Variant**: `LinearModeIDModel(variant="lasso")` replaces Ridge regression
+with Lasso (L1 regularization) for amplitude and velocity estimation,
+producing sparser coefficient vectors.
+
 #### Tier 2 -- TreeModeIDModel
 
-- **Architecture**: four independent tree ensemble estimators. Tries
-  `XGBClassifier` / `XGBRegressor` (100 estimators) first; falls back to
-  scikit-learn `RandomForestClassifier` / `RandomForestRegressor` when
-  `xgboost` is not installed.
+- **Architecture**: four independent tree ensemble estimators with a
+  three-level fallback: LightGBM → XGBoost → RandomForest. The pipeline
+  tries `LGBMClassifier`/`LGBMRegressor` first, falls back to
+  `XGBClassifier`/`XGBRegressor`, and finally to scikit-learn
+  `RandomForestClassifier`/`RandomForestRegressor`.
 - **Strengths**: handles nonlinear interactions, exposes `feature_importances_`
   (averaged across all four estimators), robust to feature scaling.
 - **Weaknesses**: larger memory footprint; less interpretable than linear.
@@ -134,6 +139,11 @@ default 6) and stops when either:
   requires Grad-CAM.
 - **Persistence**: `torch.save` (state dict + channel shape + scaler + labels).
 
+**Variant**: `CNNModeIDModel(variant="resnet")` replaces the plain CNN
+backbone with a 1-D ResNet containing two residual blocks (each with two
+`Conv1d` layers and a skip connection). The deeper architecture can capture
+more complex spectral patterns at the cost of additional parameters.
+
 #### Tier 6 -- TemporalModeIDModel
 
 - **Architecture**: PyTorch Conv + BiLSTM (`TemporalNet`).
@@ -147,6 +157,12 @@ default 6) and stops when either:
   transient blade events.
 - **Weaknesses**: slowest to train; lowest interpretability; most data-hungry.
 - **Persistence**: `torch.save`.
+
+**Variant**: `TemporalModeIDModel(variant="transformer")` replaces the
+BiLSTM with a Transformer encoder (2 layers, 4 attention heads, d_model=64)
+with sinusoidal positional encoding. Global average pooling over the
+sequence dimension produces the summary representation. Suitable for long
+sequences where self-attention can capture distant dependencies.
 
 ### Model Registry
 
@@ -183,7 +199,7 @@ entry point is `extract_features`, configured via a `FeatureConfig` dataclass.
 | `fft_size`            | `int`             | `2048`        | FFT window length (number of samples per segment)  |
 | `hop_size`            | `int`             | `512`         | Hop length between consecutive STFT frames         |
 | `window`              | `str`             | `"hann"`      | Window function name (passed to `scipy.signal.stft`)|
-| `feature_type`        | `str`             | `"spectrogram"`| One of `"spectrogram"`, `"mel"`, `"order_tracking"`, `"twd"` |
+| `feature_type`        | `str`             | `"spectrogram"`| One of `"spectrogram"`, `"mel"`, `"order_tracking"`, `"twd"`, `"physics"` |
 | `n_mels`              | `int`             | `128`         | Number of mel bands (when `feature_type="mel"`)    |
 | `f_min`               | `float`           | `0.0`         | Minimum frequency for mel filterbank (Hz)          |
 | `f_max`               | `float`           | `0.0`         | Maximum frequency for mel filterbank (0 = Nyquist) |
@@ -192,6 +208,11 @@ entry point is `extract_features`, configured via a `FeatureConfig` dataclass.
 | `sensor_angles`       | `ndarray or None` | `None`        | Circumferential sensor positions in radians (TWD)  |
 | `include_cross_spectra` | `bool`          | `False`       | Append cross-spectral density features             |
 | `coherence_threshold` | `float`           | `0.5`         | Zero CSD bins where coherence falls below this     |
+| `blade_alone_frequencies` | `ndarray or None` | `None`       | Blade-alone natural frequencies in Hz (physics features) |
+| `centrifugal_alpha`   | `float`           | `0.0`         | Centrifugal stiffening coefficient                     |
+| `reference_temperature` | `float`         | `293.0`       | Reference temperature in K                             |
+| `temperature`         | `float`           | `293.0`       | Current temperature in K                               |
+| `youngs_modulus_ratio_fn` | `callable or None` | `None`   | Callable `T -> E(T)/E_ref` for temperature correction  |
 
 ### Spectrogram Features (STFT)
 
@@ -270,6 +291,24 @@ base feature vector. For each sensor pair `(i, j)` where `i < j`:
 
 This requires at least 2 sensors. The number of appended features is
 `C(n_sensors, 2) * n_freq_bins`.
+
+### Physics-Informed Features
+
+When `feature_type="physics"`, domain-specific features are computed from
+the spectral data combined with physical parameters:
+
+- **Frequency ratios**: ratios of observed peak frequencies to
+  `blade_alone_frequencies`, indicating how much the system deviates from
+  the isolated-blade case.
+- **Centrifugal correction**: applies `f_corrected = f * sqrt(1 + alpha * (rpm/60)^2)`
+  to normalize frequencies for rotational speed effects.
+- **Temperature correction**: scales frequencies by
+  `sqrt(youngs_modulus_ratio_fn(temperature))` when a Young's modulus ratio
+  function is provided.
+
+These features encode known turbomachinery physics directly into the feature
+vector, improving model accuracy especially at low sample counts where
+data-driven features alone may be insufficient.
 
 ### build_feature_matrix
 
@@ -420,14 +459,17 @@ mlflow ui --backend-store-uri ./mlruns
 `evaluate_model(model, X_test, y_test)` calls `model.predict(X_test)` and
 computes six metrics:
 
-| Metric key           | Computation                                         |
-|----------------------|-----------------------------------------------------|
-| `mode_detection_f1`  | Macro F1 on encoded `(ND, NC)` labels (sklearn `f1_score`) |
-| `whirl_accuracy`     | Balanced accuracy on whirl direction (sklearn `balanced_accuracy_score`) |
-| `amplitude_mape`     | Mean absolute percentage error, using `max(|y_true|, 1e-8)` as denominator |
-| `amplitude_r2`       | R-squared on amplitude (sklearn `r2_score`)         |
-| `velocity_rmse`      | Root mean squared error on wave velocity            |
-| `velocity_r2`        | R-squared on wave velocity                          |
+| Metric key                  | Computation                                         |
+|-----------------------------|-----------------------------------------------------|
+| `mode_detection_f1`         | Macro F1 on encoded `(ND, NC)` labels (sklearn `f1_score`) |
+| `whirl_accuracy`            | Balanced accuracy on whirl direction (sklearn `balanced_accuracy_score`) |
+| `amplitude_mape`            | Mean absolute percentage error, using `max(|y_true|, 1e-8)` as denominator |
+| `amplitude_r2`              | R-squared on amplitude (sklearn `r2_score`)         |
+| `velocity_rmse`             | Root mean squared error on wave velocity            |
+| `velocity_r2`               | R-squared on wave velocity                          |
+| `ece`                       | Expected Calibration Error (15-bin confidence histogram) |
+| `inference_latency_mean_ms` | Mean single-sample inference time in milliseconds   |
+| `inference_latency_p95_ms`  | 95th-percentile inference latency in milliseconds   |
 
 When scikit-learn is unavailable, manual fallback implementations
 (`_manual_f1`, `_manual_r2`) are used.
@@ -441,6 +483,90 @@ function that:
 2. Calls `extract_features(signals, sample_rate, feat_config)`.
 3. Reshapes the 1-D feature vector to `(1, n_features)`.
 4. Returns `model.predict(features)`.
+
+### Hyperparameter Optimization
+
+When `config.use_optuna=True` (the default), the pipeline runs Optuna TPE
+(Tree-structured Parzen Estimator) optimization before training each tier.
+Per-tier search spaces are defined in `_suggest_hyperparams`:
+
+| Tier | Parameters | Range |
+|------|-----------|-------|
+| 1 | `C`, `alpha` | `[1e-3, 100]`, `[1e-4, 10]` (log scale) |
+| 2 | `n_estimators`, `max_depth`, `learning_rate` | `[50, 300]`, `[3, 12]`, `[0.01, 0.3]` |
+| 3 | `C`, `gamma` | `[1e-2, 100]`, `{"scale", "auto"}` |
+| 4-6 | `lr`, `batch_size`, `weight_decay` | `[1e-5, 1e-2]`, `{16, 32, 64}`, `[1e-6, 1e-2]` |
+
+Each trial evaluates the candidate hyperparameters via `cv_folds`-fold
+cross-validation (default 5 folds, `GroupKFold` when condition IDs are
+available). The number of trials is controlled by `config.optuna_trials`
+(default 50). Optuna is an optional dependency; when not installed, default
+hyperparameters are used.
+
+### Cross-Validation
+
+The pipeline uses `GroupKFold` (from scikit-learn) when condition IDs are
+provided, ensuring no operating condition appears in multiple folds. This
+prevents data leakage across folds just as `GroupShuffleSplit` does for the
+main train/val/test split. When condition IDs are unavailable or when fewer
+unique conditions than folds exist, standard `KFold` with `shuffle=True` is
+used instead. The number of folds is set via `config.cv_folds` (default 5).
+
+### CompositeModel
+
+When `config.independent_subtasks=True`, the complexity ladder runs
+independently for each of the four sub-tasks (mode classification, whirl
+classification, amplitude regression, velocity regression). Each sub-task
+may select a different tier. The resulting models are wrapped in a
+`CompositeModel` that merges predictions from all four sub-task models into
+a single output dict.
+
+This is useful when sub-tasks have different complexity requirements -- for
+example, mode classification may need a Tier 4 neural network while wave
+velocity regression is well-served by Tier 1 linear regression.
+
+### Out-of-Distribution Evaluation
+
+When `config.ood_fraction > 0` and `condition_params` are provided to
+`train_mode_id_model`, the pipeline extracts the most extreme operating
+conditions from the training set as an out-of-distribution (OOD) test set.
+
+Extremeness is determined by the maximum absolute z-score across all
+parametric dimensions. The top `ood_fraction` conditions (by extremeness)
+are removed from training and evaluated separately. The training report
+includes `ood_metrics` alongside the standard `test_metrics`.
+
+### Uncertainty Quantification
+
+Three mechanisms provide uncertainty estimates for predictions:
+
+**MC Dropout** (`mc_dropout_predict`): enables dropout at inference time and
+runs `n_forward_passes` stochastic forward passes through PyTorch models
+(Tiers 4-6). Returns mean predictions plus `amplitude_epistemic_var`,
+`velocity_epistemic_var`, and `mode_entropy`.
+
+**Deep Ensembles** (`DeepEnsemble`): trains `n_members` independent models
+(default 5) with different random seeds. Predictions are aggregated via
+majority vote (classification) and mean (regression). Variance across
+members provides epistemic uncertainty.
+
+**Heteroscedastic output heads**: all PyTorch network architectures support
+optional `heteroscedastic=True` mode, which adds log-variance output heads
+for amplitude and velocity. This provides per-sample aleatoric uncertainty
+estimates.
+
+The unified entry point `predict_with_uncertainty(model, X, method)` returns
+a dict with all standard prediction keys plus:
+
+| Key | Description |
+|-----|-------------|
+| `amplitude_aleatoric_var` | Data noise variance (from heteroscedastic heads) |
+| `amplitude_epistemic_var` | Model uncertainty variance |
+| `amplitude_total_var` | Sum of aleatoric + epistemic |
+| `velocity_aleatoric_var` | Data noise variance |
+| `velocity_epistemic_var` | Model uncertainty variance |
+| `velocity_total_var` | Sum of aleatoric + epistemic |
+| `mode_entropy` | Classification entropy (MC Dropout only) |
 
 ---
 
@@ -515,6 +641,30 @@ with:
 - `consistency_score`: `(N,)` float in `[0, 1]`, fraction of applicable checks
   passed.
 - `anomaly_flag`: `(N,)` bool, True when `consistency_score < 0.8`.
+
+### Model Selection Report
+
+`generate_model_selection_report(training_report)` in
+`turbomodal.optimization.explainability` takes the report dict returned by
+`train_mode_id_model` and produces a structured summary including:
+
+- `summary`: human-readable text describing the selected tier and its metrics.
+- `per_tier_metrics`: dict mapping tier number to validation metrics.
+- `gap_analysis`: list of score deltas between consecutive tiers.
+- `selected_tier`: the tier number of the best model.
+
+### Explanation Cards
+
+`generate_explanation_card(model, X_single, predictions, ...)` produces a
+per-prediction explanation dict containing:
+
+- `predicted_values`: ND, whirl direction, amplitude, wave velocity.
+- `confidence`: calibrated confidence score.
+- `physics_check`: results of `physics_consistency_check` for this sample.
+- `shap_values`: SHAP attributions (best-effort; None if SHAP unavailable).
+- `confidence_interval`: 95% CI from uncertainty if available.
+- `anomaly_flag`: True if physics check or epistemic uncertainty flags the sample.
+- `explanation_text`: human-readable summary of the prediction.
 
 ---
 
