@@ -279,4 +279,4 @@ pipeline, and sensor optimisation.
 
 ## License
 
-[Placeholder -- license to be determined.]
+MIT License Copyright (c) 2026 Adam Moëc

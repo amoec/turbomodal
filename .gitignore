@@ -70,3 +70,4 @@ env/
 .cache
 logs/
 tmp/
+filestructure.txt
