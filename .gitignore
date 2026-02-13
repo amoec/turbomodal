@@ -65,4 +65,8 @@ mlartifacts/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Logs and temporary files
 .cache
+logs/
+tmp/
