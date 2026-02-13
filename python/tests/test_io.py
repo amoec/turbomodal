@@ -35,7 +35,23 @@ class TestLoadCad:
         with pytest.raises(ValueError, match="Unsupported CAD format"):
             load_cad(str(dummy), num_sectors=24)
 
+    def test_stl_rejected(self, tmp_path):
+        from turbomodal.io import load_cad
+        dummy = tmp_path / "model.stl"
+        dummy.write_text("dummy")
+        with pytest.raises(ValueError, match="STL files are surface meshes"):
+            load_cad(str(dummy), num_sectors=24)
+
     def test_file_not_found(self):
         from turbomodal.io import load_cad
         with pytest.raises(FileNotFoundError):
             load_cad("/nonexistent/file.step", num_sectors=24)
+
+
+class TestLoadMeshValidation:
+    def test_unsupported_format(self, tmp_path):
+        from turbomodal.io import load_mesh
+        dummy = tmp_path / "model.stl"
+        dummy.write_text("dummy")
+        with pytest.raises(ValueError, match="Unsupported mesh format"):
+            load_mesh(str(dummy), num_sectors=24)

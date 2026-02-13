@@ -1,6 +1,6 @@
 """Geometry and mesh import for turbomodal.
 
-Supports CAD files (STEP, IGES, BREP, STL) via gmsh and
+Supports CAD files (STEP, IGES, BREP) via gmsh OpenCASCADE and
 pre-meshed files (NASTRAN, Abaqus, VTK, gmsh MSH) via meshio.
 """
 
@@ -14,8 +14,8 @@ import numpy as np
 from turbomodal._core import Mesh, NodeSet
 
 
-# File extensions handled by gmsh OpenCASCADE kernel
-_CAD_EXTENSIONS = {".step", ".stp", ".iges", ".igs", ".brep", ".stl"}
+# File extensions handled by gmsh OpenCASCADE kernel (solid geometry only)
+_CAD_EXTENSIONS = {".step", ".stp", ".iges", ".igs", ".brep"}
 
 # File extensions handled by meshio
 _MESHIO_EXTENSIONS = {
@@ -26,6 +26,9 @@ _MESHIO_EXTENSIONS = {
     ".med",           # Salome MED
     ".xdmf",          # XDMF
 }
+
+# All mesh extensions (meshio + native .msh)
+_MESH_EXTENSIONS = _MESHIO_EXTENSIONS | {".msh"}
 
 
 def load_cad(
@@ -43,7 +46,7 @@ def load_cad(
 
     Parameters
     ----------
-    filepath : path to CAD file (.step, .stp, .iges, .igs, .brep, .stl)
+    filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
     num_sectors : number of sectors in the full annulus
     mesh_size : characteristic mesh element size (None = auto)
     order : element order (2 = quadratic TET10)
@@ -56,6 +59,12 @@ def load_cad(
     Returns
     -------
     Mesh object ready for cyclic symmetry analysis
+
+    Notes
+    -----
+    STL files are not supported — they are surface meshes without solid
+    geometry and cannot be volumetrically meshed. Convert to STEP or BREP
+    first, or use ``load_mesh`` with a pre-meshed volumetric file.
     """
     import gmsh
 
@@ -64,6 +73,12 @@ def load_cad(
         raise FileNotFoundError(f"CAD file not found: {filepath}")
 
     ext = filepath.suffix.lower()
+    if ext == ".stl":
+        raise ValueError(
+            "STL files are surface meshes and cannot be volumetrically meshed. "
+            "Convert to STEP or BREP in your CAD tool, or use load_mesh() "
+            "with a pre-meshed volumetric file (.bdf, .inp, .msh, etc.)."
+        )
     if ext not in _CAD_EXTENSIONS:
         raise ValueError(
             f"Unsupported CAD format '{ext}'. Supported: {sorted(_CAD_EXTENSIONS)}"
@@ -73,12 +88,8 @@ def load_cad(
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
 
-        # Import geometry — STL is a mesh format, not CAD, so use merge()
-        if ext == ".stl":
-            gmsh.merge(str(filepath))
-        else:
-            gmsh.model.occ.importShapes(str(filepath))
-            gmsh.model.occ.synchronize()
+        gmsh.model.occ.importShapes(str(filepath))
+        gmsh.model.occ.synchronize()
 
         # Set mesh size
         if mesh_size is not None:
@@ -124,10 +135,10 @@ def _auto_detect_cyclic_boundaries(
     # Compute mean normal and mean position of each surface
     surface_data = []
     for dim, tag in surfaces:
-        # Get parametric bounds
-        umin, vmin, umax, vmax = gmsh.model.getParametrizationBounds(dim, tag)
-        u_mid = (umin + umax) / 2
-        v_mid = (vmin + vmax) / 2
+        # Get parametric bounds — returns ([umin, vmin], [umax, vmax])
+        bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
+        u_mid = (bounds_min[0] + bounds_max[0]) / 2
+        v_mid = (bounds_min[1] + bounds_max[1]) / 2
         # Evaluate point and normal at center
         pt = gmsh.model.getValue(dim, tag, [u_mid, v_mid])
         normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
@@ -270,6 +281,21 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
     return mesh
 
 
+def _meshio_to_gmsh_tet10(connectivity: np.ndarray) -> np.ndarray:
+    """Reorder TET10 nodes from meshio convention to gmsh convention.
+
+    meshio swaps mid-edge nodes 8 and 9 relative to gmsh:
+      gmsh:   [0,1,2,3, 4(0-1), 5(1-2), 6(0-2), 7(0-3), 8(1-3), 9(2-3)]
+      meshio: [0,1,2,3, 4(0-1), 5(1-2), 6(0-2), 7(0-3), 9(2-3), 8(1-3)]
+
+    The C++ solver expects gmsh ordering.
+    """
+    reordered = connectivity.copy()
+    reordered[:, 8] = connectivity[:, 9]
+    reordered[:, 9] = connectivity[:, 8]
+    return reordered
+
+
 def load_mesh(
     filepath: str | Path,
     num_sectors: int,
@@ -307,6 +333,14 @@ def load_mesh(
         mesh.match_boundary_nodes()
         return mesh
 
+    # Validate extension when no explicit format override
+    if file_format is None and ext not in _MESHIO_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported mesh format '{ext}'. Supported: "
+            f"{sorted(_MESH_EXTENSIONS)}. "
+            f"For CAD files (.step, .iges, .brep) use load_cad() instead."
+        )
+
     # For all other formats, use meshio
     import meshio
 
@@ -333,6 +367,10 @@ def load_mesh(
         )
 
     connectivity = np.vstack(tet10_blocks).astype(np.int32)
+
+    # meshio uses a different TET10 node ordering than gmsh — swap nodes 8 & 9
+    connectivity = _meshio_to_gmsh_tet10(connectivity)
+
     coords = mio.points.astype(np.float64)
 
     # Extract node sets from meshio point_sets
