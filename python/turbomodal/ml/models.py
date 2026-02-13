@@ -871,10 +871,10 @@ class TreeModeIDModel:
                 from xgboost import XGBClassifier, XGBRegressor
 
                 self._mode_clf = XGBClassifier(
-                    n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
+                    n_estimators=100, eval_metric="mlogloss"
                 )
                 self._whirl_clf = XGBClassifier(
-                    n_estimators=100, use_label_encoder=False, eval_metric="mlogloss"
+                    n_estimators=100, eval_metric="mlogloss"
                 )
                 self._amp_reg = XGBRegressor(n_estimators=100)
                 self._vel_reg = XGBRegressor(n_estimators=100)
@@ -895,7 +895,7 @@ class TreeModeIDModel:
         mode_labels = np.array(
             [self._mode_label_encoder[int(v)] for v in mode_labels_raw], dtype=np.int64
         )
-        whirl = np.asarray(y["whirl_direction"], dtype=np.int64)
+        whirl = np.asarray(y["whirl_direction"], dtype=np.int64) + 1  # -1,0,1 -> 0,1,2
         amplitude = np.asarray(y["amplitude"], dtype=np.float64)
         velocity = np.asarray(y["wave_velocity"], dtype=np.float64)
 
@@ -954,7 +954,7 @@ class TreeModeIDModel:
             [self._mode_label_decoder[int(i)] for i in mode_pred_idx], dtype=np.int64
         )
         nd, nc = _decode_mode_labels(mode_pred)
-        whirl_pred = self._whirl_clf.predict(X)
+        whirl_pred = self._whirl_clf.predict(X) - 1  # 0,1,2 -> -1,0,1
         amp_pred = self._amp_reg.predict(X)
         vel_pred = self._vel_reg.predict(X)
 
