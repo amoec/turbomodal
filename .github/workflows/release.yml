@@ -18,11 +18,7 @@ jobs:
         with:
           submodules: true
 
-      - name: Install cibuildwheel
-        run: python -m pip install cibuildwheel==2.0.0a2
-
-      - name: Build wheels
-        run: python -m cibuildwheel --output-dir wheelhouse
+      - uses: pypa/cibuildwheel@v3.3.1
 
       - uses: actions/upload-artifact@v4
         with:
@@ -37,7 +33,11 @@ jobs:
         with:
           submodules: true
 
-      - run: pipx run build --sdist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install build && python -m build --sdist
 
       - uses: actions/upload-artifact@v4
         with:
