@@ -182,10 +182,10 @@ def _train_pytorch_model(
     X_t = torch.as_tensor(X_train, dtype=torch.float32)
     ds = TensorDataset(
         X_t,
-        torch.as_tensor(mode_targets),
-        torch.as_tensor(whirl_targets),
-        torch.as_tensor(amp_targets),
-        torch.as_tensor(vel_targets),
+        torch.tensor(mode_targets, dtype=torch.long),
+        torch.tensor(whirl_targets, dtype=torch.long),
+        torch.tensor(amp_targets, dtype=torch.float32),
+        torch.tensor(vel_targets, dtype=torch.float32),
     )
     loader = DataLoader(ds, batch_size=config.batch_size, shuffle=True)
 
@@ -204,10 +204,10 @@ def _train_pytorch_model(
         vel_val = np.asarray(y_val["wave_velocity"], dtype=np.float32)
 
         X_val_t = torch.as_tensor(X_val, dtype=torch.float32).to(device)
-        mode_val_t = torch.as_tensor(mode_val).to(device)
-        whirl_val_t = torch.as_tensor(whirl_val).to(device)
-        amp_val_t = torch.as_tensor(amp_val).to(device)
-        vel_val_t = torch.as_tensor(vel_val).to(device)
+        mode_val_t = torch.tensor(mode_val, dtype=torch.long).to(device)
+        whirl_val_t = torch.tensor(whirl_val, dtype=torch.long).to(device)
+        amp_val_t = torch.tensor(amp_val, dtype=torch.float32).to(device)
+        vel_val_t = torch.tensor(vel_val, dtype=torch.float32).to(device)
 
     # Losses & optimizer ------------------------------------------------------
     ce_loss = nn.CrossEntropyLoss()
