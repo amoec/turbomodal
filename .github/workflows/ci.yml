@@ -29,10 +29,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libglu1-mesa
 
-      - name: Install libomp (macOS)
-        if: runner.os == 'macOS'
-        run: brew install libomp
-
       - name: Install build dependencies
         run: pip install scikit-build-core pybind11
 
@@ -41,6 +37,9 @@ jobs:
 
       - name: Run Python tests
         run: pytest python/tests/ -v --tb=short
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
 
   cpp-tests:
     strategy:
