@@ -70,3 +70,4 @@ mlartifacts/
 .cache
 logs/
 tmp/
+filestructure.txt
