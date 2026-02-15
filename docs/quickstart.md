@@ -400,7 +400,11 @@ The `conformal` method also provides `prediction_interval_lower` and
 - **Examples** -- `examples/python_example.py` demonstrates mesh loading,
   solving, and visualization. `examples/generate_visualizations.py` shows
   plotting workflows.
-- **C++ Tests** -- Build with `BUILD_TESTS=ON` and run `ctest` to verify
-  the solver against analytical benchmarks.
+- **Tests** -- Run `pytest python/tests/ -v` for the Python test suite
+  (170+ tests). Run `pytest -m validation` for analytical benchmark tests
+  (Leissa plate, Kwak added mass, FMM, SDOF FRF).
+- **C++ Tests** -- Build with `BUILD_TESTS=ON` and run `ctest` for unit
+  tests (~8 seconds). Add `BUILD_VALIDATION_TESTS=ON` for slow validation
+  tests (~10 minutes) including Leissa, Kwak, and Coriolis benchmarks.
 - **MLflow** -- Training metrics are logged automatically when mlflow is
   installed. Launch the dashboard with `mlflow ui`.

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include "turbomodal/cyclic_solver.hpp"
 #include "turbomodal/element.hpp"
+#include "turbomodal/forced_response.hpp"
+#include "turbomodal/mistuning.hpp"
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -604,6 +606,127 @@ TEST(Validation, CentrifugalStiffeningEffect) {
                     << "ND=" << nd << " FW frequency should exceed 0 RPM value";
             }
         }
+    }
+}
+
+TEST(Validation, RayleighQuotientBound) {
+    // Rayleigh quotient with trial w = 1 - (r/a)^2 gives upper bound on ND=0 fundamental
+    Mesh mesh = load_leissa_mesh();
+    double E = 200e9, nu = 0.33, rho = 7850.0;
+    Material mat(E, nu, rho);
+
+    GlobalAssembler assembler;
+    assembler.assemble(mesh, mat);
+    const SpMatd& K = assembler.K();
+    const SpMatd& M = assembler.M();
+    int ndof = mesh.num_dof();
+
+    double a = 0.3, h_plate = 0.01;
+    Eigen::VectorXd u_z = Eigen::VectorXd::Zero(ndof);
+    for (int i = 0; i < mesh.num_nodes(); i++) {
+        double x = mesh.nodes(i, 0);
+        double y = mesh.nodes(i, 1);
+        double r = std::sqrt(x * x + y * y);
+        u_z(3 * i + 2) = 1.0 - (r / a) * (r / a);
+    }
+    double KE = u_z.dot(K * u_z);
+    double ME = u_z.dot(M * u_z);
+    double f_rayleigh = std::sqrt(KE / ME) / (2.0 * PI);
+
+    // FEA ND=0 fundamental should be <= Rayleigh quotient (upper bound)
+    CyclicSymmetrySolver solver(mesh, mat);
+    auto results = solver.solve_at_rpm(0.0, 3);
+    const ModalResult* r0 = nullptr;
+    for (const auto& r : results) {
+        if (r.harmonic_index == 0) { r0 = &r; break; }
+    }
+    ASSERT_NE(r0, nullptr);
+    ASSERT_GT(r0->frequencies.size(), 0);
+
+    double f_fea = r0->frequencies(0);
+    EXPECT_LT(f_fea, f_rayleigh * 1.01)
+        << "FEA frequency should not exceed Rayleigh quotient upper bound";
+}
+
+TEST(Validation, MassConservation) {
+    // u^T * M * u for unit translation = rho * V_sector within 2%
+    Mesh mesh = load_leissa_mesh();
+    double rho = 7850.0;
+    Material mat(200e9, 0.33, rho);
+
+    GlobalAssembler assembler;
+    assembler.assemble(mesh, mat);
+    const SpMatd& M = assembler.M();
+    int ndof = mesh.num_dof();
+
+    Eigen::VectorXd ux = Eigen::VectorXd::Zero(ndof);
+    for (int i = 0; i < mesh.num_nodes(); i++) ux(3 * i) = 1.0;
+    double mass_fea = ux.dot(M * ux);
+
+    // Analytical sector volume: (alpha/2) * (R_outer^2 - R_inner^2) * h
+    double alpha_rad = 2.0 * PI / 24.0;
+    double V_sector = alpha_rad / 2.0 * (0.3 * 0.3 - 0.03 * 0.03) * 0.01;
+    double mass_expected = rho * V_sector;
+
+    EXPECT_NEAR(mass_fea, mass_expected, mass_expected * 0.02)
+        << "Total mass from M should match rho*V_sector within 2%";
+}
+
+TEST(Validation, ModalFRFAnalytical) {
+    // ForcedResponseSolver::modal_frf at 200 points matches exact formula < 1e-10
+    double omega_r = 2.0 * PI * 800.0;
+    double zeta = 0.015;
+    std::complex<double> Q(3.0, -2.0);
+
+    for (int i = 0; i < 200; i++) {
+        double f = 200.0 + i * 5.0;
+        double omega = 2.0 * PI * f;
+        auto H = ForcedResponseSolver::modal_frf(omega, omega_r, Q, zeta);
+
+        std::complex<double> denom(omega_r * omega_r - omega * omega,
+                                    2.0 * zeta * omega_r * omega);
+        std::complex<double> expected = Q / denom;
+
+        EXPECT_NEAR(H.real(), expected.real(), std::abs(expected) * 1e-10)
+            << "FRF real mismatch at f=" << f << " Hz";
+        EXPECT_NEAR(H.imag(), expected.imag(), std::abs(expected) * 1e-10)
+            << "FRF imag mismatch at f=" << f << " Hz";
+    }
+}
+
+TEST(Validation, FMMTunedIdentity) {
+    // FMM with zero deviations: frequencies preserved, bounded magnification/IPR.
+    // Degenerate eigenvalue pairs (harmonics k=1..N/2-1) allow eigenvector
+    // arbitrariness, so magnification can reach sqrt(2) and IPR up to 1.5.
+    int N = 24;
+    Eigen::VectorXd tuned(13);
+    for (int i = 0; i < 13; i++) tuned(i) = 500.0 + i * 100.0;
+    Eigen::VectorXd dev = Eigen::VectorXd::Zero(N);
+
+    auto result = FMMSolver::solve(N, tuned, dev);
+    EXPECT_LE(result.peak_magnification, std::sqrt(2.0) + 0.01);
+    EXPECT_GE(result.peak_magnification, 1.0 - 1e-10);
+    for (int m = 0; m < N; m++) {
+        EXPECT_LE(result.localization_ipr(m), 2.0)
+            << "IPR should be bounded for tuned system at mode " << m;
+        EXPECT_GE(result.localization_ipr(m), 0.5)
+            << "IPR should be at least 0.5 for tuned system at mode " << m;
+    }
+}
+
+TEST(Validation, FMMWhiteheadBound) {
+    // 100 random seeds: mag <= 1 + sqrt((N-1)/2) ≈ 4.39 for N=24
+    int N = 24;
+    double whitehead_bound = 1.0 + std::sqrt((N - 1) / 2.0);
+
+    Eigen::VectorXd tuned(13);
+    for (int i = 0; i < 13; i++) tuned(i) = 1000.0 + i * 50.0;
+
+    for (unsigned int seed = 0; seed < 100; seed++) {
+        auto dev = FMMSolver::random_mistuning(N, 0.05, seed);
+        auto result = FMMSolver::solve(N, tuned, dev);
+        EXPECT_LE(result.peak_magnification, whitehead_bound)
+            << "Whitehead bound violated for seed " << seed;
     }
 }
 

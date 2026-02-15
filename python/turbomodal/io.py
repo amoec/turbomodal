@@ -38,7 +38,7 @@ def load_cad(
     order: int = 2,
     left_boundary_name: str = "left_boundary",
     right_boundary_name: str = "right_boundary",
-    hub_name: str | None = "hub",
+    hub_name: str | None = "hub_constraint",
     auto_detect_boundaries: bool = True,
     verbosity: int = 0,
 ) -> Mesh:
@@ -204,6 +204,22 @@ def _auto_detect_cyclic_boundaries(
         pg = gmsh.model.addPhysicalGroup(2, right_tags)
         gmsh.model.setPhysicalName(2, pg, right_name)
 
+    # Enforce periodic (node-matched) meshing on cyclic boundary pairs.
+    # Without this, gmsh meshes each face independently and the cyclic
+    # symmetry solver cannot pair boundary nodes.
+    if left_candidates and right_candidates:
+        cos_a = np.cos(sector_angle)
+        sin_a = np.sin(sector_angle)
+        # 4x4 affine rotation matrix about Z (flat row-major for gmsh)
+        rot = [
+            cos_a, -sin_a, 0, 0,
+            sin_a,  cos_a, 0, 0,
+            0,      0,     1, 0,
+            0,      0,     0, 1,
+        ]
+        for lt, rt in zip(left_tags, right_tags):
+            gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
+
     if hub_name and hub_candidates:
         hub_tags = [s["tag"] for s in hub_candidates]
         pg = gmsh.model.addPhysicalGroup(2, hub_tags)
@@ -244,6 +260,10 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
             for i in range(n_elems):
                 for j in range(10):
                     connectivity[i, j] = tag_to_idx[int(raw[i, j])]
+            # gmsh Python API returns TET10 nodes in a different order than
+            # the .msh file format: nodes 8 and 9 are swapped.  The C++ solver
+            # expects the .msh convention, so swap them back.
+            connectivity[:, [8, 9]] = connectivity[:, [9, 8]]
             tet10_connectivity = connectivity
             break
 

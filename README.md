@@ -4,6 +4,9 @@ Cyclic symmetry FEA solver with ML-based modal identification for turbomachinery
 
 **Platforms:** Linux, macOS, Windows &nbsp;|&nbsp; **Python:** 3.9+ &nbsp;|&nbsp; **C++:** C++17
 
+> **Note:** This package is not yet published to PyPI. Install from source
+> (see [Installation](#installation) below).
+
 ## Overview
 
 turbomodal is an end-to-end toolkit for turbomachinery modal analysis. It
@@ -187,7 +190,7 @@ Core (always required):
 | meshio     | >= 5.3   |
 | h5py       | >= 3.7   |
 
-ML extras (`pip install turbomodal[ml]`):
+ML extras (`pip install -e ".[ml]"`):
 
 | Package      | Version  |
 |--------------|----------|
@@ -256,23 +259,35 @@ turbomodal/
 
 Optional runtime dependencies (for ML features): scikit-learn, xgboost,
 PyTorch, SHAP, Optuna, MLflow. These are installed automatically with
-`pip install turbomodal[ml]`.
+`pip install -e ".[ml]"`.
 
 ## Running Tests
 
 ```bash
-# C++ tests (requires BUILD_TESTS=ON in CMake)
+# C++ unit tests (14 suites, ~130 tests, ~8 seconds)
 cd build && ctest --output-on-failure
 
-# Python tests
+# C++ validation tests (requires rebuild with slow tests enabled, ~10 min)
+cmake .. -DBUILD_VALIDATION_TESTS=ON && cmake --build . && ctest --output-on-failure
+
+# Python tests (14 test files, 170+ tests)
 pytest python/tests/ -v
+
+# Python validation tests only
+pytest python/tests/ -v -m validation
+
+# Python tests with coverage report
+pytest python/tests/ -v --cov=turbomodal --cov-report=term-missing
 ```
 
 The C++ test suite covers material properties, element stiffness/mass,
-mesh I/O, global assembly, modal solver validation, cyclic symmetry, added
-mass, rotating effects, and validation against analytical solutions. The
-Python test suite covers bindings, I/O round-trips, visualisation, ML
-pipeline, and sensor optimisation.
+mesh I/O, global assembly, modal solver, cyclic symmetry, added mass,
+rotating effects, damping, forced response, mistuning (FMM), mode
+identification, and validation against Leissa plate theory, Kwak added
+mass, and Coriolis splitting analytical solutions. The Python test suite
+covers bindings, I/O, solver API, signal generation, noise models,
+sensors, datasets, parametric sweeps, ML pipeline, sensor optimisation,
+and end-to-end integration tests.
 
 ## Supported Mesh Formats
 

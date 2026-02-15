@@ -230,41 +230,88 @@ ladder stops and returns the best model seen so far.
 
 ### Overview
 
-The project has five Python test files under
-`/Users/adam/Projects/modal-identification/turbomodal/python/tests/`:
+The project has 14 C++ test suites and 14 Python test files providing
+comprehensive coverage of all four subsystems.
 
-| File                     | Subsystem | Description                                  |
-|--------------------------|-----------|----------------------------------------------|
-| `test_ml.py`             | C         | Feature extraction, all 6 model tiers + variants, evaluation, pipeline, label encoding, Optuna HPO, CompositeModel, OOD |
-| `test_optimization.py`   | D         | Fisher information, observability, sensor placement, physics checks, calibration, UQ, model selection report, explanation cards |
-| `test_python_bindings.py`| A         | C++ binding tests: Material, Mesh, Solver    |
-| `test_io.py`             | A         | Mesh import (Gmsh `.msh`), CAD loading       |
-| `test_viz.py`            | A         | Visualization: mesh plots, mode shape animation |
+### C++ Test Suites
+
+Built with `BUILD_TESTS=ON` (unit tests) and optionally
+`BUILD_VALIDATION_TESTS=ON` (slow validation and integration tests).
+Run via `ctest --output-on-failure` from the build directory.
+
+| Suite                    | Module              | Tests | Description                                      |
+|--------------------------|---------------------|-------|--------------------------------------------------|
+| `MaterialTests`          | material            | ~5    | Material properties, temperature dependence      |
+| `ElementTests`           | element             | ~8    | TET10 stiffness/mass, shape functions            |
+| `MeshTests`              | mesh                | ~6    | Mesh loading, cyclic boundary detection          |
+| `AssemblerTests`         | assembler           | ~5    | Global K/M assembly                              |
+| `SolverTests`            | modal_solver        | ~6    | Eigenvalue solver                                |
+| `CyclicTests`            | cyclic_solver       | ~8    | Cyclic symmetry transformation                   |
+| `AddedMassTests`         | added_mass          | ~4    | Kwak AVMI formula                                |
+| `RotatingTests`          | rotating_effects    | ~6    | Centrifugal stiffening, spin softening           |
+| `DampingTests`           | damping             | 14    | Rayleigh, modal, aerodynamic, effective damping  |
+| `ForcedResponseTests`    | forced_response     | 18    | Modal FRF, modal forces, EO aliasing, participation factors |
+| `MistuningTests`         | mistuning           | 18    | FMM solver, random mistuning, Whitehead bound    |
+| `ModeIdentificationTests`| mode_identification | 13    | Family classification, nodal circles, whirl      |
+| `ValidationTests`*       | (cross-module)      | 10    | Leissa plate, Kwak added mass, Rayleigh quotient, mass conservation, FMM, Coriolis splitting |
+| `IntegrationTests`*      | (cross-module)      | 3     | End-to-end: load-solve-identify, forced response pipeline, mistuning pipeline |
+
+\* Requires `BUILD_VALIDATION_TESTS=ON`. These tests take approximately
+10 minutes due to mesh loading and multiple solves.
+
+### Python Test Files
+
+Located under `python/tests/`:
+
+| File                       | Subsystem | Description                                      |
+|----------------------------|-----------|--------------------------------------------------|
+| `test_python_bindings.py`  | A         | C++ binding tests: Material, Mesh, Solver        |
+| `test_io.py`               | A         | Mesh import (Gmsh `.msh`), CAD loading           |
+| `test_viz.py`              | A         | Visualization: mesh plots, mode shapes, Campbell |
+| `test_solver.py`           | A         | High-level `solve()`, `rpm_sweep()`, `campbell_data()` |
+| `test_dataset.py`          | B         | HDF5 export/import roundtrip, file structure     |
+| `test_parametric.py`       | B         | LHS sampling, parametric sweep generation        |
+| `test_sensors.py`          | B         | BTT arrays, virtual sensors, mode shape sampling |
+| `test_noise.py`            | B         | Gaussian noise, bandwidth, quantization, dropout |
+| `test_signal_gen.py`       | B         | Signal synthesis pipeline                        |
+| `test_ml.py`               | C         | Feature extraction, all 6 model tiers + variants, evaluation, pipeline, label encoding, Optuna HPO, CompositeModel, OOD |
+| `test_optimization.py`     | D         | Fisher information, observability, sensor placement, physics checks, calibration, UQ, model selection report, explanation cards |
+| `test_validation_python.py`| A+C       | Leissa plate theory, Kwak frequency ratios, FMM tuned identity, Campbell ordering, SDOF FRF analytical |
+| `test_integration.py`      | A-D       | End-to-end: HDF5 roundtrip, sensors pipeline, mistuning, forced response |
+| `conftest.py`              | --        | Session-scoped fixtures: mesh paths, solved wedge |
 
 ### Running Tests
 
-Run the full suite:
+Run all Python tests:
 
 ```bash
 pytest python/tests/ -v
 ```
 
-Run only ML tests:
+Run only validation tests (marked with `@pytest.mark.validation`):
 
 ```bash
-pytest python/tests/test_ml.py -v
+pytest python/tests/ -v -m validation
 ```
 
-Run only optimization/explainability tests:
+Run with coverage reporting:
 
 ```bash
-pytest python/tests/test_optimization.py -v
+pytest python/tests/ -v --cov=turbomodal --cov-report=term-missing
 ```
 
-With coverage reporting:
+Run C++ unit tests (fast, ~8 seconds):
 
 ```bash
-pytest python/tests/ --cov=turbomodal --cov-report=term-missing
+cd build && ctest --output-on-failure
+```
+
+Run C++ validation tests (slow, ~10 minutes):
+
+```bash
+cmake .. -DBUILD_TESTS=ON -DBUILD_VALIDATION_TESTS=ON -DBUILD_PYTHON=OFF
+cmake --build .
+ctest --output-on-failure
 ```
 
 ### Test Categories
@@ -379,16 +426,29 @@ Optional dependencies for full coverage:
    MPS > CPU. In CI environments without GPU, tests run on CPU with no
    configuration changes needed.
 
-3. **Test data**: tests use synthetically generated data via
-   `_make_synthetic_dataset(n_samples, n_features, seed)`. No external data
-   files are required for the ML and optimization test suites.
+3. **Test data**: ML and optimization tests use synthetically generated data
+   via `_make_synthetic_dataset(n_samples, n_features, seed)`. FEA-dependent
+   tests (solver, sensors, signal_gen, dataset, integration, validation)
+   require mesh files in `tests/test_data/` and will skip if not found.
 
 4. **Timeouts**: Tier 1-3 tests complete in under 5 seconds. Tier 4-6 tests
    (when PyTorch is available) may take 10-30 seconds depending on hardware.
    Setting `config.epochs` to a small value (2-5) in test configurations
-   keeps training fast.
+   keeps training fast. C++ validation tests take ~10 minutes total (Leissa
+   flat disk, Kwak added mass, and Coriolis splitting each require full
+   cyclic symmetry solves).
 
 5. **Fixture dependencies**: `test_io.py`, `test_viz.py`, and
    `test_python_bindings.py` require the compiled C++ extension module
    (`turbomodal._core`) and mesh fixture files. These tests will be skipped
    if the C++ extension is not built.
+
+6. **Session-scoped fixtures**: `conftest.py` provides session-scoped
+   `wedge_mesh_path` and `leissa_mesh_path` fixtures to avoid redundant
+   mesh loading. Module-scoped test fixtures (e.g. `wedge_mesh` in
+   `test_solver.py`) depend on these.
+
+7. **Pytest markers**: `@pytest.mark.validation` gates slow Python
+   validation tests (Leissa, Kwak, FMM, Campbell, SDOF FRF).
+   `@pytest.mark.slow` is available for other long-running tests. Register
+   markers in `conftest.py` via `pytest_configure`.

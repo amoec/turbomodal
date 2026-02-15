@@ -589,7 +589,7 @@ appropriate SHAP explainer based on model type:
   into a `(n_samples, 4)` output. A background dataset of up to 100 samples
   is randomly selected. Returns shape `(n_samples, n_features, n_outputs)`.
 
-Requires the `shap` package (`pip install turbomodal[ml]`).
+Requires the `shap` package (`pip install -e ".[ml]"`).
 
 ### Grad-CAM
 

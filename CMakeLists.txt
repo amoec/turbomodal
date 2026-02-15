@@ -135,12 +135,36 @@ if(BUILD_TESTS)
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
   add_test(NAME RotatingTests COMMAND test_rotating)
 
+  add_executable(test_damping tests/test_damping.cpp)
+  target_link_libraries(test_damping turbomodal_core GTest::gtest_main)
+  add_test(NAME DampingTests COMMAND test_damping)
+
+  add_executable(test_forced_response tests/test_forced_response.cpp)
+  target_link_libraries(test_forced_response turbomodal_core GTest::gtest_main)
+  add_test(NAME ForcedResponseTests COMMAND test_forced_response)
+
+  add_executable(test_mistuning tests/test_mistuning.cpp)
+  target_link_libraries(test_mistuning turbomodal_core GTest::gtest_main)
+  add_test(NAME MistuningTests COMMAND test_mistuning)
+
+  add_executable(test_mode_identification tests/test_mode_identification.cpp)
+  target_link_libraries(test_mode_identification turbomodal_core GTest::gtest_main)
+  target_compile_definitions(test_mode_identification PRIVATE
+    TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
+  add_test(NAME ModeIdentificationTests COMMAND test_mode_identification)
+
   if(BUILD_VALIDATION_TESTS)
     add_executable(test_validation tests/test_validation.cpp)
     target_link_libraries(test_validation turbomodal_core GTest::gtest_main)
     target_compile_definitions(test_validation PRIVATE
       TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
     add_test(NAME ValidationTests COMMAND test_validation)
+
+    add_executable(test_integration tests/test_integration.cpp)
+    target_link_libraries(test_integration turbomodal_core GTest::gtest_main)
+    target_compile_definitions(test_integration PRIVATE
+      TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
+    add_test(NAME IntegrationTests COMMAND test_integration)
   endif()
 endif()
 

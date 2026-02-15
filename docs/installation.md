@@ -14,13 +14,10 @@ these manually.
 
 ## Quick Install
 
-Install the released package from PyPI:
+> **Note:** turbomodal is not yet published to PyPI. Install from source using
+> the instructions in [Building from Source](#building-from-source) below.
 
-```bash
-pip install turbomodal
-```
-
-This installs the core package with the following dependencies:
+The core package requires the following dependencies (installed automatically):
 
 | Package      | Minimum Version | Purpose                              |
 |------------- |---------------- |------------------------------------- |
@@ -37,10 +34,10 @@ This installs the core package with the following dependencies:
 ## Install with ML Support
 
 To use the machine learning pipeline (feature extraction, complexity ladder
-training, SHAP explainability, sensor optimization), install the `ml` extra:
+training, SHAP explainability, sensor optimization), install with the `ml` extra:
 
 ```bash
-pip install "turbomodal[ml]"
+pip install -e ".[ml]"
 ```
 
 This adds:
@@ -61,7 +58,7 @@ This adds:
 For development (including test dependencies), install all extras:
 
 ```bash
-pip install "turbomodal[ml,dev]"
+pip install -e ".[ml,dev]"
 ```
 
 The `dev` extra adds:
@@ -78,7 +75,7 @@ The `dev` extra adds:
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-org/turbomodal.git
+git clone https://github.com/amoec/turbomodal.git
 cd turbomodal
 ```
 
@@ -172,11 +169,12 @@ paths need to be specified.
 
 The following options can be passed to CMake via `-D`:
 
-| Option            | Default | Description                              |
-|------------------ |-------- |----------------------------------------- |
-| `BUILD_PYTHON`    | `ON`    | Build the pybind11 Python bindings       |
-| `BUILD_TESTS`     | `ON`    | Build C++ GTest unit tests               |
-| `USE_OPENMP`      | `ON`    | Enable OpenMP parallelism in the solver  |
+| Option                   | Default | Description                                      |
+|------------------------- |-------- |------------------------------------------------- |
+| `BUILD_PYTHON`           | `ON`    | Build the pybind11 Python bindings               |
+| `BUILD_TESTS`            | `ON`    | Build C++ GTest unit tests                       |
+| `BUILD_VALIDATION_TESTS` | `OFF`   | Build slow validation and integration tests      |
+| `USE_OPENMP`             | `ON`    | Enable OpenMP parallelism in the solver          |
 
 When building through `pip install`, the defaults in `pyproject.toml` set
 `BUILD_TESTS=OFF`, `BUILD_PYTHON=ON`, and `USE_OPENMP=OFF`. To override,
@@ -194,7 +192,7 @@ SKBUILD_CMAKE_ARGS="-DUSE_OPENMP=ON" pip install .
 |------------ |-------- |--------------------------------------------- |
 | Eigen       | 3.4.0   | CMake FetchContent (downloaded at configure) |
 | Spectra     | latest  | Git submodule at `external/spectra/`         |
-| GTest       | system  | Required only when `BUILD_TESTS=ON`          |
+| GTest       | 1.14.0  | CMake FetchContent (downloaded at configure) |
 | OpenMP      | system  | Optional, enabled by `USE_OPENMP=ON`         |
 
 Eigen 3.4.0 is pinned explicitly because the Spectra library is
