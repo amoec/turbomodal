@@ -858,6 +858,9 @@ class TreeModeIDModel:
         )
 
         # Three-level fallback: LightGBM -> XGBoost -> RandomForest
+        # Catch Exception (not just ImportError) because XGBoost raises
+        # XGBoostError when libomp is missing on macOS, and LightGBM can
+        # raise OSError for similar shared-library issues.
         try:
             from lightgbm import LGBMClassifier, LGBMRegressor
 
@@ -866,7 +869,7 @@ class TreeModeIDModel:
             self._amp_reg = LGBMRegressor(n_estimators=100, verbose=-1)
             self._vel_reg = LGBMRegressor(n_estimators=100, verbose=-1)
             self._backend = "lightgbm"
-        except ImportError:
+        except Exception:
             try:
                 from xgboost import XGBClassifier, XGBRegressor
 
@@ -879,7 +882,7 @@ class TreeModeIDModel:
                 self._amp_reg = XGBRegressor(n_estimators=100)
                 self._vel_reg = XGBRegressor(n_estimators=100)
                 self._backend = "xgboost"
-            except ImportError:
+            except Exception:
                 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
                 self._mode_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)
