@@ -208,13 +208,11 @@ class TestLoadCadFullPipeline:
         mesh = load_cad(test_step_path, num_sectors=24, rotation_axis=2)
         assert mesh.num_elements() > 0
 
-    def test_no_volumes_raises(self, tmp_path):
-        """Surface-only CAD files should give a clear error, not a
-        cryptic 'No TET10 elements' message."""
+    def test_open_surface_raises(self, tmp_path):
+        """An open surface (not a closed shell) cannot become a solid."""
         import gmsh
         from turbomodal.io import load_cad
-        # Create a surface-only BREP file (no solid volume)
-        brep = tmp_path / "surface_only.brep"
+        brep = tmp_path / "open_surface.brep"
         gmsh.initialize()
         try:
             gmsh.model.occ.addDisk(0, 0, 0, 1, 1)
@@ -224,6 +222,48 @@ class TestLoadCadFullPipeline:
             gmsh.finalize()
         with pytest.raises(RuntimeError, match="no solid volumes"):
             load_cad(str(brep), num_sectors=24)
+
+    def test_heals_surface_only_model(self, tmp_path):
+        """A closed shell (surfaces forming a watertight boundary) should
+        be auto-healed into a solid volume and produce TET10 elements."""
+        import gmsh
+        brep = tmp_path / "surface_only_box.brep"
+        gmsh.initialize()
+        try:
+            gmsh.model.occ.addBox(0, 0, 0, 0.1, 0.05, 0.025)
+            gmsh.model.occ.synchronize()
+            # Remove volume, keep surfaces
+            vols = gmsh.model.getEntities(dim=3)
+            gmsh.model.occ.remove(vols, recursive=False)
+            gmsh.model.occ.synchronize()
+            gmsh.write(str(brep))
+        finally:
+            gmsh.finalize()
+        # Verify the healing pipeline directly: import surface-only BREP,
+        # heal into a solid, mesh, and check for TET10 elements.
+        # We can't use load_cad end-to-end because a box isn't a cyclic
+        # sector and load_from_arrays requires cyclic boundary groups.
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Verbosity", 0)
+            gmsh.model.occ.importShapes(str(brep))
+            gmsh.model.occ.synchronize()
+            assert len(gmsh.model.getEntities(dim=3)) == 0, "Should start with no volumes"
+            gmsh.model.occ.healShapes(sewFaces=True, makeSolids=True)
+            gmsh.model.occ.synchronize()
+            volumes = gmsh.model.getEntities(dim=3)
+            assert len(volumes) > 0, "healShapes should create a solid volume"
+            gmsh.model.mesh.generate(3)
+            gmsh.model.mesh.setOrder(2)
+            # Check TET10 elements (type 11) exist
+            elem_types, _, elem_nodes = gmsh.model.mesh.getElements(dim=3)
+            tet10_count = 0
+            for etype, enodes in zip(elem_types, elem_nodes):
+                if etype == 11:
+                    tet10_count = len(enodes) // 10
+            assert tet10_count > 0, "Should produce TET10 elements after healing"
+        finally:
+            gmsh.finalize()
 
 
 class TestRotationMatrix4x4:
