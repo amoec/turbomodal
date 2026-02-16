@@ -86,9 +86,13 @@ _PERP_AXES = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
 def _detect_rotation_axis(num_sectors: int) -> int:
     """Detect which axis (0=X, 1=Y, 2=Z) is the rotation/symmetry axis.
 
-    For each candidate axis, projects sampled surface points onto the
+    For each candidate axis, projects per-entity bounding-box corners onto the
     perpendicular plane and computes the angular span.  The axis whose
     angular span is closest to 360/num_sectors degrees is the rotation axis.
+
+    Uses ``getBoundingBox(dim, tag)`` which returns the tight spatial bounds
+    of each trimmed entity, avoiding the untrimmed-parametric-domain issue
+    that plagues ``getParametrizationBounds``/``getValue``.
 
     Must be called within an active gmsh session with a loaded model.
     """
@@ -100,13 +104,12 @@ def _detect_rotation_axis(num_sectors: int) -> int:
     points = []
     for dim, tag in surfaces:
         try:
-            bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
-            for u_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-                for v_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-                    u = bounds_min[0] + u_frac * (bounds_max[0] - bounds_min[0])
-                    v = bounds_min[1] + v_frac * (bounds_max[1] - bounds_min[1])
-                    pt = gmsh.model.getValue(dim, tag, [u, v])
-                    points.append(pt[:3])
+            sb = gmsh.model.getBoundingBox(dim, tag)
+            # sb = (xmin, ymin, zmin, xmax, ymax, zmax)
+            for x in (sb[0], sb[3]):
+                for y in (sb[1], sb[4]):
+                    for z in (sb[2], sb[5]):
+                        points.append([x, y, z])
         except Exception:
             pass
 
@@ -137,16 +140,28 @@ def _detect_rotation_axis(num_sectors: int) -> int:
     return best_axis
 
 
-def _detect_step_units(filepath: Path) -> str:
-    """Parse a STEP file for SI_UNIT length declarations.
+def _detect_cad_units(filepath: Path) -> str:
+    """Detect length units from a CAD file's metadata.
 
-    Returns a unit name string: "mm", "m", "cm", "um", "inch", or "unknown".
+    Dispatches to format-specific parsers based on file extension.
+    Returns a unit name: "mm", "m", "cm", "um", "inch", "ft", or "unknown".
+
+    Supported formats with unit metadata:
+    - STEP / STP : SI_UNIT or CONVERSION_BASED_UNIT in the data section
+    - IGES / IGS : Units Flag (parameter 14) in the Global Section
+    - BREP       : no unit metadata (always returns "unknown")
     """
-    import re
-
     ext = filepath.suffix.lower()
-    if ext not in (".step", ".stp"):
-        return "unknown"
+    if ext in (".step", ".stp"):
+        return _parse_step_units(filepath)
+    if ext in (".iges", ".igs"):
+        return _parse_iges_units(filepath)
+    return "unknown"
+
+
+def _parse_step_units(filepath: Path) -> str:
+    """Parse a STEP file for SI_UNIT length declarations."""
+    import re
 
     try:
         text = filepath.read_text(errors="ignore")
@@ -183,6 +198,91 @@ def _detect_step_units(filepath: Path) -> str:
         return conv_units.get(unit_str, "unknown")
 
     return "unknown"
+
+
+def _parse_iges_units(filepath: Path) -> str:
+    """Parse an IGES file for the Units Flag in the Global Section.
+
+    The IGES Global Section (lines ending with 'G' in column 73) contains
+    comma-separated parameters.  Parameter 14 is the Units Flag:
+
+        1=inch, 2=mm, 3=see param 15, 4=ft, 5=mile,
+        6=m, 7=km, 8=mil, 9=um, 10=cm, 11=uin
+    """
+    # Map IGES Units Flag integer to our unit string
+    _IGES_UNIT_FLAG = {
+        1: "inch",
+        2: "mm",
+        # 3 = custom (handled below via param 15)
+        4: "ft",
+        5: "mile",
+        6: "m",
+        7: "km",
+        8: "mil",
+        9: "um",
+        10: "cm",
+        11: "uin",
+    }
+
+    try:
+        text = filepath.read_text(errors="ignore")
+    except Exception:
+        return "unknown"
+
+    # Collect Global Section lines (column 73 == 'G')
+    global_chars = []
+    for line in text.splitlines():
+        if len(line) >= 73 and line[72] == "G":
+            # Columns 1-72 contain the data
+            global_chars.append(line[:72])
+
+    if not global_chars:
+        return "unknown"
+
+    global_text = "".join(global_chars)
+
+    # The Global Section uses comma as the parameter delimiter and semicolon
+    # as the record delimiter.  The first two parameters are Hollerith strings
+    # defining these delimiters (e.g. "1H," and "1H;").
+    #
+    # Splitting by ";" is unsafe because "1H;" is a Hollerith string containing
+    # the semicolon character.  Instead, split by commas and strip trailing
+    # semicolons and whitespace from each parameter.
+    params = [p.strip().rstrip(";").strip() for p in global_text.split(",")]
+
+    # After splitting "1H,,1H;,...,<unit_flag>;":
+    #   params[0] = "1H"  (first half of the Hollerith "1H,")
+    #   params[1] = ""    (the literal comma from "1H," consumes a split slot)
+    #   params[2] = "1H"  (record delimiter "1H;" with ; stripped)
+    #   params[3..13] = IGES params 3-13
+    #   params[14] = IGES param 14 = Units Flag
+    # The extra split slot from "1H," means IGES param N is at index N for N >= 2.
+    if len(params) < 15:
+        return "unknown"
+
+    try:
+        unit_flag = int(params[14])
+    except (ValueError, IndexError):
+        return "unknown"
+
+    if unit_flag == 3:
+        # Custom unit — check IGES param 15 (split index 15) for a unit name
+        # Hollerith string like "2HMM" or "4HINCH"; strip the count+H prefix.
+        if len(params) > 15:
+            import re
+            cleaned = re.sub(r"^\d+H", "", params[15]).upper()
+            name_map = {
+                "MM": "mm", "MILLIMETER": "mm", "MILLIMETRE": "mm",
+                "CM": "cm", "CENTIMETER": "cm", "CENTIMETRE": "cm",
+                "M": "m", "METER": "m", "METRE": "m",
+                "IN": "inch", "INCH": "inch",
+                "FT": "ft", "FOOT": "ft",
+                "UM": "um", "MICRON": "um", "MICROMETER": "um",
+            }
+            return name_map.get(cleaned, "unknown")
+        return "unknown"
+
+    return _IGES_UNIT_FLAG.get(unit_flag, "unknown")
 
 
 def _align_axis_to_z(nodes: np.ndarray, rotation_axis: int) -> np.ndarray:
@@ -347,7 +447,7 @@ def _build_cad_info(
     if units is not None:
         detected_unit = units
     else:
-        detected_unit = _detect_step_units(filepath)
+        detected_unit = _detect_cad_units(filepath)
 
     # Perpendicular coordinate indices for radius computation
     c1, c2 = _PERP_AXES[rotation_axis]
@@ -369,19 +469,19 @@ def _build_cad_info(
     for _, tag in surfaces:
         total_area += gmsh.model.occ.getMass(2, tag)
 
-    # Compute inner/outer radius by sampling surface parametric points
-    # using the two coordinates perpendicular to the rotation axis
+    # Compute inner/outer radius from per-entity bounding boxes.
+    # We use getBoundingBox(dim, tag) which returns the tight spatial bounds
+    # of each trimmed entity.  This is much more reliable than parametric
+    # sampling via getParametrizationBounds/getValue, because the parametric
+    # domain of untrimmed surfaces can extend far beyond the actual geometry.
     radii = []
     for dim, tag in surfaces:
         try:
-            bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
-            for u_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-                for v_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-                    u = bounds_min[0] + u_frac * (bounds_max[0] - bounds_min[0])
-                    v = bounds_min[1] + v_frac * (bounds_max[1] - bounds_min[1])
-                    pt = gmsh.model.getValue(dim, tag, [u, v])
-                    r = np.sqrt(pt[c1] ** 2 + pt[c2] ** 2)
-                    radii.append(r)
+            sb = gmsh.model.getBoundingBox(dim, tag)
+            # sb = (xmin, ymin, zmin, xmax, ymax, zmax)
+            for v1 in (sb[c1], sb[c1 + 3]):
+                for v2 in (sb[c2], sb[c2 + 3]):
+                    radii.append(np.sqrt(v1**2 + v2**2))
         except Exception:
             pass
 
@@ -389,7 +489,7 @@ def _build_cad_info(
         inner_radius = float(min(radii))
         outer_radius = float(max(radii))
     else:
-        # Fallback: estimate from bounding box corners
+        # Fallback: estimate from overall bounding box corners
         corners_r = []
         for v1 in (bbox_vals[c1], bbox_vals[c1 + 3]):
             for v2 in (bbox_vals[c2], bbox_vals[c2 + 3]):
@@ -514,17 +614,32 @@ def _auto_detect_cyclic_boundaries(
     sector_angle = 2 * np.pi / num_sectors
     surfaces = gmsh.model.getEntities(dim=2)
 
-    # Compute mean normal and mean position of each surface
+    # Compute mean normal and mean position of each surface.
+    # Position is derived from the per-entity bounding box (getBoundingBox)
+    # which returns the tight spatial bounds of the *trimmed* entity.
+    # This avoids the untrimmed-parametric-domain issue where
+    # getParametrizationBounds/getValue can produce points far outside
+    # the actual geometry.
+    # Normals are still evaluated via getNormal at the parametric centre;
+    # the *direction* is correct even if the parametric domain is untrimmed.
     surface_data = []
     for dim, tag in surfaces:
-        # Get parametric bounds — returns ([umin, vmin], [umax, vmax])
-        bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
-        u_mid = (bounds_min[0] + bounds_max[0]) / 2
-        v_mid = (bounds_min[1] + bounds_max[1]) / 2
-        # Evaluate point and normal at center
-        pt = gmsh.model.getValue(dim, tag, [u_mid, v_mid])
-        normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
-        x, y, z = pt[0], pt[1], pt[2]
+        try:
+            sb = gmsh.model.getBoundingBox(dim, tag)
+        except Exception:
+            continue
+        # Bounding-box centre as a reliable surface position estimate
+        x = (sb[0] + sb[3]) / 2
+        y = (sb[1] + sb[4]) / 2
+        z = (sb[2] + sb[5]) / 2
+        # Normal at parametric centre (direction only — still valid)
+        try:
+            bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
+            u_mid = (bounds_min[0] + bounds_max[0]) / 2
+            v_mid = (bounds_min[1] + bounds_max[1]) / 2
+            normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
+        except Exception:
+            normal = [0.0, 0.0, 1.0]  # fallback
         theta = np.arctan2(y, x)
         if theta < -0.01:
             theta += 2 * np.pi
