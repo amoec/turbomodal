@@ -39,6 +39,13 @@ class CadInfo:
     Returned by :func:`inspect_cad` to let the user inspect geometry
     dimensions and the recommended mesh size before committing to a
     full volumetric mesh via :func:`load_cad`.
+
+    All length values (radii, axial_length, etc.) are in **metres**,
+    which is the internal unit used by gmsh's OpenCASCADE kernel
+    regardless of the unit declared in the source CAD file.
+    ``detected_unit`` records the declared unit so that display helpers
+    like ``_format_dimension`` can convert to the original unit for
+    human-readable output.
     """
 
     filepath: str
@@ -86,13 +93,15 @@ _PERP_AXES = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
 def _detect_rotation_axis(num_sectors: int) -> int:
     """Detect which axis (0=X, 1=Y, 2=Z) is the rotation/symmetry axis.
 
-    For each candidate axis, projects per-entity bounding-box corners onto the
-    perpendicular plane and computes the angular span.  The axis whose
-    angular span is closest to 360/num_sectors degrees is the rotation axis.
+    For each candidate axis, projects per-entity bounding-box *centres*
+    onto the perpendicular plane and computes the angular span.  The axis
+    whose angular span is closest to 360/num_sectors degrees is the
+    rotation axis.
 
-    Uses ``getBoundingBox(dim, tag)`` which returns the tight spatial bounds
-    of each trimmed entity, avoiding the untrimmed-parametric-domain issue
-    that plagues ``getParametrizationBounds``/``getValue``.
+    Uses the centre of ``getBoundingBox(dim, tag)`` (one point per
+    surface entity) rather than all 8 bounding-box corners, because
+    combining min/max coordinates across different axes creates phantom
+    angular positions that inflate the measured span.
 
     Must be called within an active gmsh session with a loaded model.
     """
@@ -105,11 +114,12 @@ def _detect_rotation_axis(num_sectors: int) -> int:
     for dim, tag in surfaces:
         try:
             sb = gmsh.model.getBoundingBox(dim, tag)
-            # sb = (xmin, ymin, zmin, xmax, ymax, zmax)
-            for x in (sb[0], sb[3]):
-                for y in (sb[1], sb[4]):
-                    for z in (sb[2], sb[5]):
-                        points.append([x, y, z])
+            # Use the centre of the entity bounding box
+            points.append([
+                (sb[0] + sb[3]) / 2,
+                (sb[1] + sb[4]) / 2,
+                (sb[2] + sb[5]) / 2,
+            ])
         except Exception:
             pass
 
@@ -536,6 +546,8 @@ def load_cad(
     right_boundary_name: str = "right_boundary",
     hub_name: str | None = "hub_constraint",
     auto_detect_boundaries: bool = True,
+    rotation_axis: int | None = None,
+    units: str | None = None,
     verbosity: int = 0,
 ) -> Mesh:
     """Load a CAD file and generate a TET10 mesh for cyclic symmetry analysis.
@@ -544,12 +556,14 @@ def load_cad(
     ----------
     filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
     num_sectors : number of sectors in the full annulus
-    mesh_size : characteristic mesh element size (None = auto)
+    mesh_size : characteristic mesh element size (None = auto from geometry)
     order : element order (2 = quadratic TET10)
     left_boundary_name : physical group name for the left cyclic boundary
     right_boundary_name : physical group name for the right cyclic boundary
     hub_name : physical group name for the hub constraint (None = no hub)
     auto_detect_boundaries : automatically identify cyclic boundary surfaces
+    rotation_axis : override rotation axis (0=X, 1=Y, 2=Z, None=auto-detect)
+    units : override unit detection ("mm", "m", "inch", None=auto-detect)
     verbosity : gmsh verbosity level (0=silent, 1=errors, 5=debug)
 
     Returns
@@ -573,15 +587,33 @@ def load_cad(
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        # Set mesh size
-        if mesh_size is not None:
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
-            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.1)
+        # Check that the model contains solid volumes
+        volumes = gmsh.model.getEntities(dim=3)
+        if not volumes:
+            surfaces = gmsh.model.getEntities(dim=2)
+            raise RuntimeError(
+                f"CAD file contains no solid volumes (found {len(surfaces)} "
+                f"surfaces). 3D meshing requires solid geometry. If the "
+                f"file contains only surfaces/shells, repair it in your "
+                f"CAD tool to create a closed solid, or use load_mesh() "
+                f"with a pre-meshed volumetric file."
+            )
+
+        # Inspect geometry for mesh size and rotation axis
+        info = _build_cad_info(filepath, num_sectors,
+                               rotation_axis=rotation_axis, units=units)
+
+        # Set mesh size — auto-compute from geometry when not specified
+        if mesh_size is None:
+            mesh_size = info.recommended_mesh_size
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.1)
 
         # Auto-detect cyclic boundaries if requested
         if auto_detect_boundaries:
             _auto_detect_cyclic_boundaries(
-                num_sectors, left_boundary_name, right_boundary_name, hub_name
+                num_sectors, left_boundary_name, right_boundary_name,
+                hub_name, rotation_axis=info.rotation_axis,
             )
 
         # Generate 3D mesh
@@ -596,11 +628,45 @@ def load_cad(
     return mesh
 
 
+def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
+    """Build a flat row-major 4x4 affine rotation matrix for gmsh.
+
+    Parameters
+    ----------
+    axis : 0=X, 1=Y, 2=Z
+    angle : rotation angle in radians
+    """
+    c = np.cos(angle)
+    s = np.sin(angle)
+    if axis == 0:  # rotation about X
+        return [
+            1, 0,  0, 0,
+            0, c, -s, 0,
+            0, s,  c, 0,
+            0, 0,  0, 1,
+        ]
+    if axis == 1:  # rotation about Y
+        return [
+             c, 0, s, 0,
+             0, 1, 0, 0,
+            -s, 0, c, 0,
+             0, 0, 0, 1,
+        ]
+    # axis == 2: rotation about Z
+    return [
+        c, -s, 0, 0,
+        s,  c, 0, 0,
+        0,  0, 1, 0,
+        0,  0, 0, 1,
+    ]
+
+
 def _auto_detect_cyclic_boundaries(
     num_sectors: int,
     left_name: str,
     right_name: str,
     hub_name: str | None,
+    rotation_axis: int = 2,
 ) -> None:
     """Auto-detect cyclic boundary surfaces and hub from geometry.
 
@@ -608,10 +674,15 @@ def _auto_detect_cyclic_boundaries(
     to the sector angle boundaries. The surface at theta=0 is 'left_boundary',
     the surface at theta=2*pi/N is 'right_boundary'. The innermost surface
     (smallest mean radius) is the hub.
+
+    Parameters
+    ----------
+    rotation_axis : 0=X, 1=Y, 2=Z — which axis the sector revolves around.
     """
     import gmsh
 
     sector_angle = 2 * np.pi / num_sectors
+    c1, c2 = _PERP_AXES[rotation_axis]
     surfaces = gmsh.model.getEntities(dim=2)
 
     # Compute mean normal and mean position of each surface.
@@ -629,9 +700,11 @@ def _auto_detect_cyclic_boundaries(
         except Exception:
             continue
         # Bounding-box centre as a reliable surface position estimate
-        x = (sb[0] + sb[3]) / 2
-        y = (sb[1] + sb[4]) / 2
-        z = (sb[2] + sb[5]) / 2
+        center = np.array([
+            (sb[0] + sb[3]) / 2,
+            (sb[1] + sb[4]) / 2,
+            (sb[2] + sb[5]) / 2,
+        ])
         # Normal at parametric centre (direction only — still valid)
         try:
             bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
@@ -639,15 +712,17 @@ def _auto_detect_cyclic_boundaries(
             v_mid = (bounds_min[1] + bounds_max[1]) / 2
             normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
         except Exception:
-            normal = [0.0, 0.0, 1.0]  # fallback
-        theta = np.arctan2(y, x)
+            normal = [0.0, 0.0, 0.0]
+            normal[rotation_axis] = 1.0  # fallback along rotation axis
+        # theta and radius in the perpendicular plane
+        theta = np.arctan2(center[c2], center[c1])
         if theta < -0.01:
             theta += 2 * np.pi
-        r = np.sqrt(x**2 + y**2)
+        r = np.sqrt(center[c1] ** 2 + center[c2] ** 2)
         surface_data.append({
             "tag": tag,
             "normal": np.array(normal[:3]),
-            "center": np.array([x, y, z]),
+            "center": center,
             "theta": theta,
             "radius": r,
         })
@@ -661,33 +736,31 @@ def _auto_detect_cyclic_boundaries(
     hub_candidates = []
 
     for sd in surface_data:
-        nx, ny, nz = sd["normal"]
-        # Normal of a cyclic cut surface is roughly tangential (perpendicular to radial)
-        # Check if normal is mostly in the tangential direction
+        # Component of normal along the rotation axis
+        axial_component = abs(sd["normal"][rotation_axis])
         theta = sd["theta"]
         r = sd["radius"]
 
-        # For the left boundary (theta ~ 0): normal is ~ (0, -1, 0) rotated
-        # For the right boundary (theta ~ sector_angle): normal rotated by sector_angle
-        # Simple heuristic: check if the surface center theta is near 0 or sector_angle
-        center_theta = sd["theta"]
-        mean_z_component = abs(nz)
-
-        # Hub: surface with normal pointing inward (radially) and low z-component of normal
-        if mean_z_component < 0.3 and r < np.median([s["radius"] for s in surface_data]):
+        # Hub: surface with normal pointing inward (radially) and small
+        # axial component
+        if axial_component < 0.3 and r < np.median([s["radius"] for s in surface_data]):
             # Check if normal is roughly radially inward
-            radial_dir = np.array([sd["center"][0], sd["center"][1], 0])
+            radial_dir = np.zeros(3)
+            radial_dir[c1] = sd["center"][c1]
+            radial_dir[c2] = sd["center"][c2]
             if np.linalg.norm(radial_dir) > 1e-10:
                 radial_dir /= np.linalg.norm(radial_dir)
                 dot = np.dot(sd["normal"], radial_dir)
                 if abs(dot) > 0.7:
                     hub_candidates.append(sd)
 
-        # Left/right: surfaces with normals mostly in the xy-plane and tangential
-        if mean_z_component < 0.5:
-            if abs(center_theta) < sector_angle * 0.15 or abs(center_theta - 2 * np.pi) < sector_angle * 0.15:
+        # Left/right: surfaces with normals mostly in the perpendicular
+        # plane (small axial component) and centre theta near 0 or
+        # sector_angle
+        if axial_component < 0.5:
+            if abs(theta) < sector_angle * 0.15 or abs(theta - 2 * np.pi) < sector_angle * 0.15:
                 left_candidates.append(sd)
-            elif abs(center_theta - sector_angle) < sector_angle * 0.15:
+            elif abs(theta - sector_angle) < sector_angle * 0.15:
                 right_candidates.append(sd)
 
     # Create physical groups
@@ -705,15 +778,7 @@ def _auto_detect_cyclic_boundaries(
     # Without this, gmsh meshes each face independently and the cyclic
     # symmetry solver cannot pair boundary nodes.
     if left_candidates and right_candidates:
-        cos_a = np.cos(sector_angle)
-        sin_a = np.sin(sector_angle)
-        # 4x4 affine rotation matrix about Z (flat row-major for gmsh)
-        rot = [
-            cos_a, -sin_a, 0, 0,
-            sin_a,  cos_a, 0, 0,
-            0,      0,     1, 0,
-            0,      0,     0, 1,
-        ]
+        rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
         for lt, rt in zip(left_tags, right_tags):
             gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
 
@@ -765,7 +830,53 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
             break
 
     if tet10_connectivity is None:
-        raise RuntimeError("No TET10 elements found in mesh. Ensure 3D meshing with order=2.")
+        # Collect diagnostics to help the user
+        volumes = gmsh.model.getEntities(dim=3)
+        found_types = {}
+        for d in range(4):
+            et, etg, _ = gmsh.model.mesh.getElements(dim=d)
+            for etype, tags in zip(et, etg):
+                found_types[int(etype)] = (d, len(tags))
+
+        _GMSH_TYPE_NAMES = {
+            1: "Line2", 2: "Tri3", 3: "Quad4", 4: "Tet4",
+            5: "Hex8", 6: "Prism6", 8: "Line3", 9: "Tri6",
+            11: "Tet10", 15: "Point",
+        }
+        type_summary = ", ".join(
+            f"{_GMSH_TYPE_NAMES.get(t, f'type{t}')}(dim{d})×{n}"
+            for t, (d, n) in sorted(found_types.items())
+        )
+
+        hints = []
+        if not volumes:
+            hints.append(
+                "The model has no solid volumes — only surfaces/shells. "
+                "Repair the CAD file to create a closed solid body."
+            )
+        if 4 in found_types and 11 not in found_types:
+            hints.append(
+                "Linear tetrahedra (Tet4) were generated but quadratic "
+                "conversion failed. Try calling gmsh.model.mesh.setOrder(2) "
+                "explicitly, or check for geometry issues that prevent "
+                "high-order meshing."
+            )
+        if not found_types:
+            hints.append(
+                "No mesh elements were generated at all. The 3D mesher "
+                "may have failed silently — try increasing verbosity or "
+                "providing an explicit mesh_size."
+            )
+
+        msg = (
+            f"No TET10 (quadratic tetrahedra) elements found in mesh. "
+            f"Volumes in model: {len(volumes)}. "
+            f"Elements found: [{type_summary or 'none'}]."
+        )
+        if hints:
+            msg += " " + " ".join(hints)
+
+        raise RuntimeError(msg)
 
     # Extract physical group node sets
     node_sets = []

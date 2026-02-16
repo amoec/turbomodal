@@ -194,6 +194,60 @@ class TestExtractSurfaceTessellation:
         assert triangles.min() >= 0
 
 
+class TestLoadCadFullPipeline:
+    def test_produces_tet10_mesh(self, test_step_path):
+        from turbomodal.io import load_cad
+        mesh = load_cad(test_step_path, num_sectors=24)
+        assert mesh.num_nodes() > 0
+        assert mesh.num_elements() > 0
+        assert len(mesh.left_boundary) > 0
+        assert len(mesh.right_boundary) > 0
+
+    def test_rotation_axis_override(self, test_step_path):
+        from turbomodal.io import load_cad
+        mesh = load_cad(test_step_path, num_sectors=24, rotation_axis=2)
+        assert mesh.num_elements() > 0
+
+    def test_no_volumes_raises(self, tmp_path):
+        """Surface-only CAD files should give a clear error, not a
+        cryptic 'No TET10 elements' message."""
+        import gmsh
+        from turbomodal.io import load_cad
+        # Create a surface-only BREP file (no solid volume)
+        brep = tmp_path / "surface_only.brep"
+        gmsh.initialize()
+        try:
+            gmsh.model.occ.addDisk(0, 0, 0, 1, 1)
+            gmsh.model.occ.synchronize()
+            gmsh.write(str(brep))
+        finally:
+            gmsh.finalize()
+        with pytest.raises(RuntimeError, match="no solid volumes"):
+            load_cad(str(brep), num_sectors=24)
+
+
+class TestRotationMatrix4x4:
+    def test_z_axis(self):
+        from turbomodal.io import _rotation_matrix_4x4
+        angle = np.pi / 12  # 15 degrees
+        m = _rotation_matrix_4x4(2, angle)
+        assert len(m) == 16
+        assert m[0] == pytest.approx(np.cos(angle))
+        assert m[10] == pytest.approx(1.0)  # z-z = 1
+
+    def test_x_axis(self):
+        from turbomodal.io import _rotation_matrix_4x4
+        m = _rotation_matrix_4x4(0, np.pi / 6)
+        assert m[0] == pytest.approx(1.0)  # x-x = 1
+        assert m[5] == pytest.approx(np.cos(np.pi / 6))  # y-y
+
+    def test_y_axis(self):
+        from turbomodal.io import _rotation_matrix_4x4
+        m = _rotation_matrix_4x4(1, np.pi / 4)
+        assert m[5] == pytest.approx(1.0)  # y-y = 1
+        assert m[0] == pytest.approx(np.cos(np.pi / 4))  # x-x
+
+
 class TestLoadMeshValidation:
     def test_unsupported_format(self, tmp_path):
         from turbomodal.io import load_mesh
