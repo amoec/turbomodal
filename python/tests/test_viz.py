@@ -61,6 +61,47 @@ class TestPlotFullAnnulus:
         plotter.close()
 
 
+class TestPlotCad:
+    def test_single_sector(self, test_step_path):
+        from turbomodal.viz import plot_cad
+        plotter = plot_cad(test_step_path, num_sectors=24, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_full_disk(self, test_step_path):
+        from turbomodal.viz import plot_cad
+        plotter = plot_cad(
+            test_step_path, num_sectors=24,
+            show_full_disk=True, off_screen=True,
+        )
+        assert plotter is not None
+        plotter.close()
+
+    def test_no_dimensions(self, test_step_path):
+        from turbomodal.viz import plot_cad
+        plotter = plot_cad(
+            test_step_path, num_sectors=24,
+            show_dimensions=False, off_screen=True,
+        )
+        assert plotter is not None
+        plotter.close()
+
+
+class TestPlotFullMesh:
+    def test_returns_plotter(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.viz import plot_full_mesh
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        mesh.identify_cyclic_boundaries()
+        mesh.match_boundary_nodes()
+
+        plotter = plot_full_mesh(mesh, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+
 class TestPlotCampbell:
     def test_with_mock_data(self):
         from turbomodal._core import ModalResult

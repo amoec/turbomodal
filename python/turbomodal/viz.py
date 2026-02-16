@@ -31,6 +31,210 @@ def _mesh_to_pyvista(mesh: Mesh):
     return grid
 
 
+def _replicate_sectors(
+    nodes: np.ndarray,
+    cells_per_sector: np.ndarray,
+    n_sectors: int,
+    celltypes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Replicate a sector mesh around the Z-axis.
+
+    Parameters
+    ----------
+    nodes : (N, 3) node coordinates for one sector
+    cells_per_sector : (E, K+1) cell array in PyVista format (first col = n_pts)
+    n_sectors : number of sectors
+    celltypes : (E,) VTK cell type array for one sector
+
+    Returns
+    -------
+    all_nodes : (N*n_sectors, 3) replicated nodes
+    all_cells : (E*n_sectors, K+1) replicated cell array
+    all_celltypes : (E*n_sectors,) replicated cell types
+    """
+    n_nodes = len(nodes)
+    sector_angle = 2 * np.pi / n_sectors
+
+    all_nodes_list = []
+    all_cells_list = []
+    all_celltypes_list = []
+
+    for s in range(n_sectors):
+        theta = s * sector_angle
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        R = np.array([
+            [cos_t, -sin_t, 0],
+            [sin_t, cos_t, 0],
+            [0, 0, 1],
+        ])
+        rotated = nodes @ R.T
+
+        offset_cells = cells_per_sector.copy()
+        offset_cells[:, 1:] += s * n_nodes
+
+        all_nodes_list.append(rotated)
+        all_cells_list.append(offset_cells)
+        all_celltypes_list.append(celltypes)
+
+    return (
+        np.vstack(all_nodes_list),
+        np.vstack(all_cells_list),
+        np.concatenate(all_celltypes_list),
+    )
+
+
+def _format_dimension(value: float) -> str:
+    """Format a dimension value with appropriate units (mm or m)."""
+    if abs(value) < 1.0:
+        return f"{value * 1000:.1f} mm"
+    return f"{value:.4f} m"
+
+
+def plot_cad(
+    filepath,
+    num_sectors: int,
+    show_full_disk: bool = False,
+    show_dimensions: bool = True,
+    surface_mesh_size: float | None = None,
+    off_screen: bool = False,
+):
+    """Visualize CAD geometry before volumetric meshing.
+
+    Imports the CAD file, generates a lightweight surface triangulation,
+    and renders it in PyVista. Optionally shows the full 360-degree
+    assembly and dimension annotations including recommended mesh size.
+
+    Parameters
+    ----------
+    filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
+    num_sectors : number of sectors in the full annulus
+    show_full_disk : replicate sector around Z-axis for full 360-degree view
+    show_dimensions : add annotations with bounding box, radii, mesh size
+    surface_mesh_size : override surface mesh element size (None = auto)
+    off_screen : render off-screen (for testing)
+
+    Returns
+    -------
+    pyvista.Plotter
+    """
+    import pyvista as pv
+    from pathlib import Path
+    from turbomodal.io import _extract_surface_tessellation
+
+    nodes, triangles, info = _extract_surface_tessellation(
+        filepath, num_sectors, surface_mesh_size,
+    )
+
+    # Build PyVista PolyData from surface triangles
+    n_tri = len(triangles)
+    faces = np.empty((n_tri, 4), dtype=np.int64)
+    faces[:, 0] = 3
+    faces[:, 1:] = triangles
+
+    plotter = pv.Plotter(off_screen=off_screen)
+
+    if show_full_disk:
+        # VTK_TRIANGLE = 5
+        celltypes = np.full(n_tri, 5, dtype=np.uint8)
+        all_nodes, all_cells, all_celltypes = _replicate_sectors(
+            nodes, faces, num_sectors, celltypes,
+        )
+        # Alternate colors per sector for visual distinction
+        sector_ids = np.repeat(np.arange(num_sectors), len(nodes))
+        grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
+        grid.point_data["sector"] = sector_ids.astype(np.float32)
+        plotter.add_mesh(
+            grid, scalars="sector", cmap="Set3", show_edges=True,
+            edge_color="gray", line_width=0.5, opacity=0.9,
+            show_scalar_bar=False,
+        )
+        title = f"Full Disk Preview ({num_sectors} sectors)"
+    else:
+        surface = pv.PolyData(nodes, faces.ravel())
+        plotter.add_mesh(
+            surface, color="lightblue", show_edges=True,
+            edge_color="gray", line_width=0.5, opacity=0.9,
+        )
+        title = f"Sector Preview (1/{num_sectors})"
+
+    plotter.add_text(title, font_size=12, position="upper_edge")
+
+    if show_dimensions:
+        fmt = _format_dimension
+        info_text = (
+            f"File: {Path(filepath).name}\n"
+            f"Sectors: {info.num_sectors} "
+            f"({info.sector_angle_deg:.1f} deg)\n"
+            f"Inner radius: {fmt(info.inner_radius)}\n"
+            f"Outer radius: {fmt(info.outer_radius)}\n"
+            f"Radial span: {fmt(info.radial_span)}\n"
+            f"Axial length: {fmt(info.axial_length)}\n"
+            f"Recommended mesh size: {fmt(info.recommended_mesh_size)}"
+        )
+        plotter.add_text(info_text, position="upper_left", font_size=9)
+        plotter.add_bounding_box(color="gray", opacity=0.3)
+
+    plotter.add_axes()
+    return plotter
+
+
+def plot_full_mesh(
+    mesh: Mesh,
+    off_screen: bool = False,
+):
+    """Plot the full 360-degree mesh without requiring a ModalResult.
+
+    Replicates the single sector mesh around the Z-axis to show the
+    complete annular geometry.
+
+    Parameters
+    ----------
+    mesh : Mesh object (single sector)
+    off_screen : render off-screen (for testing)
+
+    Returns
+    -------
+    pyvista.Plotter
+    """
+    import pyvista as pv
+
+    nodes = np.asarray(mesh.nodes)
+    elements = np.asarray(mesh.elements)
+    n_elem = elements.shape[0]
+    n_sectors = mesh.num_sectors
+
+    # Build per-sector cell array
+    cells = np.empty((n_elem, 11), dtype=np.int64)
+    cells[:, 0] = 10
+    cells[:, 1:] = elements
+    celltypes = np.full(n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
+
+    all_nodes, all_cells, all_celltypes = _replicate_sectors(
+        nodes, cells, n_sectors, celltypes,
+    )
+
+    grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
+
+    # Color by sector for visual distinction
+    n_nodes_per = len(nodes)
+    sector_ids = np.repeat(np.arange(n_sectors), n_nodes_per)
+    grid.point_data["sector"] = sector_ids.astype(np.float32)
+
+    plotter = pv.Plotter(off_screen=off_screen)
+    plotter.add_mesh(
+        grid, scalars="sector", cmap="Set3", show_edges=True,
+        edge_color="gray", line_width=0.5, opacity=0.7,
+        show_scalar_bar=False,
+    )
+    plotter.add_text(
+        f"Full Mesh ({n_sectors} sectors, {mesh.num_elements() * n_sectors} elements)",
+        font_size=12,
+    )
+    plotter.add_axes()
+    return plotter
+
+
 def plot_mesh(
     mesh: Mesh,
     show_boundaries: bool = True,

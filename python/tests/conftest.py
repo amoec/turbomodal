@@ -40,6 +40,15 @@ def leissa_mesh_path(test_data_dir):
 
 
 @pytest.fixture(scope="session")
+def test_step_path(test_data_dir):
+    """Path to a test STEP CAD file."""
+    p = test_data_dir / "test_sector.step"
+    if not p.exists():
+        pytest.skip(f"Test CAD file not found: {p}")
+    return str(p)
+
+
+@pytest.fixture(scope="session")
 def solved_wedge(wedge_mesh_path):
     """Solve wedge sector once for entire test session."""
     from turbomodal._core import Mesh, Material, CyclicSymmetrySolver
