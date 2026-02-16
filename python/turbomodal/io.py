@@ -7,6 +7,7 @@ pre-meshed files (NASTRAN, Abaqus, VTK, gmsh MSH) via meshio.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,243 @@ _MESHIO_EXTENSIONS = {
 
 # All mesh extensions (meshio + native .msh)
 _MESH_EXTENSIONS = _MESHIO_EXTENSIONS | {".msh"}
+
+
+@dataclass
+class CadInfo:
+    """Metadata extracted from a CAD geometry file.
+
+    Returned by :func:`inspect_cad` to let the user inspect geometry
+    dimensions and the recommended mesh size before committing to a
+    full volumetric mesh via :func:`load_cad`.
+    """
+
+    filepath: str
+    num_sectors: int
+    sector_angle_deg: float
+    bounding_box: dict = field(default_factory=dict)
+    inner_radius: float = 0.0
+    outer_radius: float = 0.0
+    axial_length: float = 0.0
+    radial_span: float = 0.0
+    volume: float = 0.0
+    surface_area: float = 0.0
+    characteristic_length: float = 0.0
+    recommended_mesh_size: float = 0.0
+    num_surfaces: int = 0
+    num_volumes: int = 0
+
+
+def _validate_cad_path(filepath: str | Path) -> Path:
+    """Validate a CAD file path and return a resolved Path."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"CAD file not found: {filepath}")
+    ext = filepath.suffix.lower()
+    if ext == ".stl":
+        raise ValueError(
+            "STL files are surface meshes and cannot be volumetrically meshed. "
+            "Convert to STEP or BREP in your CAD tool, or use load_mesh() "
+            "with a pre-meshed volumetric file (.bdf, .inp, .msh, etc.)."
+        )
+    if ext not in _CAD_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported CAD format '{ext}'. Supported: {sorted(_CAD_EXTENSIONS)}"
+        )
+    return filepath
+
+
+def inspect_cad(
+    filepath: str | Path,
+    num_sectors: int,
+    verbosity: int = 0,
+) -> CadInfo:
+    """Inspect a CAD file and return geometry metadata without meshing.
+
+    This is a lightweight operation that imports the CAD geometry,
+    computes bounding box, dimensions, and a recommended mesh size,
+    but does NOT generate any mesh.
+
+    Parameters
+    ----------
+    filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
+    num_sectors : number of sectors in the full annulus
+    verbosity : gmsh verbosity level (0=silent)
+
+    Returns
+    -------
+    CadInfo
+        Geometry metadata including recommended mesh size.
+    """
+    import gmsh
+
+    filepath = _validate_cad_path(filepath)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", verbosity)
+        gmsh.model.occ.importShapes(str(filepath))
+        gmsh.model.occ.synchronize()
+
+        info = _build_cad_info(filepath, num_sectors)
+    finally:
+        gmsh.finalize()
+
+    return info
+
+
+def _extract_surface_tessellation(
+    filepath: str | Path,
+    num_sectors: int,
+    surface_mesh_size: float | None = None,
+    verbosity: int = 0,
+) -> tuple[np.ndarray, np.ndarray, CadInfo]:
+    """Import CAD file and extract a lightweight surface triangulation.
+
+    Generates a 2D surface mesh (triangles only) via gmsh, which is
+    orders of magnitude faster than a full 3D tetrahedral mesh. Used
+    by :func:`~turbomodal.viz.plot_cad` for preview rendering.
+
+    Parameters
+    ----------
+    filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
+    num_sectors : number of sectors in the full annulus
+    surface_mesh_size : element size for the surface mesh (None = auto)
+    verbosity : gmsh verbosity level (0=silent)
+
+    Returns
+    -------
+    nodes : (N, 3) float64 array of node coordinates
+    triangles : (M, 3) int32 array of triangle connectivity (0-based)
+    info : CadInfo with geometry metadata
+    """
+    import gmsh
+
+    filepath = _validate_cad_path(filepath)
+
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Verbosity", verbosity)
+        gmsh.model.occ.importShapes(str(filepath))
+        gmsh.model.occ.synchronize()
+
+        info = _build_cad_info(filepath, num_sectors)
+
+        # Set surface mesh size
+        mesh_sz = surface_mesh_size or info.recommended_mesh_size * 2
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_sz)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_sz * 0.1)
+
+        # Generate 2D surface mesh only (fast)
+        gmsh.model.mesh.generate(2)
+
+        # Extract surface nodes and triangles
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords = np.array(node_coords).reshape(-1, 3)
+
+        tag_to_idx = {}
+        for i, tag in enumerate(node_tags):
+            tag_to_idx[int(tag)] = i
+
+        # Get triangle elements (type 2 = 3-node triangle)
+        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
+        tri_nodes = None
+        for etype, etags, enodes in zip(elem_types, elem_tags, elem_node_tags):
+            if etype == 2:  # 3-node triangle
+                n_elems = len(etags)
+                raw = np.array(enodes, dtype=np.int64).reshape(n_elems, 3)
+                triangles = np.zeros_like(raw, dtype=np.int32)
+                for i in range(n_elems):
+                    for j in range(3):
+                        triangles[i, j] = tag_to_idx[int(raw[i, j])]
+                tri_nodes = triangles
+                break
+
+        if tri_nodes is None:
+            raise RuntimeError("No triangles found in surface mesh.")
+    finally:
+        gmsh.finalize()
+
+    return coords.astype(np.float64), tri_nodes, info
+
+
+def _build_cad_info(filepath: Path, num_sectors: int) -> CadInfo:
+    """Build CadInfo from an active gmsh model (must be called within gmsh session)."""
+    import gmsh
+
+    sector_angle_deg = 360.0 / num_sectors
+
+    # Bounding box
+    xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
+    bbox = dict(xmin=xmin, ymin=ymin, zmin=zmin, xmax=xmax, ymax=ymax, zmax=zmax)
+
+    # Count entities
+    surfaces = gmsh.model.getEntities(dim=2)
+    volumes = gmsh.model.getEntities(dim=3)
+
+    # Volume and surface area via getMass
+    total_volume = 0.0
+    for _, tag in volumes:
+        total_volume += gmsh.model.occ.getMass(3, tag)
+    total_area = 0.0
+    for _, tag in surfaces:
+        total_area += gmsh.model.occ.getMass(2, tag)
+
+    # Compute inner/outer radius by sampling surface parametric points
+    radii = []
+    for dim, tag in surfaces:
+        try:
+            bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
+            # Sample a grid of points on each surface
+            for u_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                for v_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    u = bounds_min[0] + u_frac * (bounds_max[0] - bounds_min[0])
+                    v = bounds_min[1] + v_frac * (bounds_max[1] - bounds_min[1])
+                    pt = gmsh.model.getValue(dim, tag, [u, v])
+                    r = np.sqrt(pt[0] ** 2 + pt[1] ** 2)
+                    radii.append(r)
+        except Exception:
+            pass
+
+    if radii:
+        inner_radius = float(min(radii))
+        outer_radius = float(max(radii))
+    else:
+        # Fallback: estimate from bounding box
+        corners_r = [
+            np.sqrt(xmin**2 + ymin**2),
+            np.sqrt(xmax**2 + ymax**2),
+            np.sqrt(xmin**2 + ymax**2),
+            np.sqrt(xmax**2 + ymin**2),
+        ]
+        inner_radius = float(min(corners_r))
+        outer_radius = float(max(corners_r))
+
+    axial_length = float(zmax - zmin)
+    radial_span = outer_radius - inner_radius
+
+    # Recommended mesh size heuristic
+    characteristic_length = min(radial_span, axial_length)
+    if characteristic_length < 1e-10:
+        characteristic_length = max(radial_span, axial_length)
+    recommended_mesh_size = characteristic_length / 20.0
+
+    return CadInfo(
+        filepath=str(filepath),
+        num_sectors=num_sectors,
+        sector_angle_deg=sector_angle_deg,
+        bounding_box=bbox,
+        inner_radius=inner_radius,
+        outer_radius=outer_radius,
+        axial_length=axial_length,
+        radial_span=radial_span,
+        volume=total_volume,
+        surface_area=total_area,
+        characteristic_length=characteristic_length,
+        recommended_mesh_size=recommended_mesh_size,
+        num_surfaces=len(surfaces),
+        num_volumes=len(volumes),
+    )
 
 
 def load_cad(
@@ -68,21 +306,7 @@ def load_cad(
     """
     import gmsh
 
-    filepath = Path(filepath)
-    if not filepath.exists():
-        raise FileNotFoundError(f"CAD file not found: {filepath}")
-
-    ext = filepath.suffix.lower()
-    if ext == ".stl":
-        raise ValueError(
-            "STL files are surface meshes and cannot be volumetrically meshed. "
-            "Convert to STEP or BREP in your CAD tool, or use load_mesh() "
-            "with a pre-meshed volumetric file (.bdf, .inp, .msh, etc.)."
-        )
-    if ext not in _CAD_EXTENSIONS:
-        raise ValueError(
-            f"Unsupported CAD format '{ext}'. Supported: {sorted(_CAD_EXTENSIONS)}"
-        )
+    filepath = _validate_cad_path(filepath)
 
     gmsh.initialize()
     try:

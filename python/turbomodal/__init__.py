@@ -30,12 +30,14 @@ from turbomodal._core import (
     identify_modes,
 )
 
-from turbomodal.io import load_mesh, load_cad
+from turbomodal.io import load_mesh, load_cad, inspect_cad, CadInfo
 from turbomodal.solver import solve, rpm_sweep, campbell_data
 from turbomodal.viz import (
     plot_mesh,
     plot_mode,
     plot_full_annulus,
+    plot_full_mesh,
+    plot_cad,
     animate_mode,
     plot_campbell,
     plot_zzenf,
@@ -103,6 +105,8 @@ __all__ = [
     # I/O
     "load_mesh",
     "load_cad",
+    "inspect_cad",
+    "CadInfo",
     # Solver
     "solve",
     "rpm_sweep",
@@ -111,6 +115,8 @@ __all__ = [
     "plot_mesh",
     "plot_mode",
     "plot_full_annulus",
+    "plot_full_mesh",
+    "plot_cad",
     "animate_mode",
     "plot_campbell",
     "plot_zzenf",
