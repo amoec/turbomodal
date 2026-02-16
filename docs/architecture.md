@@ -30,7 +30,10 @@ The four subsystems are:
                   |       Subsystem A           |
                   |    FEA & Geometry (C++)     |
                   |                             |
+                  |  inspect_cad() -> CadInfo   |
+                  |  plot_cad() (preview)       |
                   |  load_cad() / load_mesh()   |
+                  |  plot_full_mesh() (verify)  |
                   |             |               |
                   |             v               |
                   |    CyclicSymmetrySolver     |
@@ -171,8 +174,12 @@ for displacement and first-order convergence for stress.
 
 ### Mesh I/O
 
-Two Python-side entry points handle geometry import:
+Three Python-side entry points handle geometry import:
 
+- `inspect_cad(filepath, num_sectors)` -- lightweight CAD inspection that
+  imports STEP/IGES/BREP geometry via gmsh, computes bounding-box dimensions,
+  inner/outer radii, axial length, and a recommended mesh size, without
+  generating any volumetric mesh. Returns a `CadInfo` dataclass.
 - `load_cad(filepath, num_sectors, ...)` -- imports STEP/IGES/BREP/STL
   geometry via gmsh, automatically detects cyclic boundary surfaces, and
   generates a TET10 mesh.
@@ -496,6 +503,11 @@ confidence intervals from uncertainty, and a human-readable summary.
 
 ### Visualization Extensions
 
+- `plot_cad(filepath, num_sectors, ...)` provides pre-mesh CAD geometry
+  preview using a lightweight surface triangulation. Supports single-sector
+  and full-disk views with dimension annotations.
+- `plot_full_mesh(mesh)` renders the full 360-degree mesh by replicating
+  the single sector, without requiring a solved `ModalResult`.
 - `plot_campbell` and `plot_zzenf` accept `confidence_bands` (dict with
   `upper`/`lower` keys) and `crossing_markers=True` to overlay uncertainty
   bands and engine-order crossing annotations.
@@ -543,10 +555,12 @@ arrays.
 
 The Python layer adds:
 
-- Geometry import (`io.py`) via gmsh and meshio.
+- Geometry import and inspection (`io.py`) via gmsh and meshio, including
+  lightweight CAD inspection (`inspect_cad`, `CadInfo`).
 - High-level solver wrappers (`solver.py`) with progress bars and
   Campbell diagram extraction.
-- Visualisation (`viz.py`) via PyVista and Matplotlib.
+- Visualisation (`viz.py`) via PyVista and Matplotlib, including pre-mesh
+  CAD preview (`plot_cad`) and full annulus mesh display (`plot_full_mesh`).
 - Signal synthesis (`sensors.py`, `noise.py`, `signal_gen.py`).
 - HDF5 dataset management (`dataset.py`, `parametric.py`).
 - The entire ML and optimisation pipeline (`ml/`, `optimization/`).

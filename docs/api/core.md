@@ -161,6 +161,67 @@ turbomodal.CyclicSymmetrySolver(mesh, material, fluid)
 
 ## turbomodal.io -- Mesh Import
 
+### inspect_cad
+
+Inspect a CAD file and return geometry metadata without meshing. This is a
+lightweight operation that imports the CAD geometry, computes bounding box,
+dimensions, and a recommended mesh size, but does **not** generate any mesh.
+
+```python
+def inspect_cad(
+    filepath: str | Path,
+    num_sectors: int,
+    verbosity: int = 0,
+) -> CadInfo
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `filepath` | `str \| Path` | required | Path to CAD file (.step, .stp, .iges, .igs, .brep) |
+| `num_sectors` | `int` | required | Number of sectors in the full annulus |
+| `verbosity` | `int` | `0` | gmsh verbosity level (0=silent, 5=debug) |
+
+**Returns:** `CadInfo` -- Geometry metadata dataclass.
+
+**Raises:** `FileNotFoundError` if path does not exist; `ValueError` for unsupported formats.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+info = tm.inspect_cad("blade_sector.step", num_sectors=36)
+print(f"Inner radius: {info.inner_radius*1000:.1f} mm")
+print(f"Outer radius: {info.outer_radius*1000:.1f} mm")
+print(f"Axial length: {info.axial_length*1000:.1f} mm")
+print(f"Recommended mesh size: {info.recommended_mesh_size*1000:.2f} mm")
+```
+
+### CadInfo
+
+Dataclass returned by `inspect_cad()` containing geometry metadata.
+
+```python
+@dataclass
+class CadInfo:
+    filepath: str
+    num_sectors: int
+    sector_angle_deg: float
+    bounding_box: dict          # {"xmin", "ymin", "zmin", "xmax", "ymax", "zmax"}
+    inner_radius: float         # metres
+    outer_radius: float         # metres
+    axial_length: float         # metres
+    radial_span: float          # metres
+    volume: float               # m^3
+    surface_area: float         # m^2
+    characteristic_length: float  # metres
+    recommended_mesh_size: float  # metres (characteristic_length / 20)
+    num_surfaces: int
+    num_volumes: int
+```
+
 ### load_cad
 
 Load a CAD file, mesh it with gmsh, and return a turbomodal `Mesh`.

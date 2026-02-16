@@ -8,15 +8,37 @@ model, optimize sensor placement, and explain predictions.
 
 ---
 
-## Step 1: Load a Mesh
+## Step 1: Inspect and Load Geometry
+
+### 1a: Preview CAD geometry (optional)
+
+Before meshing, inspect the CAD file to check dimensions and get a
+recommended mesh size:
 
 ```python
 import turbomodal as tm
 
+# Inspect dimensions without meshing
+info = tm.inspect_cad("blade_sector.step", num_sectors=36)
+print(f"Inner radius: {info.inner_radius*1000:.1f} mm")
+print(f"Outer radius: {info.outer_radius*1000:.1f} mm")
+print(f"Axial length: {info.axial_length*1000:.1f} mm")
+print(f"Recommended mesh size: {info.recommended_mesh_size*1000:.2f} mm")
+
+# Visualize the sector geometry
+tm.plot_cad("blade_sector.step", num_sectors=36).show()
+
+# Or preview the full disk (all sectors assembled)
+tm.plot_cad("blade_sector.step", num_sectors=36, show_full_disk=True).show()
+```
+
+### 1b: Load and mesh
+
+```python
 # From a mesh file (.msh, .bdf/.nas, .inp, .vtk/.vtu, .cgns, .med, .xdmf)
 mesh = tm.load_mesh("blade_sector.msh", num_sectors=36)
 
-# Or from CAD geometry (.step, .iges, .brep, .stl)
+# Or from CAD geometry (.step, .iges, .brep)
 mesh = tm.load_cad(
     "blade_sector.step",
     num_sectors=36,
@@ -27,6 +49,9 @@ mesh = tm.load_cad(
 
 print(f"Nodes: {mesh.num_nodes()}, Elements: {mesh.num_elements()}")
 tm.plot_mesh(mesh, show_boundaries=True).show()
+
+# View the full annulus mesh (no solve needed)
+tm.plot_full_mesh(mesh).show()
 ```
 
 Turbomodal requires quadratic tetrahedra (TET10). The `load_cad` function

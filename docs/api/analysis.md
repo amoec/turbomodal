@@ -9,6 +9,58 @@ All visualization functions require PyVista (mesh/mode plots) or Matplotlib
 
 ---
 
+## CAD Geometry Preview
+
+### plot_cad
+
+Visualize CAD geometry before volumetric meshing. Imports the CAD file,
+generates a lightweight surface triangulation, and renders it in PyVista.
+Optionally shows the full 360-degree assembly and dimension annotations
+including recommended mesh size.
+
+```python
+def plot_cad(
+    filepath: str | Path,
+    num_sectors: int,
+    show_full_disk: bool = False,
+    show_dimensions: bool = True,
+    surface_mesh_size: float | None = None,
+    off_screen: bool = False,
+) -> pyvista.Plotter
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `filepath` | `str \| Path` | required | Path to CAD file (.step, .stp, .iges, .igs, .brep) |
+| `num_sectors` | `int` | required | Number of sectors in the full annulus |
+| `show_full_disk` | `bool` | `False` | Show all sectors assembled into the full 360-degree annulus |
+| `show_dimensions` | `bool` | `True` | Add dimension annotations (radii, axial length, mesh size) |
+| `surface_mesh_size` | `float \| None` | `None` | Override surface triangulation size (None = auto) |
+| `off_screen` | `bool` | `False` | Render off-screen (for testing or batch export) |
+
+**Returns:** `pyvista.Plotter` instance.
+
+When `show_full_disk=False`, the single sector is shown. When
+`show_full_disk=True`, all sectors are replicated around the Z-axis to display
+the complete annular geometry. Dimension annotations include inner/outer radii,
+axial length, and recommended mesh size.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+# Preview single sector with dimensions
+tm.plot_cad("blade_sector.step", num_sectors=36).show()
+
+# Preview full disk
+tm.plot_cad("blade_sector.step", num_sectors=36, show_full_disk=True).show()
+```
+
+---
+
 ## Mesh Visualization
 
 ### plot_mesh
@@ -48,6 +100,37 @@ import turbomodal as tm
 mesh = tm.load_mesh("sector.msh", num_sectors=24)
 plotter = tm.plot_mesh(mesh)
 plotter.show()
+```
+
+### plot_full_mesh
+
+Plot the full 360-degree mesh without requiring a `ModalResult`. Replicates
+the single sector mesh around the Z-axis to show the complete annular geometry.
+
+```python
+def plot_full_mesh(
+    mesh: Mesh,
+    off_screen: bool = False,
+) -> pyvista.Plotter
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mesh` | `Mesh` | required | Single-sector mesh with `num_sectors` set |
+| `off_screen` | `bool` | `False` | Render off-screen |
+
+**Returns:** `pyvista.Plotter` showing the full annulus mesh.
+
+Unlike `plot_full_annulus`, this function does not require solved mode shapes --
+it simply replicates the undeformed sector geometry around the axis of symmetry.
+
+**Example:**
+
+```python
+mesh = tm.load_mesh("sector.msh", num_sectors=24)
+tm.plot_full_mesh(mesh).show()
 ```
 
 ---
