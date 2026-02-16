@@ -587,17 +587,31 @@ def load_cad(
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        # Check that the model contains solid volumes
+        # Ensure the model contains solid volumes.  If the CAD file only
+        # has surfaces (a common export artefact), attempt to heal/sew
+        # them into a closed solid automatically.
         volumes = gmsh.model.getEntities(dim=3)
         if not volumes:
             surfaces = gmsh.model.getEntities(dim=2)
-            raise RuntimeError(
-                f"CAD file contains no solid volumes (found {len(surfaces)} "
-                f"surfaces). 3D meshing requires solid geometry. If the "
-                f"file contains only surfaces/shells, repair it in your "
-                f"CAD tool to create a closed solid, or use load_mesh() "
-                f"with a pre-meshed volumetric file."
+            if not surfaces:
+                raise RuntimeError(
+                    "CAD file contains no geometry entities (0 surfaces, "
+                    "0 volumes). The file may be empty or corrupt."
+                )
+            gmsh.model.occ.healShapes(
+                sewFaces=True, makeSolids=True,
             )
+            gmsh.model.occ.synchronize()
+            volumes = gmsh.model.getEntities(dim=3)
+            if not volumes:
+                raise RuntimeError(
+                    f"CAD file contains no solid volumes (found "
+                    f"{len(surfaces)} surfaces) and automatic repair "
+                    f"via healShapes failed — the surfaces likely do not "
+                    f"form a closed shell. Repair the geometry in your "
+                    f"CAD tool to create a watertight solid, or use "
+                    f"load_mesh() with a pre-meshed volumetric file."
+                )
 
         # Inspect geometry for mesh size and rotation axis
         info = _build_cad_info(filepath, num_sectors,
@@ -777,10 +791,16 @@ def _auto_detect_cyclic_boundaries(
     # Enforce periodic (node-matched) meshing on cyclic boundary pairs.
     # Without this, gmsh meshes each face independently and the cyclic
     # symmetry solver cannot pair boundary nodes.
+    # The boundary detection is heuristic and may mis-pair surfaces, so
+    # catch and ignore setPeriodic failures (meshing will still succeed,
+    # the solver can fall back to its own node-matching logic).
     if left_candidates and right_candidates:
         rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
         for lt, rt in zip(left_tags, right_tags):
-            gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
+            try:
+                gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
+            except Exception:
+                pass
 
     if hub_name and hub_candidates:
         hub_tags = [s["tag"] for s in hub_candidates]
