@@ -31,19 +31,36 @@ option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_VALIDATION_TESTS "Build slow validation tests (requires mesh files)" OFF)
 option(USE_OPENMP "Enable OpenMP parallelism" ON)
 
-# --- Eigen 3.4.0 via FetchContent ---
+# --- Eigen 3.4.0 via FetchContent (header-only) ---
 # System has Eigen 5.0.1 which is incompatible with Spectra.
 # Download Eigen 3.4.0 locally to ensure compatibility.
+#
+# We use FetchContent_Populate instead of FetchContent_MakeAvailable to
+# avoid processing Eigen's own CMakeLists.txt.  Eigen's build logic
+# unconditionally adds blas/lapack subdirectories which trigger
+# check_language(Fortran).  On Windows CI the Fortran compiler-id probe
+# locks files in the build tree, causing scikit-build-core's temp-dir
+# cleanup to fail with PermissionError (WinError 32).
+# Since Eigen is header-only, we just need the include paths.
 include(FetchContent)
 FetchContent_Declare(
   Eigen3
   URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(Eigen3)
+# CMP0169 (CMake 3.30+) deprecates FetchContent_Populate in favour of
+# FetchContent_MakeAvailable, but we must NOT use MakeAvailable here
+# because it processes Eigen's full CMakeLists.txt.  Silence the warning.
+if(POLICY CMP0169)
+  cmake_policy(SET CMP0169 OLD)
+endif()
+FetchContent_Populate(Eigen3)
+add_library(eigen INTERFACE)
+add_library(Eigen3::Eigen ALIAS eigen)
+target_include_directories(eigen INTERFACE
+  "${eigen3_SOURCE_DIR}"
+  "${eigen3_SOURCE_DIR}/unsupported"
+)
 
 # --- Spectra (header-only, git submodule) ---
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/external/spectra/include/Spectra")
