@@ -66,7 +66,11 @@ from turbomodal.viz import (
     _removed,
 )
 
-__version__ = "0.1.0"
+try:
+    from turbomodal._version import version as __version__
+except ImportError:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("turbomodal")
 
 __all__ = [
     # Core C++ classes

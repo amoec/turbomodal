@@ -6,6 +6,7 @@ __pycache__/
 *.egg
 dist/
 .eggs/
+python/turbomodal/_version.py
 
 # C++ build artifacts
 *.o
