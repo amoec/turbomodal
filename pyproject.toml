@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "setuptools-scm>=8"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "turbomodal"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Cyclic symmetry FEA solver for turbomachinery modal analysis"
 license = {text = "MIT"}
 authors = [{name = "Adam Moëc"}]
@@ -33,6 +33,12 @@ ml = [
     "optuna>=3.0",
     "mlflow>=2.10",
 ]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.setuptools_scm"
+
+[tool.setuptools_scm]
+version_file = "python/turbomodal/_version.py"
 
 [tool.scikit-build]
 cmake.build-type = "Release"
