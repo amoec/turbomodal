@@ -87,27 +87,74 @@ class TestInspectCad:
             inspect_cad(str(dummy), num_sectors=24)
 
 
-class TestDetectStepUnits:
-    def test_milli_metre(self, test_step_path):
+class TestDetectCadUnits:
+    def test_step_milli_metre(self, test_step_path):
         from pathlib import Path
-        from turbomodal.io import _detect_step_units
-        assert _detect_step_units(Path(test_step_path)) == "mm"
+        from turbomodal.io import _detect_cad_units
+        assert _detect_cad_units(Path(test_step_path)) == "mm"
 
-    def test_unknown_for_non_step(self, tmp_path):
-        from turbomodal.io import _detect_step_units
+    def test_unknown_for_brep(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
         dummy = tmp_path / "model.brep"
         dummy.write_text("dummy")
-        assert _detect_step_units(dummy) == "unknown"
+        assert _detect_cad_units(dummy) == "unknown"
 
-    def test_metre(self, tmp_path):
-        from turbomodal.io import _detect_step_units
+    def test_step_metre(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
         step = tmp_path / "model.step"
         step.write_text(
             "DATA;\n"
             "#10 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.) );\n"
             "ENDSEC;"
         )
-        assert _detect_step_units(step) == "m"
+        assert _detect_cad_units(step) == "m"
+
+    def test_iges_mm(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
+        # IGES Global Section: param 14 (Units Flag) = 2 (mm)
+        # Params: 1H, (delim), 1H; (record delim), then 12 filler params, then 2
+        filler = ",".join([""] * 11)
+        global_line = f"1H,,1H;,{filler},2;".ljust(72) + "G      1"
+        iges = tmp_path / "model.iges"
+        iges.write_text(
+            "test file".ljust(72) + "S      1\n"
+            + global_line + "\n"
+        )
+        assert _detect_cad_units(iges) == "mm"
+
+    def test_iges_inch(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
+        filler = ",".join([""] * 11)
+        global_line = f"1H,,1H;,{filler},1;".ljust(72) + "G      1"
+        iges = tmp_path / "model.igs"
+        iges.write_text(
+            "test file".ljust(72) + "S      1\n"
+            + global_line + "\n"
+        )
+        assert _detect_cad_units(iges) == "inch"
+
+    def test_iges_metre(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
+        filler = ",".join([""] * 11)
+        global_line = f"1H,,1H;,{filler},6;".ljust(72) + "G      1"
+        iges = tmp_path / "model.igs"
+        iges.write_text(
+            "test file".ljust(72) + "S      1\n"
+            + global_line + "\n"
+        )
+        assert _detect_cad_units(iges) == "m"
+
+    def test_iges_custom_unit(self, tmp_path):
+        from turbomodal.io import _detect_cad_units
+        # Units Flag=3 means check parameter 15 for the unit name
+        filler = ",".join([""] * 11)
+        global_line = f"1H,,1H;,{filler},3,4HINCH;".ljust(72) + "G      1"
+        iges = tmp_path / "model.igs"
+        iges.write_text(
+            "test file".ljust(72) + "S      1\n"
+            + global_line + "\n"
+        )
+        assert _detect_cad_units(iges) == "inch"
 
 
 class TestAlignAxisToZ:
