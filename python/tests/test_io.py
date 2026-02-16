@@ -60,6 +60,19 @@ class TestInspectCad:
         assert info.recommended_mesh_size > 0
         assert info.num_surfaces > 0
         assert info.num_volumes > 0
+        # Axis and unit detection
+        assert info.rotation_axis in (0, 1, 2)
+        assert info.detected_unit == "mm"  # test_sector.step declares MILLI METRE
+
+    def test_rotation_axis_override(self, test_step_path):
+        from turbomodal.io import inspect_cad
+        info = inspect_cad(test_step_path, num_sectors=24, rotation_axis=0)
+        assert info.rotation_axis == 0
+
+    def test_units_override(self, test_step_path):
+        from turbomodal.io import inspect_cad
+        info = inspect_cad(test_step_path, num_sectors=24, units="m")
+        assert info.detected_unit == "m"
 
     def test_file_not_found(self):
         from turbomodal.io import inspect_cad
@@ -72,6 +85,51 @@ class TestInspectCad:
         dummy.write_text("dummy")
         with pytest.raises(ValueError, match="Unsupported CAD format"):
             inspect_cad(str(dummy), num_sectors=24)
+
+
+class TestDetectStepUnits:
+    def test_milli_metre(self, test_step_path):
+        from pathlib import Path
+        from turbomodal.io import _detect_step_units
+        assert _detect_step_units(Path(test_step_path)) == "mm"
+
+    def test_unknown_for_non_step(self, tmp_path):
+        from turbomodal.io import _detect_step_units
+        dummy = tmp_path / "model.brep"
+        dummy.write_text("dummy")
+        assert _detect_step_units(dummy) == "unknown"
+
+    def test_metre(self, tmp_path):
+        from turbomodal.io import _detect_step_units
+        step = tmp_path / "model.step"
+        step.write_text(
+            "DATA;\n"
+            "#10 = ( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.) );\n"
+            "ENDSEC;"
+        )
+        assert _detect_step_units(step) == "m"
+
+
+class TestAlignAxisToZ:
+    def test_z_is_noop(self):
+        from turbomodal.io import _align_axis_to_z
+        pts = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        result = _align_axis_to_z(pts, 2)
+        np.testing.assert_array_equal(result, pts)
+
+    def test_x_to_z(self):
+        from turbomodal.io import _align_axis_to_z
+        pts = np.array([[1.0, 2.0, 3.0]])
+        result = _align_axis_to_z(pts, 0)
+        # X->Z means (x,y,z) -> (y,z,x)
+        np.testing.assert_array_equal(result, [[2.0, 3.0, 1.0]])
+
+    def test_y_to_z(self):
+        from turbomodal.io import _align_axis_to_z
+        pts = np.array([[1.0, 2.0, 3.0]])
+        result = _align_axis_to_z(pts, 1)
+        # Y->Z means (x,y,z) -> (z,x,y)
+        np.testing.assert_array_equal(result, [[3.0, 1.0, 2.0]])
 
 
 class TestExtractSurfaceTessellation:

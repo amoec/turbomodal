@@ -86,6 +86,24 @@ class TestPlotCad:
         assert plotter is not None
         plotter.close()
 
+    def test_rotation_axis_override(self, test_step_path):
+        from turbomodal.viz import plot_cad
+        plotter = plot_cad(
+            test_step_path, num_sectors=24,
+            rotation_axis=2, off_screen=True,
+        )
+        assert plotter is not None
+        plotter.close()
+
+    def test_units_override(self, test_step_path):
+        from turbomodal.viz import plot_cad
+        plotter = plot_cad(
+            test_step_path, num_sectors=24,
+            units="mm", off_screen=True,
+        )
+        assert plotter is not None
+        plotter.close()
+
 
 class TestPlotFullMesh:
     def test_returns_plotter(self, wedge_mesh_path):
