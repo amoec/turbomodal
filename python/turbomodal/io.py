@@ -55,6 +55,8 @@ class CadInfo:
     recommended_mesh_size: float = 0.0
     num_surfaces: int = 0
     num_volumes: int = 0
+    rotation_axis: int = 2  # 0=X, 1=Y, 2=Z
+    detected_unit: str = "unknown"  # "mm", "m", "inch", etc.
 
 
 def _validate_cad_path(filepath: str | Path) -> Path:
@@ -76,9 +78,135 @@ def _validate_cad_path(filepath: str | Path) -> Path:
     return filepath
 
 
+# Mapping from rotation axis to the two perpendicular coordinate indices.
+# E.g. if the rotation axis is Z (2), radii are computed from X (0) and Y (1).
+_PERP_AXES = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+
+
+def _detect_rotation_axis(num_sectors: int) -> int:
+    """Detect which axis (0=X, 1=Y, 2=Z) is the rotation/symmetry axis.
+
+    For each candidate axis, projects sampled surface points onto the
+    perpendicular plane and computes the angular span.  The axis whose
+    angular span is closest to 360/num_sectors degrees is the rotation axis.
+
+    Must be called within an active gmsh session with a loaded model.
+    """
+    import gmsh
+
+    expected_span = 2 * np.pi / num_sectors
+
+    surfaces = gmsh.model.getEntities(dim=2)
+    points = []
+    for dim, tag in surfaces:
+        try:
+            bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
+            for u_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                for v_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    u = bounds_min[0] + u_frac * (bounds_max[0] - bounds_min[0])
+                    v = bounds_min[1] + v_frac * (bounds_max[1] - bounds_min[1])
+                    pt = gmsh.model.getValue(dim, tag, [u, v])
+                    points.append(pt[:3])
+        except Exception:
+            pass
+
+    if not points:
+        return 2  # fallback to Z
+
+    pts = np.array(points)
+
+    best_axis = 2
+    best_score = float("inf")
+
+    for axis, (c1, c2) in _PERP_AXES.items():
+        angles = np.arctan2(pts[:, c2], pts[:, c1])
+        angles = angles % (2 * np.pi)
+        if len(angles) < 2:
+            continue
+        sorted_angles = np.sort(angles)
+        gaps = np.diff(sorted_angles)
+        wraparound_gap = (2 * np.pi - sorted_angles[-1]) + sorted_angles[0]
+        max_gap = max(float(np.max(gaps)), float(wraparound_gap))
+        angular_span = 2 * np.pi - max_gap
+
+        score = abs(angular_span - expected_span)
+        if score < best_score:
+            best_score = score
+            best_axis = axis
+
+    return best_axis
+
+
+def _detect_step_units(filepath: Path) -> str:
+    """Parse a STEP file for SI_UNIT length declarations.
+
+    Returns a unit name string: "mm", "m", "cm", "um", "inch", or "unknown".
+    """
+    import re
+
+    ext = filepath.suffix.lower()
+    if ext not in (".step", ".stp"):
+        return "unknown"
+
+    try:
+        text = filepath.read_text(errors="ignore")
+    except Exception:
+        return "unknown"
+
+    # Match: LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(<prefix>, .METRE.)
+    si_pattern = re.compile(
+        r"LENGTH_UNIT\(\)\s+NAMED_UNIT\(\*\)\s+SI_UNIT\(\s*"
+        r"([.$\w]*)\s*,\s*\.METRE\.\s*\)",
+        re.IGNORECASE,
+    )
+    match = si_pattern.search(text)
+    if match:
+        prefix_raw = match.group(1).strip().strip(".")
+        prefix_map = {
+            "$": "m",
+            "": "m",
+            "MILLI": "mm",
+            "CENTI": "cm",
+            "MICRO": "um",
+        }
+        return prefix_map.get(prefix_raw.upper(), "m")
+
+    # Check for CONVERSION_BASED_UNIT (imperial)
+    conv_pattern = re.compile(
+        r"CONVERSION_BASED_UNIT\s*\(\s*'([^']+)'\s*,",
+        re.IGNORECASE,
+    )
+    conv_match = conv_pattern.search(text)
+    if conv_match:
+        unit_str = conv_match.group(1).upper()
+        conv_units = {"INCH": "inch", "FOOT": "ft"}
+        return conv_units.get(unit_str, "unknown")
+
+    return "unknown"
+
+
+def _align_axis_to_z(nodes: np.ndarray, rotation_axis: int) -> np.ndarray:
+    """Rotate node coordinates so that *rotation_axis* maps to Z.
+
+    Uses cyclic column permutations which are proper rotations
+    (determinant +1, preserve handedness).
+    """
+    if rotation_axis == 2:
+        return nodes
+    if rotation_axis == 0:
+        # X -> Z: (x,y,z) -> (y,z,x)
+        return nodes[:, [1, 2, 0]]
+    if rotation_axis == 1:
+        # Y -> Z: (x,y,z) -> (z,x,y)
+        return nodes[:, [2, 0, 1]]
+    return nodes
+
+
 def inspect_cad(
     filepath: str | Path,
     num_sectors: int,
+    rotation_axis: int | None = None,
+    units: str | None = None,
     verbosity: int = 0,
 ) -> CadInfo:
     """Inspect a CAD file and return geometry metadata without meshing.
@@ -91,6 +219,8 @@ def inspect_cad(
     ----------
     filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
     num_sectors : number of sectors in the full annulus
+    rotation_axis : override rotation axis detection (0=X, 1=Y, 2=Z, None=auto)
+    units : override unit detection ("mm", "m", "cm", "inch", None=auto)
     verbosity : gmsh verbosity level (0=silent)
 
     Returns
@@ -108,7 +238,8 @@ def inspect_cad(
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        info = _build_cad_info(filepath, num_sectors)
+        info = _build_cad_info(filepath, num_sectors,
+                               rotation_axis=rotation_axis, units=units)
     finally:
         gmsh.finalize()
 
@@ -119,6 +250,8 @@ def _extract_surface_tessellation(
     filepath: str | Path,
     num_sectors: int,
     surface_mesh_size: float | None = None,
+    rotation_axis: int | None = None,
+    units: str | None = None,
     verbosity: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, CadInfo]:
     """Import CAD file and extract a lightweight surface triangulation.
@@ -132,11 +265,13 @@ def _extract_surface_tessellation(
     filepath : path to CAD file (.step, .stp, .iges, .igs, .brep)
     num_sectors : number of sectors in the full annulus
     surface_mesh_size : element size for the surface mesh (None = auto)
+    rotation_axis : override rotation axis detection (0=X, 1=Y, 2=Z, None=auto)
+    units : override unit detection ("mm", "m", "cm", "inch", None=auto)
     verbosity : gmsh verbosity level (0=silent)
 
     Returns
     -------
-    nodes : (N, 3) float64 array of node coordinates
+    nodes : (N, 3) float64 array of node coordinates (aligned so rotation axis = Z)
     triangles : (M, 3) int32 array of triangle connectivity (0-based)
     info : CadInfo with geometry metadata
     """
@@ -150,7 +285,8 @@ def _extract_surface_tessellation(
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        info = _build_cad_info(filepath, num_sectors)
+        info = _build_cad_info(filepath, num_sectors,
+                               rotation_axis=rotation_axis, units=units)
 
         # Set surface mesh size
         mesh_sz = surface_mesh_size or info.recommended_mesh_size * 2
@@ -187,18 +323,39 @@ def _extract_surface_tessellation(
     finally:
         gmsh.finalize()
 
-    return coords.astype(np.float64), tri_nodes, info
+    # Align nodes so the detected rotation axis maps to Z for sector replication
+    aligned = _align_axis_to_z(coords.astype(np.float64), info.rotation_axis)
+    return aligned, tri_nodes, info
 
 
-def _build_cad_info(filepath: Path, num_sectors: int) -> CadInfo:
+def _build_cad_info(
+    filepath: Path,
+    num_sectors: int,
+    rotation_axis: int | None = None,
+    units: str | None = None,
+) -> CadInfo:
     """Build CadInfo from an active gmsh model (must be called within gmsh session)."""
     import gmsh
 
     sector_angle_deg = 360.0 / num_sectors
 
+    # Detect rotation axis
+    if rotation_axis is None:
+        rotation_axis = _detect_rotation_axis(num_sectors)
+
+    # Detect units
+    if units is not None:
+        detected_unit = units
+    else:
+        detected_unit = _detect_step_units(filepath)
+
+    # Perpendicular coordinate indices for radius computation
+    c1, c2 = _PERP_AXES[rotation_axis]
+
     # Bounding box
     xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(-1, -1)
     bbox = dict(xmin=xmin, ymin=ymin, zmin=zmin, xmax=xmax, ymax=ymax, zmax=zmax)
+    bbox_vals = [xmin, ymin, zmin, xmax, ymax, zmax]
 
     # Count entities
     surfaces = gmsh.model.getEntities(dim=2)
@@ -213,17 +370,17 @@ def _build_cad_info(filepath: Path, num_sectors: int) -> CadInfo:
         total_area += gmsh.model.occ.getMass(2, tag)
 
     # Compute inner/outer radius by sampling surface parametric points
+    # using the two coordinates perpendicular to the rotation axis
     radii = []
     for dim, tag in surfaces:
         try:
             bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
-            # Sample a grid of points on each surface
             for u_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
                 for v_frac in (0.0, 0.25, 0.5, 0.75, 1.0):
                     u = bounds_min[0] + u_frac * (bounds_max[0] - bounds_min[0])
                     v = bounds_min[1] + v_frac * (bounds_max[1] - bounds_min[1])
                     pt = gmsh.model.getValue(dim, tag, [u, v])
-                    r = np.sqrt(pt[0] ** 2 + pt[1] ** 2)
+                    r = np.sqrt(pt[c1] ** 2 + pt[c2] ** 2)
                     radii.append(r)
         except Exception:
             pass
@@ -232,17 +389,16 @@ def _build_cad_info(filepath: Path, num_sectors: int) -> CadInfo:
         inner_radius = float(min(radii))
         outer_radius = float(max(radii))
     else:
-        # Fallback: estimate from bounding box
-        corners_r = [
-            np.sqrt(xmin**2 + ymin**2),
-            np.sqrt(xmax**2 + ymax**2),
-            np.sqrt(xmin**2 + ymax**2),
-            np.sqrt(xmax**2 + ymin**2),
-        ]
+        # Fallback: estimate from bounding box corners
+        corners_r = []
+        for v1 in (bbox_vals[c1], bbox_vals[c1 + 3]):
+            for v2 in (bbox_vals[c2], bbox_vals[c2 + 3]):
+                corners_r.append(np.sqrt(v1**2 + v2**2))
         inner_radius = float(min(corners_r))
         outer_radius = float(max(corners_r))
 
-    axial_length = float(zmax - zmin)
+    # Axial length is the extent along the rotation axis
+    axial_length = float(bbox_vals[rotation_axis + 3] - bbox_vals[rotation_axis])
     radial_span = outer_radius - inner_radius
 
     # Recommended mesh size heuristic
@@ -266,6 +422,8 @@ def _build_cad_info(filepath: Path, num_sectors: int) -> CadInfo:
         recommended_mesh_size=recommended_mesh_size,
         num_surfaces=len(surfaces),
         num_volumes=len(volumes),
+        rotation_axis=rotation_axis,
+        detected_unit=detected_unit,
     )
 
 

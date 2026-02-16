@@ -84,8 +84,25 @@ def _replicate_sectors(
     )
 
 
-def _format_dimension(value: float) -> str:
-    """Format a dimension value with appropriate units (mm or m)."""
+def _format_dimension(value: float, unit: str = "unknown") -> str:
+    """Format a dimension value with appropriate units.
+
+    When the source *unit* is known, the value is displayed in that unit.
+    Otherwise a heuristic (threshold at 1.0) decides between mm and m.
+    """
+    if unit == "mm":
+        if abs(value) < 0.1:
+            return f"{value * 1000:.1f} um"
+        return f"{value:.2f} mm"
+    if unit == "cm":
+        return f"{value:.3f} cm"
+    if unit == "m":
+        if abs(value) < 1.0:
+            return f"{value * 1000:.1f} mm"
+        return f"{value:.4f} m"
+    if unit == "inch":
+        return f'{value:.4f}"'
+    # Unknown: heuristic – values < 1.0 are likely meters, show as mm
     if abs(value) < 1.0:
         return f"{value * 1000:.1f} mm"
     return f"{value:.4f} m"
@@ -97,6 +114,8 @@ def plot_cad(
     show_full_disk: bool = False,
     show_dimensions: bool = True,
     surface_mesh_size: float | None = None,
+    rotation_axis: int | None = None,
+    units: str | None = None,
     off_screen: bool = False,
 ):
     """Visualize CAD geometry before volumetric meshing.
@@ -112,6 +131,8 @@ def plot_cad(
     show_full_disk : replicate sector around Z-axis for full 360-degree view
     show_dimensions : add annotations with bounding box, radii, mesh size
     surface_mesh_size : override surface mesh element size (None = auto)
+    rotation_axis : override rotation axis detection (0=X, 1=Y, 2=Z, None=auto)
+    units : override unit detection ("mm", "m", "cm", "inch", None=auto)
     off_screen : render off-screen (for testing)
 
     Returns
@@ -124,6 +145,7 @@ def plot_cad(
 
     nodes, triangles, info = _extract_surface_tessellation(
         filepath, num_sectors, surface_mesh_size,
+        rotation_axis=rotation_axis, units=units,
     )
 
     # Build PyVista PolyData from surface triangles
@@ -161,11 +183,15 @@ def plot_cad(
     plotter.add_text(title, font_size=12, position="upper_edge")
 
     if show_dimensions:
-        fmt = _format_dimension
+        u = info.detected_unit
+        fmt = lambda v: _format_dimension(v, u)
+        axis_label = {0: "X", 1: "Y", 2: "Z"}.get(info.rotation_axis, "?")
+        unit_note = f" [{u}]" if u != "unknown" else ""
         info_text = (
-            f"File: {Path(filepath).name}\n"
+            f"File: {Path(filepath).name}{unit_note}\n"
             f"Sectors: {info.num_sectors} "
             f"({info.sector_angle_deg:.1f} deg)\n"
+            f"Rotation axis: {axis_label}\n"
             f"Inner radius: {fmt(info.inner_radius)}\n"
             f"Outer radius: {fmt(info.outer_radius)}\n"
             f"Radial span: {fmt(info.radial_span)}\n"
