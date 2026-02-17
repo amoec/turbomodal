@@ -566,6 +566,7 @@ def load_cad(
     auto_detect_boundaries: bool = True,
     rotation_axis: int | None = None,
     units: str | None = None,
+    optimize: bool = True,
     verbosity: int = 0,
 ) -> Mesh:
     """Load a CAD file and generate a TET10 mesh for cyclic symmetry analysis.
@@ -582,6 +583,7 @@ def load_cad(
     auto_detect_boundaries : automatically identify cyclic boundary surfaces
     rotation_axis : override rotation axis (0=X, 1=Y, 2=Z, None=auto-detect)
     units : override unit detection ("mm", "m", "inch", None=auto-detect)
+    optimize : run mesh optimization passes to improve element quality
     verbosity : gmsh verbosity level (0=silent, 1=errors, 5=debug)
 
     Returns
@@ -679,6 +681,7 @@ def load_cad(
             num_sectors,
             info.rotation_axis,
             order,
+            optimize,
         )
 
         # Extract raw mesh arrays from gmsh
@@ -779,6 +782,7 @@ def _apply_periodic_and_mesh(
     num_sectors: int,
     rotation_axis: int,
     order: int,
+    optimize: bool = True,
 ) -> bool:
     """Apply periodic constraints, generate mesh, verify boundary match.
 
@@ -801,7 +805,11 @@ def _apply_periodic_and_mesh(
         )
 
     gmsh.model.mesh.generate(3)
-    gmsh.model.mesh.setOrder(order)
+
+    if optimize:
+        _optimize_mesh(order)
+    else:
+        gmsh.model.mesh.setOrder(order)
 
     if not has_boundaries:
         return True
@@ -819,6 +827,31 @@ def _apply_periodic_and_mesh(
         n_right,
     )
     return False
+
+
+def _optimize_mesh(order: int) -> None:
+    """Run mesh optimization passes to improve element quality.
+
+    For linear meshes: Netgen optimization + Laplace smoothing.
+    For high-order meshes: additionally runs HighOrder and
+    HighOrderElastic optimizers to fix mid-node placement and
+    eliminate negative Jacobians.
+    """
+    import gmsh
+
+    # Optimize the linear mesh first (better starting point for
+    # high-order conversion).
+    gmsh.model.mesh.optimize("Netgen")
+    gmsh.model.mesh.optimize("Relocate3D")
+
+    if order >= 2:
+        gmsh.model.mesh.setOrder(order)
+        # HighOrder optimizer repositions mid-edge nodes to improve
+        # the scaled Jacobian of curved elements.
+        gmsh.model.mesh.optimize("HighOrder")
+        # HighOrderElastic uses an elasticity-based smoother — more
+        # aggressive at eliminating negative Jacobians.
+        gmsh.model.mesh.optimize("HighOrderElastic")
 
 
 def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
