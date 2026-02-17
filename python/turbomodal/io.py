@@ -662,6 +662,11 @@ def load_cad(
                 )
             )
 
+        if auto_detect_boundaries and (left_cands or right_cands):
+            _validate_boundary_detection(
+                left_cands, right_cands, num_sectors, info.rotation_axis
+            )
+
         # Always create volume physical group (needed for gmsh to include
         # volume elements in the output).  This is independent of boundary
         # detection so that meshing succeeds even when no boundaries are found.
@@ -733,6 +738,59 @@ def _count_boundary_nodes(
     return n_left, n_right
 
 
+def _validate_boundary_detection(
+    left_candidates: list,
+    right_candidates: list,
+    num_sectors: int,
+    rotation_axis: int,
+) -> None:
+    """Log diagnostics about detected cyclic boundaries."""
+    import logging
+
+    logger = logging.getLogger("turbomodal.io")
+    sector_angle = 2 * np.pi / num_sectors
+
+    n_left = len(left_candidates)
+    n_right = len(right_candidates)
+    logger.info(
+        "Boundary detection: %d left, %d right surfaces "
+        "(sector_angle=%.1f deg, axis=%s)",
+        n_left, n_right, np.degrees(sector_angle),
+        ["X", "Y", "Z"][rotation_axis],
+    )
+
+    if n_left != n_right:
+        logger.warning(
+            "Asymmetric boundary detection: %d left vs %d right surfaces. "
+            "Non-periodic surfaces may have been included, or genuine "
+            "patches were missed.",
+            n_left, n_right,
+        )
+
+    for label, cands in [("left", left_candidates), ("right", right_candidates)]:
+        if len(cands) < 2:
+            continue
+        thetas = [s["theta"] for s in cands]
+        spread = max(thetas) - min(thetas)
+        spread = min(spread, 2 * np.pi - spread)
+        if spread > sector_angle * 0.15:
+            logger.warning(
+                "%s boundary cluster has angular spread %.2f deg "
+                "(> 15%% of sector angle %.2f deg). Some surfaces "
+                "may not be true periodic boundaries.",
+                label, np.degrees(spread), np.degrees(sector_angle),
+            )
+
+    for label, cands in [("left", left_candidates), ("right", right_candidates)]:
+        for s in cands:
+            logger.debug(
+                "  %s surface tag=%d: theta=%.2f deg, r=%.4f, "
+                "center=(%.4f, %.4f, %.4f)",
+                label, s["tag"], np.degrees(s["theta"]), s["radius"],
+                s["center"][0], s["center"][1], s["center"][2],
+            )
+
+
 def _set_periodic_centroid_matched(
     left_tags: list[int],
     right_tags: list[int],
@@ -740,12 +798,16 @@ def _set_periodic_centroid_matched(
     right_candidates: list,
     rotation_axis: int,
     sector_angle: float,
+    max_pair_distance: float | None = None,
 ) -> int:
     """Apply setPeriodic with centroid-based surface pairing.
 
     Returns the number of successfully applied periodic constraints.
     """
     import gmsh
+    import logging
+
+    logger = logging.getLogger("turbomodal.io")
 
     rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
     rot_np = np.array(rot).reshape(4, 4)
@@ -758,24 +820,46 @@ def _set_periodic_centroid_matched(
     left_rotated = (rot_np @ left_h.T).T[:, :3]
 
     n_applied = 0
+    n_skipped = 0
     used_right: set[int] = set()
     for i, lc_rot in enumerate(left_rotated):
         dists = np.linalg.norm(right_centers - lc_rot, axis=1)
         for u in used_right:
             dists[u] = np.inf
         best_j = int(np.argmin(dists))
-        if dists[best_j] < np.inf:
-            used_right.add(best_j)
-            try:
-                gmsh.model.mesh.setPeriodic(
-                    2,
-                    [right_tags[best_j]],
-                    [left_tags[i]],
-                    rot,
-                )
-                n_applied += 1
-            except Exception:
-                pass
+        if dists[best_j] == np.inf:
+            continue
+        if max_pair_distance is not None and dists[best_j] > max_pair_distance:
+            logger.warning(
+                "Skipping surface pair: left tag %d -> right tag %d, "
+                "distance %.4e exceeds threshold %.4e",
+                left_tags[i], right_tags[best_j],
+                dists[best_j], max_pair_distance,
+            )
+            n_skipped += 1
+            continue
+        used_right.add(best_j)
+        try:
+            gmsh.model.mesh.setPeriodic(
+                2,
+                [right_tags[best_j]],
+                [left_tags[i]],
+                rot,
+            )
+            n_applied += 1
+        except Exception as exc:
+            logger.debug(
+                "setPeriodic failed for left surface %d -> right surface %d: %s",
+                left_tags[i], right_tags[best_j], exc,
+            )
+
+    n_total = len(left_tags)
+    n_failed = n_total - n_applied - n_skipped
+    if n_failed > 0 or n_skipped > 0:
+        logger.info(
+            "setPeriodic: %d/%d surface pairs succeeded, %d failed, %d skipped (distance).",
+            n_applied, n_total, n_failed, n_skipped,
+        )
     return n_applied
 
 
@@ -800,6 +884,16 @@ def _apply_periodic_and_mesh(
     sector_angle = 2 * np.pi / num_sectors
 
     if has_boundaries:
+        # Compute a distance threshold for centroid pairing from the
+        # radial span of all detected boundary surfaces.
+        all_radii = [s["radius"] for s in left_candidates + right_candidates]
+        if len(all_radii) >= 2:
+            max_pair_distance = (max(all_radii) - min(all_radii)) * 0.5
+            # Ensure a reasonable minimum so tightly-spaced patches still pair
+            max_pair_distance = max(max_pair_distance, 0.01 * max(all_radii))
+        else:
+            max_pair_distance = None
+
         _set_periodic_centroid_matched(
             left_tags,
             right_tags,
@@ -807,6 +901,7 @@ def _apply_periodic_and_mesh(
             right_candidates,
             rotation_axis,
             sector_angle,
+            max_pair_distance,
         )
 
     gmsh.model.mesh.generate(3)
@@ -1039,8 +1134,50 @@ def _auto_detect_cyclic_boundaries(
         tangential[c1] = -sd["center"][c2] / r
         tangential[c2] = sd["center"][c1] / r
         tangential_component = abs(np.dot(sd["normal"], tangential))
-        if tangential_component > 0.5:
-            boundary_candidates.append(sd)
+        if tangential_component <= 0.5:
+            continue
+
+        # --- Wedge-proximity check ---
+        # True sector boundaries lie along a constant-theta wedge plane
+        # (flat or curved).  Blade/shroud surfaces may have tangential
+        # normals at their centroid but span a significant angular range.
+        # Sample points along the surface's boundary curves (which are
+        # trimmed, unlike the parametric domain) and reject if they
+        # spread too much in theta.
+        try:
+            boundary_edges = gmsh.model.getBoundary(
+                [(2, sd["tag"])], oriented=False, combined=False,
+            )
+            thetas_edge: list[float] = []
+            for dim_b, tag_b in boundary_edges:
+                if dim_b != 1:
+                    continue
+                try:
+                    b_bounds = gmsh.model.getParametrizationBounds(
+                        1, abs(tag_b),
+                    )
+                    for t_param in np.linspace(
+                        b_bounds[0][0], b_bounds[1][0], 5,
+                    ):
+                        pt = gmsh.model.getValue(1, abs(tag_b), [t_param])
+                        thetas_edge.append(np.arctan2(pt[c2], pt[c1]))
+                except Exception:
+                    continue  # skip this edge, use others
+            if len(thetas_edge) >= 4:
+                ref = sd["theta"]
+                deltas = np.array(thetas_edge) - ref
+                # Wrap to [-pi, pi]
+                deltas = (deltas + np.pi) % (2 * np.pi) - np.pi
+                # Robust spread: 10th-to-90th percentile range
+                spread = float(
+                    np.percentile(deltas, 90) - np.percentile(deltas, 10)
+                )
+                if spread > sector_angle * 0.10:
+                    continue  # surface spans too much theta
+        except Exception:
+            pass  # conservative: accept if edge sampling fails
+
+        boundary_candidates.append(sd)
 
     left_candidates = []
     right_candidates = []
@@ -1303,10 +1440,22 @@ def _snap_boundary_nodes(
     tol = mesh_size * 0.5
     dists, idxs = tree.query(target)
 
+    # Pre-compute cylindrical coordinates for cross-patch validation.
+    # Target and right nodes on the same physical patch should have
+    # similar radial and axial positions; cross-patch matches (e.g.
+    # hub ↔ shroud) will diverge in radius or axial position.
+    target_r = np.sqrt(target[:, c1] ** 2 + target[:, c2] ** 2)
+    target_ax = target[:, rotation_axis]
+    right_r = np.sqrt(right_coords[:, c1] ** 2 + right_coords[:, c2] ** 2)
+    right_ax = right_coords[:, rotation_axis]
+    radial_tol = mesh_size * 0.3
+    axial_tol = mesh_size * 0.3
+
     # Build matched pairs: left_id → right_id (with snapping)
     matched_left = []
     matched_right = []
     used_right: set[int] = set()
+    n_rejected_cross_patch = 0
     for i in range(len(left_ids)):
         if dists[i] > tol:
             continue  # gap region or no nearby match
@@ -1314,6 +1463,12 @@ def _snap_boundary_nodes(
         right_global_idx = right_ids[right_local_idx]
         if right_global_idx in used_right:
             continue  # already matched to another left node
+        # Cross-patch validation: reject if radial or axial mismatch
+        dr = abs(target_r[i] - right_r[right_local_idx])
+        dax = abs(target_ax[i] - right_ax[right_local_idx])
+        if dr > radial_tol or dax > axial_tol:
+            n_rejected_cross_patch += 1
+            continue
         used_right.add(right_global_idx)
         # Snap the right node to the exact target position
         coords[right_global_idx] = target[i]
@@ -1329,12 +1484,12 @@ def _snap_boundary_nodes(
 
     import logging
     logger = logging.getLogger("turbomodal.io")
-    n_orig = max(len(left_ids), len(right_ids))
     n_dropped = len(left_ids) + len(right_ids) - 2 * len(matched_left)
-    if n_dropped > 0:
+    if n_dropped > 0 or n_rejected_cross_patch > 0:
         logger.info(
-            "Boundary node snapping: matched %d pairs, dropped %d nodes.",
-            len(matched_left), n_dropped,
+            "Boundary node snapping: matched %d pairs, dropped %d nodes, "
+            "rejected %d cross-patch matches.",
+            len(matched_left), n_dropped, n_rejected_cross_patch,
         )
 
     # Update node sets in place

@@ -31,13 +31,26 @@ def _mesh_to_pyvista(mesh: Mesh):
     return grid
 
 
+def _rotation_matrix(theta: float, rotation_axis: int) -> np.ndarray:
+    """Build a 3x3 rotation matrix for angle *theta* about the given axis."""
+    c = np.cos(theta)
+    s = np.sin(theta)
+    if rotation_axis == 0:  # X-axis: rotate in YZ
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    if rotation_axis == 1:  # Y-axis: rotate in XZ
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    # Z-axis: rotate in XY
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
 def _replicate_sectors(
     nodes: np.ndarray,
     cells_per_sector: np.ndarray,
     n_sectors: int,
     celltypes: np.ndarray,
+    rotation_axis: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Replicate a sector mesh around the Z-axis.
+    """Replicate a sector mesh around the rotation axis.
 
     Parameters
     ----------
@@ -45,6 +58,7 @@ def _replicate_sectors(
     cells_per_sector : (E, K+1) cell array in PyVista format (first col = n_pts)
     n_sectors : number of sectors
     celltypes : (E,) VTK cell type array for one sector
+    rotation_axis : 0=X, 1=Y, 2=Z
 
     Returns
     -------
@@ -61,13 +75,7 @@ def _replicate_sectors(
 
     for s in range(n_sectors):
         theta = s * sector_angle
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
-        R = np.array([
-            [cos_t, -sin_t, 0],
-            [sin_t, cos_t, 0],
-            [0, 0, 1],
-        ])
+        R = _rotation_matrix(theta, rotation_axis)
         rotated = nodes @ R.T
 
         offset_cells = cells_per_sector.copy()
@@ -217,7 +225,7 @@ def plot_full_mesh(
 ):
     """Plot the full 360-degree mesh without requiring a ModalResult.
 
-    Replicates the single sector mesh around the Z-axis to show the
+    Replicates the single sector mesh around the rotation axis to show the
     complete annular geometry.
 
     Parameters
@@ -244,6 +252,7 @@ def plot_full_mesh(
 
     all_nodes, all_cells, all_celltypes = _replicate_sectors(
         nodes, cells, n_sectors, celltypes,
+        rotation_axis=mesh.rotation_axis,
     )
 
     grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
@@ -259,8 +268,10 @@ def plot_full_mesh(
         edge_color="gray", line_width=0.5, opacity=0.7,
         show_scalar_bar=False,
     )
+    axis_label = {0: "X", 1: "Y", 2: "Z"}.get(mesh.rotation_axis, "Z")
     plotter.add_text(
-        f"Full Mesh ({n_sectors} sectors, {mesh.num_elements() * n_sectors} elements)",
+        f"Full Mesh ({n_sectors} sectors, "
+        f"{mesh.num_elements() * n_sectors} elements, axis={axis_label})",
         font_size=12,
     )
     plotter.add_axes()
@@ -289,8 +300,10 @@ def plot_mesh(
     import pyvista as pv
 
     grid = _mesh_to_pyvista(mesh)
+    # Extract outer surface so interior tet faces don't occlude boundary points
+    surface = grid.extract_surface(algorithm="dataset_surface")
     plotter = pv.Plotter(off_screen=off_screen)
-    plotter.add_mesh(grid, color="lightgray", opacity=0.5, show_edges=True,
+    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
                      edge_color="gray", line_width=0.5)
 
     nodes = np.asarray(mesh.nodes)
@@ -300,11 +313,11 @@ def plot_mesh(
         right = mesh.right_boundary
         if left:
             pts_left = nodes[left]
-            plotter.add_points(pts_left, color="blue", point_size=6,
+            plotter.add_points(pts_left, color="blue", point_size=10,
                                render_points_as_spheres=True, label="Left boundary")
         if right:
             pts_right = nodes[right]
-            plotter.add_points(pts_right, color="red", point_size=6,
+            plotter.add_points(pts_right, color="red", point_size=10,
                                render_points_as_spheres=True, label="Right boundary")
 
     if show_node_sets:
@@ -316,10 +329,17 @@ def plot_mesh(
             if ns.node_ids:
                 pts = nodes[ns.node_ids]
                 plotter.add_points(pts, color=colors[ci % len(colors)],
-                                   point_size=5, render_points_as_spheres=True,
+                                   point_size=8, render_points_as_spheres=True,
                                    label=ns.name)
                 ci += 1
 
+    axis_label = {0: "X", 1: "Y", 2: "Z"}.get(mesh.rotation_axis, "Z")
+    sector_angle = 360.0 / mesh.num_sectors if mesh.num_sectors > 0 else 0
+    plotter.add_text(
+        f"Sector Mesh ({mesh.num_sectors} sectors, "
+        f"{sector_angle:.1f} deg, axis={axis_label})",
+        font_size=12, position="upper_edge",
+    )
     plotter.add_legend()
     plotter.add_axes()
     return plotter
@@ -441,15 +461,8 @@ def plot_full_annulus(
 
     for s in range(n_sectors):
         theta = s * sector_angle
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
 
-        # Rotation matrix around Z axis
-        R = np.array([
-            [cos_t, -sin_t, 0],
-            [sin_t, cos_t, 0],
-            [0, 0, 1],
-        ])
+        R = _rotation_matrix(theta, mesh.rotation_axis)
 
         # Rotate nodes
         rotated_nodes = nodes @ R.T
