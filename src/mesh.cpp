@@ -2,7 +2,6 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-#include <iostream>
 #include <set>
 #include <map>
 
@@ -237,11 +236,13 @@ void Mesh::identify_cyclic_boundaries(double tolerance) {
     right_boundary = right_ns->node_ids;
 
     if (left_boundary.size() != right_boundary.size()) {
-        std::cerr << "[turbomodal] WARNING: Left and right cyclic boundaries have "
-                  << "different node counts (left=" << left_boundary.size()
-                  << ", right=" << right_boundary.size()
-                  << "). match_boundary_nodes() will attempt spatial pairing "
-                  << "and trim excess nodes." << std::endl;
+        throw std::runtime_error(
+            "Left and right cyclic boundaries have different node counts (left="
+            + std::to_string(left_boundary.size()) + ", right="
+            + std::to_string(right_boundary.size())
+            + "). This usually means gmsh could not enforce periodic meshing. "
+            "The Python-side node snapping should have equalised the boundaries "
+            "before reaching C++ — this indicates a bug.");
     }
 }
 
@@ -258,45 +259,28 @@ void Mesh::match_boundary_nodes() {
     double sin_a = std::sin(-alpha);
 
     matched_pairs.clear();
+    matched_pairs.reserve(left_boundary.size());
 
-    // Iterate over the smaller side to maximise successful matches.
-    bool left_drives = left_boundary.size() <= right_boundary.size();
-    const std::vector<int>& drive = left_drives ? left_boundary : right_boundary;
-    const std::vector<int>& pool = left_drives ? right_boundary : left_boundary;
+    std::vector<bool> used(right_boundary.size(), false);
 
-    std::vector<bool> used(pool.size(), false);
-    std::vector<std::pair<int, int>> raw_pairs;
-    raw_pairs.reserve(drive.size());
-
-    for (int drive_id : drive) {
-        double dx_d = nodes(drive_id, 0);
-        double dy_d = nodes(drive_id, 1);
-        double dz_d = nodes(drive_id, 2);
+    for (int left_id : left_boundary) {
+        double lx = nodes(left_id, 0);
+        double ly = nodes(left_id, 1);
+        double lz = nodes(left_id, 2);
 
         double best_dist = std::numeric_limits<double>::max();
         int best_idx = -1;
 
-        for (int j = 0; j < static_cast<int>(pool.size()); j++) {
+        for (int j = 0; j < static_cast<int>(right_boundary.size()); j++) {
             if (used[j]) continue;
-            int pool_id = pool[j];
+            int right_id = right_boundary[j];
+            double rx = nodes(right_id, 0);
+            double ry = nodes(right_id, 1);
+            double rz = nodes(right_id, 2);
 
-            // Always compare left coords with right-rotated-by-minus-alpha
-            double lx, ly, lz, rx_rot, ry_rot, rz;
-            if (left_drives) {
-                lx = dx_d; ly = dy_d; lz = dz_d;
-                double rx = nodes(pool_id, 0);
-                double ry = nodes(pool_id, 1);
-                rz = nodes(pool_id, 2);
-                rx_rot = cos_a * rx - sin_a * ry;
-                ry_rot = sin_a * rx + cos_a * ry;
-            } else {
-                lx = nodes(pool_id, 0);
-                ly = nodes(pool_id, 1);
-                lz = nodes(pool_id, 2);
-                rx_rot = cos_a * dx_d - sin_a * dy_d;
-                ry_rot = sin_a * dx_d + cos_a * dy_d;
-                rz = dz_d;
-            }
+            // Rotate right node back by -alpha to compare with left
+            double rx_rot = cos_a * rx - sin_a * ry;
+            double ry_rot = sin_a * rx + cos_a * ry;
 
             double ddx = lx - rx_rot;
             double ddy = ly - ry_rot;
@@ -309,58 +293,32 @@ void Mesh::match_boundary_nodes() {
             }
         }
 
-        if (best_idx < 0) continue;
+        if (best_idx < 0) {
+            throw std::runtime_error(
+                "No matching right boundary node found for left node " +
+                std::to_string(left_id) + ". The Python-side node snapping "
+                "should have ensured exact matching — this indicates a bug.");
+        }
 
         // Tolerance: relative to radial distance of the left-side node
-        double ref_x = left_drives ? dx_d : nodes(pool[best_idx], 0);
-        double ref_y = left_drives ? dy_d : nodes(pool[best_idx], 1);
-        double r_ref = std::sqrt(ref_x * ref_x + ref_y * ref_y);
+        double r_ref = std::sqrt(lx * lx + ly * ly);
         double tol = std::max(1e-10, 1e-6 * r_ref);
 
-        if (best_dist > tol) continue;  // skip unmatched node
+        if (best_dist > tol) {
+            throw std::runtime_error(
+                "Left node " + std::to_string(left_id)
+                + " has no matching right boundary node within tolerance "
+                "(closest distance: " + std::to_string(best_dist)
+                + ", tolerance: " + std::to_string(tol) + ").");
+        }
 
         used[best_idx] = true;
-        int left_id  = left_drives ? drive_id : pool[best_idx];
-        int right_id = left_drives ? pool[best_idx] : drive_id;
-        raw_pairs.push_back({left_id, right_id});
+        matched_pairs.push_back({left_id, right_boundary[best_idx]});
     }
 
-    if (raw_pairs.empty()) {
-        throw std::runtime_error(
-            "No boundary node pairs could be matched. Check that the mesh "
-            "has compatible cyclic boundaries.");
-    }
-
-    int n_expected = static_cast<int>(std::max(left_boundary.size(), right_boundary.size()));
-    int n_matched = static_cast<int>(raw_pairs.size());
-    int n_dropped = static_cast<int>(left_boundary.size() + right_boundary.size()) - 2 * n_matched;
-
-    if (n_dropped > 0) {
-        double drop_frac = 1.0 - static_cast<double>(n_matched) / n_expected;
-        if (drop_frac > 0.05) {
-            // More than 5% unmatched — results would be unreliable.
-            throw std::runtime_error(
-                "Left and right cyclic boundaries have too many unmatched nodes ("
-                + std::to_string(n_dropped) + " dropped, "
-                + std::to_string(n_matched) + " matched). "
-                "This usually means gmsh could not enforce periodic meshing on "
-                "the boundary surfaces. Try adjusting the mesh size or simplifying "
-                "the boundary geometry.");
-        }
-        std::cerr << "[turbomodal] WARNING: " << n_dropped
-                  << " boundary node(s) could not be paired and were dropped."
-                  << std::endl;
-    }
-
-    // Rebuild boundaries to contain only matched nodes
-    matched_pairs = std::move(raw_pairs);
-    left_boundary.clear();
-    right_boundary.clear();
-    left_boundary.reserve(matched_pairs.size());
-    right_boundary.reserve(matched_pairs.size());
-    for (const auto& [l, r] : matched_pairs) {
-        left_boundary.push_back(l);
-        right_boundary.push_back(r);
+    // Reorder right_boundary to match left_boundary ordering
+    for (size_t i = 0; i < matched_pairs.size(); i++) {
+        right_boundary[i] = matched_pairs[i].second;
     }
 }
 
