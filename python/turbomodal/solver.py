@@ -50,6 +50,8 @@ def solve(
     fluid: FluidConfig | None = None,
     config: SolverConfig | None = None,
     verbose: int = SILENT,
+    harmonic_indices: list[int] | None = None,
+    max_threads: int = 0,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -62,6 +64,8 @@ def solve(
     fluid : fluid coupling configuration (None = dry)
     config : solver configuration (None = defaults)
     verbose : 0=silent, 1=progress bar, 2=detailed output
+    harmonic_indices : list of harmonic indices to solve (None = all 0..N/2)
+    max_threads : max concurrent solver threads (0 = auto, uses hardware_concurrency)
 
     Returns
     -------
@@ -70,15 +74,18 @@ def solve(
     if fluid is None:
         fluid = FluidConfig()
 
+    hi = harmonic_indices or []
+
     if verbose >= PROGRESS:
         max_k = mesh.num_sectors // 2
+        nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
         print(f"Solving at {rpm:.0f} RPM  ({mesh.num_nodes()} nodes, "
               f"{mesh.num_elements()} elements, {mesh.num_sectors} sectors, "
-              f"ND 0..{max_k}, {num_modes} modes/ND)")
+              f"{nd_str}, {num_modes} modes/ND)")
 
     t0 = time.perf_counter()
     solver = CyclicSymmetrySolver(mesh, material, fluid)
-    results = solver.solve_at_rpm(rpm, num_modes)
+    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads)
     elapsed = time.perf_counter() - t0
 
     if verbose >= PROGRESS:
@@ -104,6 +111,8 @@ def rpm_sweep(
     num_modes: int = 20,
     fluid: FluidConfig | None = None,
     verbose: int = SILENT,
+    harmonic_indices: list[int] | None = None,
+    max_threads: int = 0,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -115,6 +124,8 @@ def rpm_sweep(
     num_modes : number of modes per harmonic index
     fluid : fluid coupling configuration (None = dry)
     verbose : 0=silent, 1=progress bar, 2=detailed output
+    harmonic_indices : list of harmonic indices to solve (None = all 0..N/2)
+    max_threads : max concurrent solver threads (0 = auto, uses hardware_concurrency)
 
     Returns
     -------
@@ -123,15 +134,18 @@ def rpm_sweep(
     if fluid is None:
         fluid = FluidConfig()
 
+    hi = harmonic_indices or []
+
     rpm_arr = np.asarray(rpm_values, dtype=np.float64)
     n_rpm = len(rpm_arr)
 
     if verbose >= PROGRESS:
         max_k = mesh.num_sectors // 2
+        nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
         print(f"RPM sweep: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
         print(f"  Mesh: {mesh.num_nodes()} nodes, {mesh.num_elements()} elements, "
               f"{mesh.num_sectors} sectors")
-        print(f"  Solving ND 0..{max_k}, {num_modes} modes/ND")
+        print(f"  Solving {nd_str}, {num_modes} modes/ND")
         print()
 
     solver = CyclicSymmetrySolver(mesh, material, fluid)
@@ -140,7 +154,7 @@ def rpm_sweep(
 
     for i, rpm in enumerate(rpm_arr):
         t0 = time.perf_counter()
-        results = solver.solve_at_rpm(float(rpm), num_modes)
+        results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads)
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 

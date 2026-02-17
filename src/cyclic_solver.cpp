@@ -5,9 +5,10 @@
 #include <set>
 #include <algorithm>
 #include <numeric>
-#include <future>
 #include <optional>
 #include <Eigen/SparseLU>
+#include <atomic>
+#include <thread>
 
 namespace turbomodal {
 
@@ -289,7 +290,9 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
 }
 
 std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
-    double rpm, int num_modes_per_harmonic) {
+    double rpm, int num_modes_per_harmonic,
+    const std::vector<int>& harmonic_indices,
+    int max_threads) {
 
     double omega = rpm * 2.0 * PI / 60.0;
 
@@ -355,14 +358,49 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     // Build hub reduced DOF set once (shared across all k)
     std::set<int> hub_red_set(hub_reduced_dofs.begin(), hub_reduced_dofs.end());
 
+    // Convert K and M to complex once (shared read-only across all threads)
+    int ndof_full = mesh_.num_dof();
+    SpMatcd K_complex(ndof_full, ndof_full), M_complex(ndof_full, ndof_full);
+    {
+        std::vector<TripletC> kc, mc;
+        kc.reserve(K_eff.nonZeros());
+        mc.reserve(M_sector.nonZeros());
+        for (int col = 0; col < K_eff.outerSize(); ++col) {
+            for (SpMatd::InnerIterator it(K_eff, col); it; ++it)
+                kc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+        }
+        for (int col = 0; col < M_sector.outerSize(); ++col) {
+            for (SpMatd::InnerIterator it(M_sector, col); it; ++it)
+                mc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+        }
+        K_complex.setFromTriplets(kc.begin(), kc.end());
+        M_complex.setFromTriplets(mc.begin(), mc.end());
+    }
+
+    // Determine which harmonics to solve
+    std::vector<int> harmonics_to_solve;
+    if (harmonic_indices.empty()) {
+        for (int k = 0; k <= max_k; k++) harmonics_to_solve.push_back(k);
+    } else {
+        for (int k : harmonic_indices) {
+            if (k >= 0 && k <= max_k) harmonics_to_solve.push_back(k);
+        }
+    }
+    int n_harmonics = static_cast<int>(harmonics_to_solve.size());
+
     // Lambda to solve a single harmonic index k
-    // All captured references are read-only (K_eff, M_sector, mesh_ etc.)
+    // K_complex, M_complex are shared read-only across all threads
     auto solve_harmonic = [&](int k) -> std::optional<ModalResult> {
         try {
-            // Step 4: Apply cyclic symmetry BCs
-            auto [K_k, M_k] = apply_cyclic_bc(k, K_eff, M_sector);
+            // Build transformation matrix once for this harmonic
+            SpMatcd T = build_cyclic_transformation(k);
+            SpMatcd T_H = T.adjoint();
 
-            // Step 5: Eliminate hub DOFs from the reduced system
+            // Project: K_k = T^H * K_complex * T, M_k = T^H * M_complex * T
+            SpMatcd K_k = T_H * K_complex * T;
+            SpMatcd M_k = T_H * M_complex * T;
+
+            // Eliminate hub DOFs from the reduced system
             int n_reduced = static_cast<int>(K_k.rows());
 
             std::vector<int> free_reduced_map;
@@ -500,10 +538,8 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
             }
 
-            // Step 9: Expand mode shapes from free DOFs to full DOF space
+            // Expand mode shapes from free DOFs to full DOF space (reuse T)
             {
-                SpMatcd T = build_cyclic_transformation(k);
-                int full_ndof = mesh_.num_dof();
                 int n_reduced_T = static_cast<int>(T.cols());
                 int n_result_modes = static_cast<int>(result.mode_shapes.cols());
 
@@ -529,17 +565,32 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         }
     };
 
-    // Launch all harmonic index solves in parallel
-    std::vector<std::future<std::optional<ModalResult>>> futures;
-    futures.reserve(max_k + 1);
-    for (int k = 0; k <= max_k; k++) {
-        futures.push_back(std::async(std::launch::async, solve_harmonic, k));
-    }
+    // Dynamic work-stealing pool: exactly max_concurrent worker threads each
+    // pull the next harmonic from a shared atomic counter as they finish.
+    // This keeps all cores busy without the idle gaps of fixed-batch scheduling,
+    // and bounds peak memory to max_concurrent * per-thread cost.
+    int max_concurrent = (max_threads > 0) ? max_threads
+        : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    max_concurrent = std::min(max_concurrent, n_harmonics);
 
-    // Collect results
+    std::atomic<int> next_idx{0};
+    std::vector<std::optional<ModalResult>> results_vec(n_harmonics);
+
+    std::vector<std::thread> workers;
+    workers.reserve(max_concurrent);
+    for (int w = 0; w < max_concurrent; w++) {
+        workers.emplace_back([&]() {
+            while (true) {
+                int idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= n_harmonics) break;
+                results_vec[idx] = solve_harmonic(harmonics_to_solve[idx]);
+            }
+        });
+    }
+    for (auto& t : workers) t.join();
+
     std::vector<ModalResult> results;
-    for (auto& fut : futures) {
-        auto opt = fut.get();
+    for (auto& opt : results_vec) {
         if (opt.has_value()) {
             results.push_back(std::move(*opt));
         }
@@ -554,11 +605,14 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 }
 
 std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_rpm_sweep(
-    const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic) {
+    const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
+    const std::vector<int>& harmonic_indices,
+    int max_threads) {
     std::vector<std::vector<ModalResult>> all_results;
     all_results.reserve(rpm_values.size());
     for (int i = 0; i < rpm_values.size(); i++) {
-        all_results.push_back(solve_at_rpm(rpm_values(i), num_modes_per_harmonic));
+        all_results.push_back(solve_at_rpm(rpm_values(i), num_modes_per_harmonic,
+                                            harmonic_indices, max_threads));
     }
     return all_results;
 }
