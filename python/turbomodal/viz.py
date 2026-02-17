@@ -87,35 +87,31 @@ def _replicate_sectors(
 def _format_dimension(value: float, unit: str = "unknown") -> str:
     """Format a dimension value with appropriate units.
 
-    *value* is in the **declared unit** of the CAD file (gmsh preserves
-    native STEP/IGES coordinates).  *unit* is the declared source unit
-    and controls formatting:
-
-    * ``"mm"`` → show as millimetres (drop to um for tiny values)
-    * ``"cm"`` → show as centimetres
-    * ``"m"``  → show as metres (drop to mm for small values)
-    * ``"inch"`` → show as inches
-    * ``"unknown"`` → auto-scale for readability
+    *value* is always in **metres** (guaranteed by setting
+    ``Geometry.OCCTargetUnit = "M"`` before CAD import).
+    *unit* is the declared source unit from the CAD file and
+    controls which display unit is used.
     """
     if unit == "mm":
-        if abs(value) < 0.1:
-            return f"{value * 1000:.1f} um"
-        return f"{value:.2f} mm"
+        mm = value * 1000
+        if abs(mm) < 0.1:
+            return f"{mm * 1000:.1f} um"
+        return f"{mm:.2f} mm"
     if unit == "cm":
-        return f"{value:.3f} cm"
+        return f"{value * 100:.3f} cm"
     if unit == "m":
         if abs(value) < 0.01:
             return f"{value * 1000:.3f} mm"
         return f"{value:.4f} m"
     if unit == "inch":
-        return f'{value:.4f}"'
-    # Unknown: display raw value
+        return f'{value / 0.0254:.4f}"'
+    # Unknown: auto-scale assuming metres
     abs_v = abs(value)
     if abs_v < 0.01:
-        return f"{value:.6f}"
-    if abs_v > 1000:
-        return f"{value:.1f}"
-    return f"{value:.4f}"
+        return f"{value * 1000:.3f} mm"
+    if abs_v < 1.0:
+        return f"{value * 1000:.1f} mm"
+    return f"{value:.4f} m"
 
 
 def plot_cad(

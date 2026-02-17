@@ -20,12 +20,14 @@ _CAD_EXTENSIONS = {".step", ".stp", ".iges", ".igs", ".brep"}
 
 # File extensions handled by meshio
 _MESHIO_EXTENSIONS = {
-    ".bdf", ".nas",   # NASTRAN
-    ".inp",           # Abaqus
-    ".vtk", ".vtu",   # VTK
-    ".cgns",          # CGNS
-    ".med",           # Salome MED
-    ".xdmf",          # XDMF
+    ".bdf",
+    ".nas",  # NASTRAN
+    ".inp",  # Abaqus
+    ".vtk",
+    ".vtu",  # VTK
+    ".cgns",  # CGNS
+    ".med",  # Salome MED
+    ".xdmf",  # XDMF
 }
 
 # All mesh extensions (meshio + native .msh)
@@ -40,10 +42,11 @@ class CadInfo:
     dimensions and the recommended mesh size before committing to a
     full volumetric mesh via :func:`load_cad`.
 
-    All length values (radii, axial_length, etc.) are in gmsh's native
-    coordinate system, which preserves the units from the source CAD file.
-    For a STEP file declaring MILLI METRE, values are in mm.
-    ``detected_unit`` records the declared unit for display formatting.
+    All length values (radii, axial_length, etc.) are in **metres**.
+    ``Geometry.OCCTargetUnit = "M"`` is set before CAD import so that
+    gmsh normalises all coordinates to metres regardless of the source
+    file's declared unit.  ``detected_unit`` records the source file's
+    declared unit for display formatting only.
     """
 
     filepath: str
@@ -113,11 +116,13 @@ def _detect_rotation_axis(num_sectors: int) -> int:
         try:
             sb = gmsh.model.getBoundingBox(dim, tag)
             # Use the centre of the entity bounding box
-            points.append([
-                (sb[0] + sb[3]) / 2,
-                (sb[1] + sb[4]) / 2,
-                (sb[2] + sb[5]) / 2,
-            ])
+            points.append(
+                [
+                    (sb[0] + sb[3]) / 2,
+                    (sb[1] + sb[4]) / 2,
+                    (sb[2] + sb[5]) / 2,
+                ]
+            )
         except Exception:
             pass
 
@@ -278,14 +283,25 @@ def _parse_iges_units(filepath: Path) -> str:
         # Hollerith string like "2HMM" or "4HINCH"; strip the count+H prefix.
         if len(params) > 15:
             import re
+
             cleaned = re.sub(r"^\d+H", "", params[15]).upper()
             name_map = {
-                "MM": "mm", "MILLIMETER": "mm", "MILLIMETRE": "mm",
-                "CM": "cm", "CENTIMETER": "cm", "CENTIMETRE": "cm",
-                "M": "m", "METER": "m", "METRE": "m",
-                "IN": "inch", "INCH": "inch",
-                "FT": "ft", "FOOT": "ft",
-                "UM": "um", "MICRON": "um", "MICROMETER": "um",
+                "MM": "mm",
+                "MILLIMETER": "mm",
+                "MILLIMETRE": "mm",
+                "CM": "cm",
+                "CENTIMETER": "cm",
+                "CENTIMETRE": "cm",
+                "M": "m",
+                "METER": "m",
+                "METRE": "m",
+                "IN": "inch",
+                "INCH": "inch",
+                "FT": "ft",
+                "FOOT": "ft",
+                "UM": "um",
+                "MICRON": "um",
+                "MICROMETER": "um",
             }
             return name_map.get(cleaned, "unknown")
         return "unknown"
@@ -343,11 +359,13 @@ def inspect_cad(
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
+        gmsh.option.setString("Geometry.OCCTargetUnit", "M")
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        info = _build_cad_info(filepath, num_sectors,
-                               rotation_axis=rotation_axis, units=units)
+        info = _build_cad_info(
+            filepath, num_sectors, rotation_axis=rotation_axis, units=units
+        )
     finally:
         gmsh.finalize()
 
@@ -390,11 +408,13 @@ def _extract_surface_tessellation(
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
+        gmsh.option.setString("Geometry.OCCTargetUnit", "M")
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
 
-        info = _build_cad_info(filepath, num_sectors,
-                               rotation_axis=rotation_axis, units=units)
+        info = _build_cad_info(
+            filepath, num_sectors, rotation_axis=rotation_axis, units=units
+        )
 
         # Set surface mesh size
         mesh_sz = surface_mesh_size or info.recommended_mesh_size * 2
@@ -581,6 +601,7 @@ def load_cad(
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
+        gmsh.option.setString("Geometry.OCCTargetUnit", "M")
 
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
@@ -597,7 +618,8 @@ def load_cad(
                     "0 volumes). The file may be empty or corrupt."
                 )
             gmsh.model.occ.healShapes(
-                sewFaces=True, makeSolids=True,
+                sewFaces=True,
+                makeSolids=True,
             )
             gmsh.model.occ.synchronize()
             volumes = gmsh.model.getEntities(dim=3)
@@ -612,20 +634,30 @@ def load_cad(
                 )
 
         # Inspect geometry for mesh size and rotation axis
-        info = _build_cad_info(filepath, num_sectors,
-                               rotation_axis=rotation_axis, units=units)
+        info = _build_cad_info(
+            filepath, num_sectors, rotation_axis=rotation_axis, units=units
+        )
 
-        # Set mesh size — auto-compute from geometry when not specified
+        # Set mesh size & auto-compute from geometry when not specified
         if mesh_size is None:
             mesh_size = info.recommended_mesh_size
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.1)
 
         # Auto-detect cyclic boundaries if requested
+        left_tags: list[int] = []
+        right_tags: list[int] = []
+        left_cands: list = []
+        right_cands: list = []
         if auto_detect_boundaries:
-            _auto_detect_cyclic_boundaries(
-                num_sectors, left_boundary_name, right_boundary_name,
-                hub_name, rotation_axis=info.rotation_axis,
+            left_tags, right_tags, left_cands, right_cands = (
+                _auto_detect_cyclic_boundaries(
+                    num_sectors,
+                    left_boundary_name,
+                    right_boundary_name,
+                    hub_name,
+                    rotation_axis=info.rotation_axis,
+                )
             )
 
         # Always create volume physical group (needed for gmsh to include
@@ -637,9 +669,18 @@ def load_cad(
             pg = gmsh.model.addPhysicalGroup(3, vol_tags)
             gmsh.model.setPhysicalName(3, pg, "volume")
 
-        # Generate 3D mesh
-        gmsh.model.mesh.generate(3)
-        gmsh.model.mesh.setOrder(order)
+        # Enforce periodic meshing, generate mesh, and verify boundary
+        # node counts match.  If the first setPeriodic strategy fails,
+        # retry with an alternative before giving up.
+        _apply_periodic_and_mesh(
+            left_tags,
+            right_tags,
+            left_cands,
+            right_cands,
+            num_sectors,
+            info.rotation_axis,
+            order,
+        )
 
         # Extract mesh data
         mesh = _gmsh_to_mesh(num_sectors)
@@ -647,6 +688,159 @@ def load_cad(
         gmsh.finalize()
 
     return mesh
+
+
+def _count_boundary_nodes(
+    left_name: str = "left_boundary",
+    right_name: str = "right_boundary",
+) -> tuple[int, int]:
+    """Count mesh nodes on left/right boundary physical groups."""
+    import gmsh
+
+    n_left = n_right = 0
+    for dim, tag in gmsh.model.getPhysicalGroups(dim=2):
+        name = gmsh.model.getPhysicalName(dim, tag)
+        if name not in (left_name, right_name):
+            continue
+        entities = gmsh.model.getEntitiesForPhysicalGroup(dim, tag)
+        nodes = set()
+        for ent in entities:
+            n_tags, _, _ = gmsh.model.mesh.getNodes(dim, ent, includeBoundary=True)
+            nodes.update(int(t) for t in n_tags)
+        if name == left_name:
+            n_left = len(nodes)
+        else:
+            n_right = len(nodes)
+    return n_left, n_right
+
+
+def _set_periodic_centroid_matched(
+    left_tags: list[int],
+    right_tags: list[int],
+    left_candidates: list,
+    right_candidates: list,
+    rotation_axis: int,
+    sector_angle: float,
+) -> int:
+    """Apply setPeriodic with centroid-based surface pairing.
+
+    Returns the number of successfully applied periodic constraints.
+    """
+    import gmsh
+
+    rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
+    rot_np = np.array(rot).reshape(4, 4)
+
+    left_centers = np.array([s["center"] for s in left_candidates])
+    right_centers = np.array([s["center"] for s in right_candidates])
+
+    # Rotate left centroids by sector_angle to find matching right surfaces
+    left_h = np.hstack([left_centers, np.ones((len(left_centers), 1))])
+    left_rotated = (rot_np @ left_h.T).T[:, :3]
+
+    n_applied = 0
+    used_right: set[int] = set()
+    for i, lc_rot in enumerate(left_rotated):
+        dists = np.linalg.norm(right_centers - lc_rot, axis=1)
+        for u in used_right:
+            dists[u] = np.inf
+        best_j = int(np.argmin(dists))
+        if dists[best_j] < np.inf:
+            used_right.add(best_j)
+            try:
+                gmsh.model.mesh.setPeriodic(
+                    2,
+                    [right_tags[best_j]],
+                    [left_tags[i]],
+                    rot,
+                )
+                n_applied += 1
+            except Exception:
+                pass
+    return n_applied
+
+
+def _apply_periodic_and_mesh(
+    left_tags: list[int],
+    right_tags: list[int],
+    left_candidates: list,
+    right_candidates: list,
+    num_sectors: int,
+    rotation_axis: int,
+    order: int,
+) -> None:
+    """Apply periodic constraints, generate mesh, verify boundary match.
+
+    Tries centroid-matched setPeriodic first.  If boundary node counts
+    still differ after meshing, clears the mesh and retries with the
+    all-at-once setPeriodic call.  Raises RuntimeError if both fail.
+    """
+    import gmsh
+
+    has_boundaries = bool(left_tags and right_tags)
+    sector_angle = 2 * np.pi / num_sectors
+
+    if has_boundaries:
+        _set_periodic_centroid_matched(
+            left_tags,
+            right_tags,
+            left_candidates,
+            right_candidates,
+            rotation_axis,
+            sector_angle,
+        )
+
+    gmsh.model.mesh.generate(3)
+    gmsh.model.mesh.setOrder(order)
+
+    if not has_boundaries:
+        return
+
+    n_left, n_right = _count_boundary_nodes()
+    if n_left == n_right and n_left > 0:
+        return  # periodic meshing worked
+
+    # --- Retry: clear mesh, try all-at-once setPeriodic ---
+    import logging
+
+    logger = logging.getLogger("turbomodal.io")
+    logger.warning(
+        "Periodic meshing produced mismatched boundary nodes "
+        "(left=%d, right=%d). Retrying with all-at-once setPeriodic.",
+        n_left,
+        n_right,
+    )
+
+    gmsh.model.mesh.clear()
+
+    # Clear any existing periodicity so we start fresh
+    rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
+    try:
+        gmsh.model.mesh.setPeriodic(2, right_tags, left_tags, rot)
+    except Exception as exc:
+        logger.warning("All-at-once setPeriodic failed: %s", exc)
+        # Try individual pairs one more time (order may matter)
+        for lt, rt in zip(left_tags, right_tags):
+            try:
+                gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
+            except Exception:
+                pass
+
+    gmsh.model.mesh.generate(3)
+    gmsh.model.mesh.setOrder(order)
+
+    n_left, n_right = _count_boundary_nodes()
+    if n_left != n_right:
+        raise RuntimeError(
+            f"Cyclic boundary node count mismatch after periodic meshing "
+            f"(left={n_left}, right={n_right}). gmsh could not enforce "
+            f"matching meshes on the boundary surfaces. This can happen with "
+            f"complex blade shapes where the left and right boundary surface "
+            f"topologies differ. Try:\n"
+            f"  - Adjusting mesh_size (coarser meshes are easier to match)\n"
+            f"  - Simplifying the CAD geometry near the sector boundaries\n"
+            f"  - Manually assigning matching boundary surfaces in the CAD tool"
+        )
 
 
 def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
@@ -661,24 +855,60 @@ def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
     s = np.sin(angle)
     if axis == 0:  # rotation about X
         return [
-            1, 0,  0, 0,
-            0, c, -s, 0,
-            0, s,  c, 0,
-            0, 0,  0, 1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            c,
+            -s,
+            0,
+            0,
+            s,
+            c,
+            0,
+            0,
+            0,
+            0,
+            1,
         ]
     if axis == 1:  # rotation about Y
         return [
-             c, 0, s, 0,
-             0, 1, 0, 0,
-            -s, 0, c, 0,
-             0, 0, 0, 1,
+            c,
+            0,
+            s,
+            0,
+            0,
+            1,
+            0,
+            0,
+            -s,
+            0,
+            c,
+            0,
+            0,
+            0,
+            0,
+            1,
         ]
     # axis == 2: rotation about Z
     return [
-        c, -s, 0, 0,
-        s,  c, 0, 0,
-        0,  0, 1, 0,
-        0,  0, 0, 1,
+        c,
+        -s,
+        0,
+        0,
+        s,
+        c,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
     ]
 
 
@@ -688,7 +918,7 @@ def _auto_detect_cyclic_boundaries(
     right_name: str,
     hub_name: str | None,
     rotation_axis: int = 2,
-) -> None:
+) -> tuple[list[int], list[int], list, list]:
     """Auto-detect cyclic boundary surfaces and hub from geometry.
 
     Identifies surfaces whose outward normals are approximately tangential
@@ -725,11 +955,13 @@ def _auto_detect_cyclic_boundaries(
         except Exception:
             continue
         # Bounding-box centre as a reliable surface position estimate
-        center = np.array([
-            (sb[0] + sb[3]) / 2,
-            (sb[1] + sb[4]) / 2,
-            (sb[2] + sb[5]) / 2,
-        ])
+        center = np.array(
+            [
+                (sb[0] + sb[3]) / 2,
+                (sb[1] + sb[4]) / 2,
+                (sb[2] + sb[5]) / 2,
+            ]
+        )
         # Normal at parametric centre (direction only — still valid)
         try:
             bounds_min, bounds_max = gmsh.model.getParametrizationBounds(dim, tag)
@@ -743,16 +975,18 @@ def _auto_detect_cyclic_boundaries(
         if theta < -0.01:
             theta += 2 * np.pi
         r = np.sqrt(center[c1] ** 2 + center[c2] ** 2)
-        surface_data.append({
-            "tag": tag,
-            "normal": np.array(normal[:3]),
-            "center": center,
-            "theta": theta,
-            "radius": r,
-        })
+        surface_data.append(
+            {
+                "tag": tag,
+                "normal": np.array(normal[:3]),
+                "center": center,
+                "theta": theta,
+                "radius": r,
+            }
+        )
 
     if not surface_data:
-        return
+        return [], [], [], []
 
     # --- Hub detection (unchanged — uses radius/radial-normal checks) ---
     hub_candidates = []
@@ -844,12 +1078,15 @@ def _auto_detect_cyclic_boundaries(
     # --- Warn if boundaries not found ---
     if not left_candidates or not right_candidates:
         import warnings
+
         n_surf = len(surface_data)
-        n_cand = len(boundary_candidates) if 'boundary_candidates' in dir() else 0
+        n_cand = len(boundary_candidates) if "boundary_candidates" in dir() else 0
         theta_range = ""
         if surface_data:
             all_thetas = [sd["theta"] for sd in surface_data]
-            theta_range = f" Theta range: [{min(all_thetas):.2f}, {max(all_thetas):.2f}] rad."
+            theta_range = (
+                f" Theta range: [{min(all_thetas):.2f}, {max(all_thetas):.2f}] rad."
+            )
         axial_info = ""
         if surface_data:
             axials = [abs(sd["normal"][rotation_axis]) for sd in surface_data]
@@ -864,6 +1101,8 @@ def _auto_detect_cyclic_boundaries(
         )
 
     # --- Create physical groups ---
+    left_tags: list[int] = []
+    right_tags: list[int] = []
     if left_candidates:
         left_tags = [s["tag"] for s in left_candidates]
         pg = gmsh.model.addPhysicalGroup(2, left_tags)
@@ -874,24 +1113,12 @@ def _auto_detect_cyclic_boundaries(
         pg = gmsh.model.addPhysicalGroup(2, right_tags)
         gmsh.model.setPhysicalName(2, pg, right_name)
 
-    # Enforce periodic (node-matched) meshing on cyclic boundary pairs.
-    # Without this, gmsh meshes each face independently and the cyclic
-    # symmetry solver cannot pair boundary nodes.
-    # The boundary detection is heuristic and may mis-pair surfaces, so
-    # catch and ignore setPeriodic failures (meshing will still succeed,
-    # the solver can fall back to its own node-matching logic).
-    if left_candidates and right_candidates:
-        rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
-        for lt, rt in zip(left_tags, right_tags):
-            try:
-                gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
-            except Exception:
-                pass
-
     if hub_name and hub_candidates:
         hub_tags = [s["tag"] for s in hub_candidates]
         pg = gmsh.model.addPhysicalGroup(2, hub_tags)
         gmsh.model.setPhysicalName(2, pg, hub_name)
+
+    return left_tags, right_tags, left_candidates, right_candidates
 
 
 def _gmsh_to_mesh(num_sectors: int) -> Mesh:
@@ -938,9 +1165,16 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
                 found_types[int(etype)] = (d, len(tags))
 
         _GMSH_TYPE_NAMES = {
-            1: "Line2", 2: "Tri3", 3: "Quad4", 4: "Tet4",
-            5: "Hex8", 6: "Prism6", 8: "Line3", 9: "Tri6",
-            11: "Tet10", 15: "Point",
+            1: "Line2",
+            2: "Tri3",
+            3: "Quad4",
+            4: "Tet4",
+            5: "Hex8",
+            6: "Prism6",
+            8: "Line3",
+            9: "Tri6",
+            11: "Tet10",
+            15: "Point",
         }
         type_summary = ", ".join(
             f"{_GMSH_TYPE_NAMES.get(t, f'type{t}')}(dim{d})×{n}"
@@ -1112,7 +1346,11 @@ def load_mesh(
     # Also check point_data for node set markers
     if hasattr(mio, "point_data"):
         for key, data in mio.point_data.items():
-            if key.startswith("nset_") or key in ("left_boundary", "right_boundary", "hub"):
+            if key.startswith("nset_") or key in (
+                "left_boundary",
+                "right_boundary",
+                "hub",
+            ):
                 ns = NodeSet()
                 ns.name = key.replace("nset_", "")
                 ns.node_ids = sorted(int(i) for i in np.where(data > 0)[0])
