@@ -218,10 +218,14 @@ PYBIND11_MODULE(_core, m) {
              py::keep_alive<1, 2>())  // solver keeps mesh alive
         .def("solve_at_rpm", &CyclicSymmetrySolver::solve_at_rpm,
              py::arg("rpm"), py::arg("num_modes_per_harmonic"),
+             py::arg("harmonic_indices") = std::vector<int>{},
+             py::arg("max_threads") = 0,
              "Solve modal analysis at a given RPM",
              py::call_guard<py::gil_scoped_release>())
         .def("solve_rpm_sweep", &CyclicSymmetrySolver::solve_rpm_sweep,
              py::arg("rpm_values"), py::arg("num_modes_per_harmonic"),
+             py::arg("harmonic_indices") = std::vector<int>{},
+             py::arg("max_threads") = 0,
              "Solve over a range of RPM values",
              py::call_guard<py::gil_scoped_release>())
         .def("export_campbell_csv", &CyclicSymmetrySolver::export_campbell_csv,

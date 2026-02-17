@@ -24,10 +24,15 @@ public:
     CyclicSymmetrySolver(const Mesh& mesh, const Material& mat,
                          const FluidConfig& fluid = FluidConfig());
 
-    std::vector<ModalResult> solve_at_rpm(double rpm, int num_modes_per_harmonic);
+    std::vector<ModalResult> solve_at_rpm(
+        double rpm, int num_modes_per_harmonic,
+        const std::vector<int>& harmonic_indices = {},
+        int max_threads = 0);
 
     std::vector<std::vector<ModalResult>> solve_rpm_sweep(
-        const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic);
+        const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
+        const std::vector<int>& harmonic_indices = {},
+        int max_threads = 0);
 
     void export_campbell_csv(const std::string& filename,
                              const std::vector<std::vector<ModalResult>>& results);
