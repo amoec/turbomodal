@@ -87,36 +87,35 @@ def _replicate_sectors(
 def _format_dimension(value: float, unit: str = "unknown") -> str:
     """Format a dimension value with appropriate units.
 
-    *value* is always in **metres** (gmsh / OCC internal unit) regardless
-    of the CAD file's declared unit.  *unit* is the declared source unit
-    and controls how the value is converted for display:
+    *value* is in the **declared unit** of the CAD file (gmsh preserves
+    native STEP/IGES coordinates).  *unit* is the declared source unit
+    and controls formatting:
 
-    * ``"mm"`` → multiply by 1000, show as millimetres
-    * ``"cm"`` → multiply by 100, show as centimetres
-    * ``"m"``  → show as-is in metres (drop to mm for small values)
-    * ``"inch"`` → divide by 0.0254, show as inches
+    * ``"mm"`` → show as millimetres (drop to um for tiny values)
+    * ``"cm"`` → show as centimetres
+    * ``"m"``  → show as metres (drop to mm for small values)
+    * ``"inch"`` → show as inches
     * ``"unknown"`` → auto-scale for readability
     """
     if unit == "mm":
-        mm = value * 1000
-        if abs(mm) < 0.1:
-            return f"{mm * 1000:.1f} um"
-        return f"{mm:.2f} mm"
+        if abs(value) < 0.1:
+            return f"{value * 1000:.1f} um"
+        return f"{value:.2f} mm"
     if unit == "cm":
-        return f"{value * 100:.3f} cm"
+        return f"{value:.3f} cm"
     if unit == "m":
-        if abs(value) < 1.0:
-            return f"{value * 1000:.1f} mm"
+        if abs(value) < 0.01:
+            return f"{value * 1000:.3f} mm"
         return f"{value:.4f} m"
     if unit == "inch":
-        return f'{value / 0.0254:.4f}"'
-    # Unknown: auto-scale from metres
+        return f'{value:.4f}"'
+    # Unknown: display raw value
     abs_v = abs(value)
     if abs_v < 0.01:
-        return f"{value * 1000:.3f} mm"
-    if abs_v < 1.0:
-        return f"{value * 1000:.1f} mm"
-    return f"{value:.4f} m"
+        return f"{value:.6f}"
+    if abs_v > 1000:
+        return f"{value:.1f}"
+    return f"{value:.4f}"
 
 
 def plot_cad(
