@@ -33,6 +33,11 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libomp
 
+      - name: Block Windows AV from interfering with tests
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
       - name: Install build dependencies
         run: pip install scikit-build-core pybind11
 
