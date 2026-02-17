@@ -30,6 +30,7 @@ option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_VALIDATION_TESTS "Build slow validation tests (requires mesh files)" OFF)
 option(USE_OPENMP "Enable OpenMP parallelism" ON)
+option(USE_CHOLMOD "Use SuiteSparse CHOLMOD for faster sparse factorization" OFF)
 
 # --- Eigen 3.4.0 via FetchContent (header-only) ---
 # System has Eigen 5.0.1 which is incompatible with Spectra.
@@ -76,6 +77,25 @@ if(USE_OPENMP)
   find_package(OpenMP)
 endif()
 
+# --- SuiteSparse CHOLMOD (optional, for faster sparse factorization) ---
+if(USE_CHOLMOD)
+  find_package(CHOLMOD QUIET)
+  if(NOT CHOLMOD_FOUND)
+    # Try pkg-config as fallback
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(CHOLMOD QUIET IMPORTED_TARGET cholmod)
+    endif()
+  endif()
+  if(CHOLMOD_FOUND OR CHOLMOD_INCLUDE_DIRS)
+    message(STATUS "CHOLMOD found — enabling supernodal factorization")
+    set(TURBOMODAL_HAS_CHOLMOD ON)
+  else()
+    message(WARNING "USE_CHOLMOD=ON but CHOLMOD not found — falling back to SimplicialLDLT")
+    set(TURBOMODAL_HAS_CHOLMOD OFF)
+  endif()
+endif()
+
 # --- Core static library ---
 add_library(turbomodal_core STATIC
   src/material.cpp
@@ -84,6 +104,7 @@ add_library(turbomodal_core STATIC
   src/assembler.cpp
   src/rotating_effects.cpp
   src/modal_solver.cpp
+  src/hermitian_lanczos.cpp
   src/cyclic_solver.cpp
   src/added_mass.cpp
   src/damping.cpp
@@ -95,6 +116,11 @@ target_include_directories(turbomodal_core PUBLIC include)
 target_link_libraries(turbomodal_core PUBLIC Eigen3::Eigen spectra)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(turbomodal_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+if(TURBOMODAL_HAS_CHOLMOD)
+  target_compile_definitions(turbomodal_core PUBLIC TURBOMODAL_HAS_CHOLMOD)
+  target_include_directories(turbomodal_core PUBLIC ${CHOLMOD_INCLUDE_DIRS})
+  target_link_libraries(turbomodal_core PUBLIC ${CHOLMOD_LIBRARIES})
 endif()
 
 # --- Unit tests ---
