@@ -266,6 +266,79 @@ class TestLoadCadFullPipeline:
             gmsh.finalize()
 
 
+    def test_offset_sector_boundaries_detected(self, tmp_path):
+        """A sector NOT starting at theta=0 should still have its cyclic
+        boundaries detected.  This tests the orientation-agnostic logic."""
+        import gmsh
+        from turbomodal.io import load_cad
+
+        brep = tmp_path / "offset_sector.brep"
+        num_sectors = 24
+        sector_angle = 2 * np.pi / num_sectors  # 15 degrees
+        offset_rad = np.radians(45.0)
+
+        # Build an annular sector, then rotate it by 45 degrees
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Verbosity", 0)
+            outer = gmsh.model.occ.addCylinder(
+                0, 0, 0, 0, 0, 0.02, 0.05, angle=sector_angle)
+            inner = gmsh.model.occ.addCylinder(
+                0, 0, 0, 0, 0, 0.02, 0.03, angle=sector_angle)
+            result = gmsh.model.occ.cut([(3, outer)], [(3, inner)])[0]
+            # Rotate the entire sector by 45 degrees about Z
+            gmsh.model.occ.rotate(result, 0, 0, 0, 0, 0, 1, offset_rad)
+            gmsh.model.occ.synchronize()
+            gmsh.write(str(brep))
+        finally:
+            gmsh.finalize()
+
+        mesh = load_cad(str(brep), num_sectors=num_sectors,
+                        auto_detect_boundaries=True)
+        assert mesh.num_nodes() > 0
+        assert mesh.num_elements() > 0
+        assert len(mesh.left_boundary) > 0, "Left boundary not detected for offset sector"
+        assert len(mesh.right_boundary) > 0, "Right boundary not detected for offset sector"
+
+    def test_healed_model_with_boundaries(self, tmp_path):
+        """Surface-only annular sector should be healed AND have its cyclic
+        boundaries detected when auto_detect_boundaries=True."""
+        import gmsh
+        from turbomodal.io import load_cad
+
+        brep = tmp_path / "surface_sector.brep"
+        num_sectors = 24
+        sector_angle = 2 * np.pi / num_sectors
+
+        gmsh.initialize()
+        try:
+            gmsh.option.setNumber("General.Verbosity", 0)
+            # Create a solid annular sector at theta=0
+            outer = gmsh.model.occ.addCylinder(0, 0, 0, 0, 0, 0.02,
+                                                0.05, angle=sector_angle)
+            inner = gmsh.model.occ.addCylinder(0, 0, 0, 0, 0, 0.02,
+                                                0.03, angle=sector_angle)
+            result = gmsh.model.occ.cut([(3, outer)], [(3, inner)])[0]
+            gmsh.model.occ.synchronize()
+
+            # Remove volume, keep only surfaces
+            vols = gmsh.model.getEntities(dim=3)
+            gmsh.model.occ.remove(vols, recursive=False)
+            gmsh.model.occ.synchronize()
+            assert len(gmsh.model.getEntities(dim=3)) == 0
+            gmsh.write(str(brep))
+        finally:
+            gmsh.finalize()
+
+        # load_cad should heal (create volume) AND detect boundaries
+        mesh = load_cad(str(brep), num_sectors=num_sectors,
+                        auto_detect_boundaries=True)
+        assert mesh.num_nodes() > 0
+        assert mesh.num_elements() > 0
+        assert len(mesh.left_boundary) > 0, "Left boundary not detected after healing"
+        assert len(mesh.right_boundary) > 0, "Right boundary not detected after healing"
+
+
 class TestRotationMatrix4x4:
     def test_z_axis(self):
         from turbomodal.io import _rotation_matrix_4x4

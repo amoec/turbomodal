@@ -40,12 +40,10 @@ class CadInfo:
     dimensions and the recommended mesh size before committing to a
     full volumetric mesh via :func:`load_cad`.
 
-    All length values (radii, axial_length, etc.) are in **metres**,
-    which is the internal unit used by gmsh's OpenCASCADE kernel
-    regardless of the unit declared in the source CAD file.
-    ``detected_unit`` records the declared unit so that display helpers
-    like ``_format_dimension`` can convert to the original unit for
-    human-readable output.
+    All length values (radii, axial_length, etc.) are in gmsh's native
+    coordinate system, which preserves the units from the source CAD file.
+    For a STEP file declaring MILLI METRE, values are in mm.
+    ``detected_unit`` records the declared unit for display formatting.
     """
 
     filepath: str
@@ -630,6 +628,15 @@ def load_cad(
                 hub_name, rotation_axis=info.rotation_axis,
             )
 
+        # Always create volume physical group (needed for gmsh to include
+        # volume elements in the output).  This is independent of boundary
+        # detection so that meshing succeeds even when no boundaries are found.
+        volumes_for_pg = gmsh.model.getEntities(dim=3)
+        if volumes_for_pg:
+            vol_tags = [v[1] for v in volumes_for_pg]
+            pg = gmsh.model.addPhysicalGroup(3, vol_tags)
+            gmsh.model.setPhysicalName(3, pg, "volume")
+
         # Generate 3D mesh
         gmsh.model.mesh.generate(3)
         gmsh.model.mesh.setOrder(order)
@@ -685,9 +692,13 @@ def _auto_detect_cyclic_boundaries(
     """Auto-detect cyclic boundary surfaces and hub from geometry.
 
     Identifies surfaces whose outward normals are approximately tangential
-    to the sector angle boundaries. The surface at theta=0 is 'left_boundary',
-    the surface at theta=2*pi/N is 'right_boundary'. The innermost surface
-    (smallest mean radius) is the hub.
+    (perpendicular to the rotation axis) and splits them into two groups
+    separated by approximately ``sector_angle = 2*pi/num_sectors`` radians.
+    The lower-theta group becomes ``left_boundary``, the higher-theta group
+    becomes ``right_boundary``.  The innermost radial surface is the hub.
+
+    The detection is **orientation-agnostic**: the sector does not need to
+    start at theta=0.
 
     Parameters
     ----------
@@ -726,8 +737,7 @@ def _auto_detect_cyclic_boundaries(
             v_mid = (bounds_min[1] + bounds_max[1]) / 2
             normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
         except Exception:
-            normal = [0.0, 0.0, 0.0]
-            normal[rotation_axis] = 1.0  # fallback along rotation axis
+            continue  # skip — cannot determine surface orientation
         # theta and radius in the perpendicular plane
         theta = np.arctan2(center[c2], center[c1])
         if theta < -0.01:
@@ -744,21 +754,12 @@ def _auto_detect_cyclic_boundaries(
     if not surface_data:
         return
 
-    # Find surfaces near theta=0 and theta=sector_angle
-    left_candidates = []
-    right_candidates = []
+    # --- Hub detection (unchanged — uses radius/radial-normal checks) ---
     hub_candidates = []
-
+    median_radius = np.median([s["radius"] for s in surface_data])
     for sd in surface_data:
-        # Component of normal along the rotation axis
         axial_component = abs(sd["normal"][rotation_axis])
-        theta = sd["theta"]
-        r = sd["radius"]
-
-        # Hub: surface with normal pointing inward (radially) and small
-        # axial component
-        if axial_component < 0.3 and r < np.median([s["radius"] for s in surface_data]):
-            # Check if normal is roughly radially inward
+        if axial_component < 0.3 and sd["radius"] < median_radius:
             radial_dir = np.zeros(3)
             radial_dir[c1] = sd["center"][c1]
             radial_dir[c2] = sd["center"][c2]
@@ -768,16 +769,101 @@ def _auto_detect_cyclic_boundaries(
                 if abs(dot) > 0.7:
                     hub_candidates.append(sd)
 
-        # Left/right: surfaces with normals mostly in the perpendicular
-        # plane (small axial component) and centre theta near 0 or
-        # sector_angle
-        if axial_component < 0.5:
-            if abs(theta) < sector_angle * 0.15 or abs(theta - 2 * np.pi) < sector_angle * 0.15:
-                left_candidates.append(sd)
-            elif abs(theta - sector_angle) < sector_angle * 0.15:
-                right_candidates.append(sd)
+    # --- Cyclic boundary detection (orientation-agnostic) ---
+    # Cyclic boundary surfaces have normals that are approximately
+    # *tangential* — perpendicular to both the rotation axis and the
+    # radial direction.  This distinguishes them from:
+    #   - hub/shroud surfaces (radial normals)
+    #   - inlet/outlet surfaces (axial normals)
+    #   - cylindrical walls (also radial normals)
+    boundary_candidates = []
+    for sd in surface_data:
+        axial_component = abs(sd["normal"][rotation_axis])
+        if axial_component > 0.5:
+            continue  # axial surface (inlet/outlet)
+        # Compute tangential direction at this surface's angular position
+        r = sd["radius"]
+        if r < 1e-10:
+            continue  # on-axis surface, can't compute tangential
+        tangential = np.zeros(3)
+        tangential[c1] = -sd["center"][c2] / r
+        tangential[c2] = sd["center"][c1] / r
+        tangential_component = abs(np.dot(sd["normal"], tangential))
+        if tangential_component > 0.5:
+            boundary_candidates.append(sd)
 
-    # Create physical groups
+    left_candidates = []
+    right_candidates = []
+
+    if len(boundary_candidates) >= 2:
+        # Find the pair of surfaces whose angular separation is closest
+        # to sector_angle.  These anchor the two boundary clusters.
+        # Then assign remaining candidates to the nearest cluster.
+        n = len(boundary_candidates)
+        best_pair = None
+        best_pair_score = float("inf")
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                ti = boundary_candidates[i]["theta"]
+                tj = boundary_candidates[j]["theta"]
+                sep = tj - ti
+                if sep < 0:
+                    sep += 2 * np.pi
+                score = abs(sep - sector_angle)
+                # Also check reverse direction
+                rev_sep = 2 * np.pi - sep
+                rev_score = abs(rev_sep - sector_angle)
+                if rev_score < score:
+                    # j is actually the "left" (lower) boundary
+                    if rev_score < best_pair_score:
+                        best_pair_score = rev_score
+                        best_pair = (j, i)
+                else:
+                    if score < best_pair_score:
+                        best_pair_score = score
+                        best_pair = (i, j)
+
+        # Accept if the best pair separation is within 10% of sector_angle
+        if best_pair is not None and best_pair_score < sector_angle * 0.10:
+            left_theta = boundary_candidates[best_pair[0]]["theta"]
+            right_theta = boundary_candidates[best_pair[1]]["theta"]
+            cluster_tol = sector_angle * 0.15
+
+            for sd in boundary_candidates:
+                # Angular distance to each cluster centre (handles wraparound)
+                dt_left = abs(sd["theta"] - left_theta)
+                dt_left = min(dt_left, 2 * np.pi - dt_left)
+                dt_right = abs(sd["theta"] - right_theta)
+                dt_right = min(dt_right, 2 * np.pi - dt_right)
+                if dt_left < cluster_tol:
+                    left_candidates.append(sd)
+                elif dt_right < cluster_tol:
+                    right_candidates.append(sd)
+
+    # --- Warn if boundaries not found ---
+    if not left_candidates or not right_candidates:
+        import warnings
+        n_surf = len(surface_data)
+        n_cand = len(boundary_candidates) if 'boundary_candidates' in dir() else 0
+        theta_range = ""
+        if surface_data:
+            all_thetas = [sd["theta"] for sd in surface_data]
+            theta_range = f" Theta range: [{min(all_thetas):.2f}, {max(all_thetas):.2f}] rad."
+        axial_info = ""
+        if surface_data:
+            axials = [abs(sd["normal"][rotation_axis]) for sd in surface_data]
+            axial_info = f" Axial components: [{min(axials):.2f}, {max(axials):.2f}]."
+        warnings.warn(
+            f"Cyclic boundary auto-detection found {len(left_candidates)} left "
+            f"and {len(right_candidates)} right candidate surfaces out of "
+            f"{n_surf} total ({n_cand} with small axial normal component)."
+            f"{theta_range}{axial_info} "
+            f"The sector boundaries may not have been correctly identified. "
+            f"Consider providing boundary surfaces manually via physical groups."
+        )
+
+    # --- Create physical groups ---
     if left_candidates:
         left_tags = [s["tag"] for s in left_candidates]
         pg = gmsh.model.addPhysicalGroup(2, left_tags)
@@ -806,13 +892,6 @@ def _auto_detect_cyclic_boundaries(
         hub_tags = [s["tag"] for s in hub_candidates]
         pg = gmsh.model.addPhysicalGroup(2, hub_tags)
         gmsh.model.setPhysicalName(2, pg, hub_name)
-
-    # Add volume physical group (needed for gmsh to include volume elements)
-    volumes = gmsh.model.getEntities(dim=3)
-    if volumes:
-        vol_tags = [v[1] for v in volumes]
-        pg = gmsh.model.addPhysicalGroup(3, vol_tags)
-        gmsh.model.setPhysicalName(3, pg, "volume")
 
 
 def _gmsh_to_mesh(num_sectors: int) -> Mesh:
