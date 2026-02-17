@@ -646,7 +646,18 @@ def load_cad(
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", mesh_size)
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", mesh_size * 0.1)
 
-        # Auto-detect cyclic boundaries if requested
+        # Always create volume physical group (needed for gmsh to include
+        # volume elements in the output).  This is independent of boundary
+        # detection so that meshing succeeds even when no boundaries are found.
+        volumes_for_pg = gmsh.model.getEntities(dim=3)
+        if volumes_for_pg:
+            vol_tags = [v[1] for v in volumes_for_pg]
+            pg = gmsh.model.addPhysicalGroup(3, vol_tags)
+            gmsh.model.setPhysicalName(3, pg, "volume")
+
+        # --- Pass 1: Best-effort gmsh detection + periodic meshing ---
+        # Use gmsh surface-normal heuristics to identify boundary surfaces.
+        # Feed them to setPeriodic for compatible mesh topology, then mesh.
         left_tags: list[int] = []
         right_tags: list[int] = []
         left_cands: list = []
@@ -667,18 +678,7 @@ def load_cad(
                 left_cands, right_cands, num_sectors, info.rotation_axis
             )
 
-        # Always create volume physical group (needed for gmsh to include
-        # volume elements in the output).  This is independent of boundary
-        # detection so that meshing succeeds even when no boundaries are found.
-        volumes_for_pg = gmsh.model.getEntities(dim=3)
-        if volumes_for_pg:
-            vol_tags = [v[1] for v in volumes_for_pg]
-            pg = gmsh.model.addPhysicalGroup(3, vol_tags)
-            gmsh.model.setPhysicalName(3, pg, "volume")
-
-        # Enforce periodic meshing, generate mesh, and verify boundary
-        # node counts match.
-        periodic_ok = _apply_periodic_and_mesh(
+        _apply_periodic_and_mesh(
             left_tags,
             right_tags,
             left_cands,
@@ -689,19 +689,93 @@ def load_cad(
             optimize,
         )
 
-        # Extract raw mesh arrays from gmsh
-        coords, connectivity, node_sets = _extract_mesh_arrays()
+        # Extract mesh and run authoritative geometric boundary detection.
+        coords, connectivity, node_sets, tag_to_idx = _extract_mesh_arrays()
+        n_orphans = _detect_boundaries_geometric(
+            coords, connectivity, node_sets,
+            num_sectors, info.rotation_axis,
+        )
 
-        # Always snap boundary nodes when boundaries exist.  Even when
-        # setPeriodic reports matching counts, mesh optimization passes
-        # can perturb boundary node positions enough to break the strict
-        # C++ matching tolerance.
-        has_boundaries = bool(left_tags and right_tags)
-        if has_boundaries:
-            _snap_boundary_nodes(
-                coords, node_sets, num_sectors, info.rotation_axis,
-                mesh_size,
+        # --- Pass 2: Remesh with corrected setPeriodic if needed ---
+        # If orphaned boundary nodes exist, the first setPeriodic used
+        # wrong or incomplete surface pairs.  Map the geometrically-
+        # detected boundaries back to gmsh surface entities and remesh.
+        if n_orphans > 0:
+            import logging
+            logging.getLogger("turbomodal.io").info(
+                "Pass 1 had %d orphaned boundary nodes; remeshing with "
+                "geometrically-detected surface pairs.", n_orphans,
             )
+
+            detected_left, detected_right = _map_boundaries_to_gmsh_surfaces(
+                coords, node_sets, tag_to_idx,
+            )
+
+            if detected_left and detected_right:
+                # Build candidate dicts for the periodic matcher
+                sector_angle = 2 * np.pi / num_sectors
+                c1, c2 = _PERP_AXES[info.rotation_axis]
+                det_left_cands = []
+                det_right_cands = []
+                for tag in detected_left:
+                    try:
+                        sb = gmsh.model.getBoundingBox(2, tag)
+                        center = np.array([
+                            (sb[0] + sb[3]) / 2,
+                            (sb[1] + sb[4]) / 2,
+                            (sb[2] + sb[5]) / 2,
+                        ])
+                        r = np.sqrt(center[c1] ** 2 + center[c2] ** 2)
+                        det_left_cands.append({
+                            "tag": tag, "center": center, "radius": r,
+                        })
+                    except Exception:
+                        pass
+                for tag in detected_right:
+                    try:
+                        sb = gmsh.model.getBoundingBox(2, tag)
+                        center = np.array([
+                            (sb[0] + sb[3]) / 2,
+                            (sb[1] + sb[4]) / 2,
+                            (sb[2] + sb[5]) / 2,
+                        ])
+                        r = np.sqrt(center[c1] ** 2 + center[c2] ** 2)
+                        det_right_cands.append({
+                            "tag": tag, "center": center, "radius": r,
+                        })
+                    except Exception:
+                        pass
+
+                # Clear mesh and remesh with correct periodic surfaces
+                gmsh.model.mesh.clear()
+                _apply_periodic_and_mesh(
+                    detected_left,
+                    detected_right,
+                    det_left_cands,
+                    det_right_cands,
+                    num_sectors,
+                    info.rotation_axis,
+                    order,
+                    optimize,
+                )
+
+                # Final extraction + geometric detection
+                coords, connectivity, node_sets, tag_to_idx = (
+                    _extract_mesh_arrays()
+                )
+                n_orphans_2 = _detect_boundaries_geometric(
+                    coords, connectivity, node_sets,
+                    num_sectors, info.rotation_axis,
+                )
+                if n_orphans_2 > 0:
+                    import warnings
+                    warnings.warn(
+                        f"After remeshing with corrected boundary surfaces, "
+                        f"{n_orphans_2} orphaned boundary nodes remain. "
+                        f"The mesh may have incompatible topology on the "
+                        f"sector faces.",
+                        stacklevel=2,
+                    )
 
         # Build C++ Mesh from corrected arrays
         mesh = Mesh()
@@ -861,6 +935,78 @@ def _set_periodic_centroid_matched(
             n_applied, n_total, n_failed, n_skipped,
         )
     return n_applied
+
+
+def _map_boundaries_to_gmsh_surfaces(
+    coords: np.ndarray,
+    node_sets: list[NodeSet],
+    tag_to_idx: dict[int, int],
+) -> tuple[list[int], list[int]]:
+    """Map detected left/right boundary nodes back to gmsh surface entities.
+
+    After geometric boundary detection has identified which mesh nodes are
+    left/right boundaries, this function finds which gmsh 2D surface entities
+    those nodes belong to — needed for setPeriodic in a remesh pass.
+
+    Parameters
+    ----------
+    coords : (N_nodes, 3) node coordinates
+    node_sets : must contain ``left_boundary`` and ``right_boundary``
+    tag_to_idx : gmsh node tag → 0-based local index mapping
+
+    Returns
+    -------
+    (left_surface_tags, right_surface_tags) — gmsh 2D entity tags
+    """
+    import gmsh
+    from scipy.spatial import cKDTree
+
+    left_ns = right_ns = None
+    for ns in node_sets:
+        if ns.name == "left_boundary":
+            left_ns = ns
+        elif ns.name == "right_boundary":
+            right_ns = ns
+    if left_ns is None or right_ns is None:
+        return [], []
+
+    left_set = set(left_ns.node_ids)
+    right_set = set(right_ns.node_ids)
+
+    # Reverse mapping: local index → gmsh tag (only needed for node lookup)
+    idx_to_tag = {v: k for k, v in tag_to_idx.items()}
+
+    # For each gmsh 2D surface entity, check what fraction of its mesh nodes
+    # overlap with the detected left or right boundary nodes.
+    surfaces = gmsh.model.getEntities(dim=2)
+    left_tags: list[int] = []
+    right_tags: list[int] = []
+
+    for dim, tag in surfaces:
+        n_tags, _, _ = gmsh.model.mesh.getNodes(dim, tag, includeBoundary=True)
+        if len(n_tags) == 0:
+            continue
+        # Convert gmsh node tags to local indices
+        local_ids = set()
+        for nt in n_tags:
+            idx = tag_to_idx.get(int(nt))
+            if idx is not None:
+                local_ids.add(idx)
+        if not local_ids:
+            continue
+
+        n_on_left = len(local_ids & left_set)
+        n_on_right = len(local_ids & right_set)
+        frac_left = n_on_left / len(local_ids)
+        frac_right = n_on_right / len(local_ids)
+
+        # A surface is a boundary if a majority of its nodes are on that boundary
+        if frac_left > 0.5:
+            left_tags.append(tag)
+        elif frac_right > 0.5:
+            right_tags.append(tag)
+
+    return left_tags, right_tags
 
 
 def _apply_periodic_and_mesh(
@@ -1275,11 +1421,12 @@ def _auto_detect_cyclic_boundaries(
 
 
 def _extract_mesh_arrays(
-) -> tuple[np.ndarray, np.ndarray, list[NodeSet]]:
+) -> tuple[np.ndarray, np.ndarray, list[NodeSet], dict[int, int]]:
     """Extract mesh arrays from active gmsh model.
 
-    Returns (coords, connectivity, node_sets) for post-processing
-    before passing to the C++ Mesh.
+    Returns (coords, connectivity, node_sets, tag_to_idx) for post-processing
+    before passing to the C++ Mesh.  tag_to_idx maps gmsh node tags to
+    0-based local indices.
     """
     import gmsh
 
@@ -1385,7 +1532,218 @@ def _extract_mesh_arrays(
         ns.node_ids = sorted(group_nodes)
         node_sets.append(ns)
 
-    return coords.astype(np.float64), tet10_connectivity.astype(np.int32), node_sets
+    return coords.astype(np.float64), tet10_connectivity.astype(np.int32), node_sets, tag_to_idx
+
+
+def _extract_surface_node_ids(connectivity: np.ndarray) -> np.ndarray:
+    """Extract node IDs that lie on the surface (boundary faces) of TET10 mesh.
+
+    A face is on the surface if it belongs to exactly one element.
+
+    Parameters
+    ----------
+    connectivity : (N_elements, 10) TET10 element connectivity (0-based)
+
+    Returns
+    -------
+    Sorted array of unique surface node IDs.
+    """
+    # TET10 face definitions: (corner_indices, all_6_node_indices)
+    # Gmsh convention: corners 0-3, mid-edge 4(0-1) 5(1-2) 6(0-2) 7(0-3) 8(1-3) 9(2-3)
+    _FACES = [
+        ([0, 1, 2], [0, 1, 2, 4, 5, 6]),  # opposite node 3
+        ([0, 1, 3], [0, 1, 3, 4, 8, 7]),  # opposite node 2
+        ([1, 2, 3], [1, 2, 3, 5, 9, 8]),  # opposite node 0
+        ([0, 2, 3], [0, 2, 3, 6, 9, 7]),  # opposite node 1
+    ]
+
+    # Count how many elements share each face (key = sorted corner node tuple)
+    face_count: dict[tuple[int, ...], list[int]] = {}
+    for elem_idx in range(connectivity.shape[0]):
+        elem = connectivity[elem_idx]
+        for corner_idx, all_idx in _FACES:
+            key = tuple(sorted(int(elem[c]) for c in corner_idx))
+            if key not in face_count:
+                face_count[key] = [int(elem[n]) for n in all_idx]
+            else:
+                # Mark as shared (interior) by setting to empty
+                face_count[key] = []
+
+    # Collect unique node IDs from faces appearing exactly once
+    surface_nodes: set[int] = set()
+    for nodes_list in face_count.values():
+        if nodes_list:  # non-empty = surface face
+            surface_nodes.update(nodes_list)
+
+    return np.array(sorted(surface_nodes), dtype=np.int64)
+
+
+def _detect_boundaries_geometric(
+    coords: np.ndarray,
+    connectivity: np.ndarray,
+    node_sets: list[NodeSet],
+    num_sectors: int,
+    rotation_axis: int,
+    tolerance: float | None = None,
+) -> int:
+    """Detect cyclic boundaries by rotating the surface shell and finding contact.
+
+    Extracts surface nodes, rotates them by the sector angle, and finds
+    coincident pairs.  Sets ``left_boundary`` and ``right_boundary`` node
+    sets on *node_sets* in place, and snaps right boundary node coordinates
+    in *coords*.
+
+    Parameters
+    ----------
+    coords : (N_nodes, 3) mutable node coordinates
+    connectivity : (N_elements, 10) TET10 element connectivity
+    node_sets : list of NodeSet — modified in place
+    num_sectors : number of sectors in the full annulus
+    rotation_axis : 0=X, 1=Y, 2=Z
+    tolerance : matching distance threshold (None = auto from mesh)
+
+    Returns
+    -------
+    Number of orphaned surface nodes on boundary faces that have no partner.
+    Zero means perfect matching.
+    """
+    from scipy.spatial import cKDTree
+
+    surface_ids = _extract_surface_node_ids(connectivity)
+    if len(surface_ids) == 0:
+        raise RuntimeError("No surface nodes found — mesh may be empty.")
+
+    # Auto-compute tolerance from average edge length if not provided
+    if tolerance is None:
+        # Sample edge lengths from first ~100 elements
+        n_sample = min(100, connectivity.shape[0])
+        edge_lengths = []
+        for i in range(n_sample):
+            elem = connectivity[i]
+            # Check edges between corner nodes (0-1, 0-2, 0-3, 1-2, 1-3, 2-3)
+            for a, b in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]:
+                d = np.linalg.norm(coords[elem[a]] - coords[elem[b]])
+                edge_lengths.append(d)
+        avg_edge = np.mean(edge_lengths)
+        tolerance = avg_edge * 0.3
+
+    # Rotation setup
+    alpha = 2 * np.pi / num_sectors
+    c, s = np.cos(alpha), np.sin(alpha)
+    _PERP = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+    c1, c2 = _PERP[rotation_axis]
+
+    # Rotate surface nodes by +alpha (simulates the next sector CCW)
+    surface_coords = coords[surface_ids].copy()
+    rotated = surface_coords.copy()
+    rotated[:, c1] = c * surface_coords[:, c1] - s * surface_coords[:, c2]
+    rotated[:, c2] = s * surface_coords[:, c1] + c * surface_coords[:, c2]
+
+    # Build KD-tree on original surface node coordinates
+    tree = cKDTree(surface_coords)
+
+    # For each rotated node, find the nearest original surface node
+    dists, idxs = tree.query(rotated)
+
+    # Matched pairs: rotated node i matches original node idxs[i]
+    # - The original node at position idxs[i] is a RIGHT boundary node
+    #   (it coincides with the rotated position of node i from the next sector)
+    # - Node i (pre-rotation) is a LEFT boundary node
+    #   (its rotated position touches the original sector)
+    matched_left = []
+    matched_right = []
+    used_right: set[int] = set()
+
+    # Cross-patch validation: check radial and axial consistency
+    surface_r = np.sqrt(surface_coords[:, c1] ** 2 + surface_coords[:, c2] ** 2)
+    surface_ax = surface_coords[:, rotation_axis]
+    rotated_r = np.sqrt(rotated[:, c1] ** 2 + rotated[:, c2] ** 2)
+    rotated_ax = rotated[:, rotation_axis]
+    radial_tol = tolerance
+    axial_tol = tolerance
+
+    for i in range(len(surface_ids)):
+        if dists[i] > tolerance:
+            continue
+        j = idxs[i]
+        right_global = int(surface_ids[j])
+        if right_global in used_right:
+            continue
+        # Cross-patch validation
+        dr = abs(rotated_r[i] - surface_r[j])
+        dax = abs(rotated_ax[i] - surface_ax[j])
+        if dr > radial_tol or dax > axial_tol:
+            continue
+        left_global = int(surface_ids[i])
+        used_right.add(right_global)
+        matched_left.append(left_global)
+        matched_right.append(right_global)
+
+    if not matched_left:
+        raise RuntimeError(
+            "Geometric boundary detection failed: no surface node pairs "
+            "found within tolerance after rotating by the sector angle. "
+            "Check that num_sectors is correct and the mesh represents "
+            "a single sector."
+        )
+
+    # Snap right boundary nodes to exact rotated left positions
+    for i in range(len(matched_left)):
+        left_id = matched_left[i]
+        right_id = matched_right[i]
+        lc = coords[left_id]
+        coords[right_id, c1] = c * lc[c1] - s * lc[c2]
+        coords[right_id, c2] = s * lc[c1] + c * lc[c2]
+        coords[right_id, rotation_axis] = lc[rotation_axis]
+
+    # Update or create node sets
+    left_ns = right_ns = None
+    for ns in node_sets:
+        if ns.name == "left_boundary":
+            left_ns = ns
+        elif ns.name == "right_boundary":
+            right_ns = ns
+
+    if left_ns is None:
+        left_ns = NodeSet()
+        left_ns.name = "left_boundary"
+        node_sets.append(left_ns)
+    if right_ns is None:
+        right_ns = NodeSet()
+        right_ns.name = "right_boundary"
+        node_sets.append(right_ns)
+
+    left_ns.node_ids = sorted(matched_left)
+    right_ns.node_ids = sorted(matched_right)
+
+    # Orphan detection: find surface nodes that lie on the boundary faces
+    # (very close to a matched boundary node) but weren't themselves matched.
+    # These would have unconstrained DOFs at the sector boundary.
+    n_orphans = 0
+    matched_set = set(matched_left) | set(matched_right)
+    if matched_left:
+        matched_left_coords = coords[np.array(matched_left)]
+        matched_right_coords = coords[np.array(matched_right)]
+        boundary_tree = cKDTree(
+            np.vstack([matched_left_coords, matched_right_coords])
+        )
+        orphan_tol = tolerance * 3.0  # slightly wider to catch near-misses
+        for sid in surface_ids:
+            if int(sid) in matched_set:
+                continue
+            dist, _ = boundary_tree.query(coords[sid])
+            if dist < orphan_tol:
+                n_orphans += 1
+
+    import logging
+    logger = logging.getLogger("turbomodal.io")
+    logger.info(
+        "Geometric boundary detection: matched %d node pairs, "
+        "%d orphans (tolerance=%.2e, %d surface nodes total).",
+        len(matched_left), n_orphans, tolerance, len(surface_ids),
+    )
+
+    return n_orphans
 
 
 def _snap_boundary_nodes(
