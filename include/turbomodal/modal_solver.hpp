@@ -1,6 +1,7 @@
 #pragma once
 
 #include "turbomodal/common.hpp"
+#include "turbomodal/hermitian_lanczos.hpp"
 
 namespace turbomodal {
 
@@ -53,8 +54,8 @@ public:
         const SpMatd& K, const SpMatd& M,
         const SolverConfig& config = SolverConfig());
 
-    // Solve complex Hermitian generalized eigenvalue problem via doubled-real-system
-    // K and M are complex Hermitian sparse matrices
+    // Solve complex Hermitian generalized eigenvalue problem via Hermitian Lanczos
+    // K and M are complex Hermitian sparse matrices (solved natively, no doubling)
     std::pair<ModalResult, SolverStatus> solve_complex_hermitian(
         const SpMatcd& K, const SpMatcd& M,
         const SolverConfig& config = SolverConfig());
@@ -71,6 +72,12 @@ public:
         const Eigen::MatrixXcd& reduced_modes,
         int full_ndof,
         const std::vector<int>& free_dof_map);
+
+    // Reset cached factorization (call when matrix sparsity pattern changes)
+    void reset_pattern() { m_lanczos.reset_pattern(); }
+
+private:
+    HermitianLanczosEigenSolver m_lanczos;
 };
 
 }  // namespace turbomodal

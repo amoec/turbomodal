@@ -9,8 +9,51 @@
 #include <Eigen/SparseLU>
 #include <atomic>
 #include <thread>
+#include <cmath>
+
+#if defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/sysinfo.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace turbomodal {
+
+// Total physical memory (bytes).  Returns 0 on unsupported platforms.
+static size_t total_system_memory() {
+#if defined(__APPLE__)
+    int64_t mem = 0;
+    size_t len = sizeof(mem);
+    if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0)
+        return static_cast<size_t>(mem);
+    return 0;
+#elif defined(__linux__)
+    struct sysinfo si;
+    if (sysinfo(&si) == 0)
+        return static_cast<size_t>(si.totalram) * si.mem_unit;
+    return 0;
+#elif defined(_WIN32)
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms))
+        return static_cast<size_t>(ms.ullTotalPhys);
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+// Rough estimate of peak memory (bytes) for one shift-invert eigensolver call.
+// LDLT fill on a sparse n×n FE matrix: ~C * n^(4/3).
+// Calibrated so n=40000 → ~1 GB (conservative with LDLT factorization).
+static size_t estimate_per_harmonic_bytes(int n_dofs) {
+    double n = static_cast<double>(n_dofs);
+    return static_cast<size_t>(800.0 * std::pow(n, 4.0 / 3.0));
+}
 
 CyclicSymmetrySolver::CyclicSymmetrySolver(
     const Mesh& mesh, const Material& mat, const FluidConfig& fluid)
@@ -296,10 +339,15 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
     double omega = rpm * 2.0 * PI / 60.0;
 
-    // Step 1: Assemble base sector K, M
-    assembler_.assemble(mesh_, mat_);
-    SpMatd K_sector = assembler_.K();
-    SpMatd M_sector = assembler_.M();
+    // Step 1: Assemble base sector K, M (cached — geometry/material only)
+    if (!base_assembled_) {
+        assembler_.assemble(mesh_, mat_);
+        K_base_ = assembler_.K();
+        M_base_ = assembler_.M();
+        base_assembled_ = true;
+    }
+    SpMatd K_sector = K_base_;
+    SpMatd M_sector = M_base_;
 
     // Step 2: Rotating effects (if rpm > 0)
     SpMatd K_eff = K_sector;
@@ -358,7 +406,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     // Build hub reduced DOF set once (shared across all k)
     std::set<int> hub_red_set(hub_reduced_dofs.begin(), hub_reduced_dofs.end());
 
-    // Convert K and M to complex once (shared read-only across all threads)
+    // Convert K and M to complex once
     int ndof_full = mesh_.num_dof();
     SpMatcd K_complex(ndof_full, ndof_full), M_complex(ndof_full, ndof_full);
     {
@@ -377,6 +425,81 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         M_complex.setFromTriplets(mc.begin(), mc.end());
     }
 
+    // --- Direct K_k assembly precomputation ---
+    // T(k) = S_k * T0 where S_k is diagonal with e^{ikα} on right DOFs.
+    // K_k = K_const + P*K_phase + conj(P)*K_phase^H where P = e^{ikα}.
+    // 6 triple products precomputed once vs 2*N_harmonics per sweep.
+    double alpha = 2.0 * PI / mesh_.num_sectors;
+    std::set<int> right_dof_set(right_dofs_.begin(), right_dofs_.end());
+
+    SpMatcd T0 = build_cyclic_transformation(0);
+    SpMatcd T0_H = T0.adjoint();
+    int n_reduced = static_cast<int>(T0.cols());
+
+    // Partition by right-DOF membership: same-type entries (phase-independent)
+    // and non-right-row/right-col entries (scale by P = e^{ikα}).
+    // K_rn (right-row/non-right-col) is K_nr^T for real symmetric K.
+    auto partition = [&](const SpMatcd& A) {
+        std::vector<TripletC> ts, tnr;
+        for (int col = 0; col < A.outerSize(); ++col) {
+            bool cr = right_dof_set.count(col) > 0;
+            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
+                bool rr = right_dof_set.count(static_cast<int>(it.row())) > 0;
+                if (rr == cr)
+                    ts.emplace_back(it.row(), it.col(), it.value());
+                else if (!rr && cr)
+                    tnr.emplace_back(it.row(), it.col(), it.value());
+            }
+        }
+        int sz = static_cast<int>(A.rows());
+        SpMatcd As(sz, sz), Anr(sz, sz);
+        As.setFromTriplets(ts.begin(), ts.end());
+        Anr.setFromTriplets(tnr.begin(), tnr.end());
+        return std::make_pair(std::move(As), std::move(Anr));
+    };
+
+    auto [K_same, K_nr] = partition(K_complex);
+    auto [M_same, M_nr] = partition(M_complex);
+
+    SpMatcd K_const_proj = (T0_H * K_same * T0).pruned(1e-15);
+    SpMatcd K_phase_proj = (T0_H * K_nr * T0).pruned(1e-15);
+    SpMatcd M_const_proj = (T0_H * M_same * T0).pruned(1e-15);
+    SpMatcd M_phase_proj = (T0_H * M_nr * T0).pruned(1e-15);
+
+    // Pre-eliminate hub DOFs from projected matrices
+    std::vector<int> free_reduced_map;
+    std::vector<int> reduced_to_free_vec(n_reduced, -1);
+    for (int i = 0; i < n_reduced; i++) {
+        if (hub_red_set.count(i) == 0) {
+            reduced_to_free_vec[i] = static_cast<int>(free_reduced_map.size());
+            free_reduced_map.push_back(i);
+        }
+    }
+    int n_free = static_cast<int>(free_reduced_map.size());
+
+    auto extract_free = [&](const SpMatcd& A) -> SpMatcd {
+        std::vector<TripletC> trips;
+        for (int col = 0; col < A.outerSize(); ++col) {
+            int rj = reduced_to_free_vec[col];
+            if (rj < 0) continue;
+            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
+                int ri = reduced_to_free_vec[static_cast<int>(it.row())];
+                if (ri >= 0)
+                    trips.emplace_back(ri, rj, it.value());
+            }
+        }
+        SpMatcd R(n_free, n_free);
+        R.setFromTriplets(trips.begin(), trips.end());
+        return R;
+    };
+
+    SpMatcd Kcf = extract_free(K_const_proj);
+    SpMatcd Kpf = extract_free(K_phase_proj);
+    SpMatcd Mcf = extract_free(M_const_proj);
+    SpMatcd Mpf = extract_free(M_phase_proj);
+    SpMatcd Kpf_H = Kpf.adjoint();
+    SpMatcd Mpf_H = Mpf.adjoint();
+
     // Determine which harmonics to solve
     std::vector<int> harmonics_to_solve;
     if (harmonic_indices.empty()) {
@@ -388,77 +511,28 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     }
     int n_harmonics = static_cast<int>(harmonics_to_solve.size());
 
-    // Lambda to solve a single harmonic index k
-    // K_complex, M_complex are shared read-only across all threads
-    auto solve_harmonic = [&](int k) -> std::optional<ModalResult> {
+    // Per-harmonic solve using precomputed projections
+    auto solve_harmonic = [&](int k, ModalSolver& modal_solver) -> std::optional<ModalResult> {
         try {
-            // Build transformation matrix once for this harmonic
-            SpMatcd T = build_cyclic_transformation(k);
-            SpMatcd T_H = T.adjoint();
-
-            // Project: K_k = T^H * K_complex * T, M_k = T^H * M_complex * T
-            SpMatcd K_k = T_H * K_complex * T;
-            SpMatcd M_k = T_H * M_complex * T;
-
-            // Eliminate hub DOFs from the reduced system
-            int n_reduced = static_cast<int>(K_k.rows());
-
-            std::vector<int> free_reduced_map;
-            for (int i = 0; i < n_reduced; i++) {
-                if (hub_red_set.count(i) == 0) {
-                    free_reduced_map.push_back(i);
-                }
-            }
-
-            int n_free = static_cast<int>(free_reduced_map.size());
             if (n_free <= 1) return std::nullopt;
 
-            // Extract submatrices for free DOFs
-            SpMatcd K_free(n_free, n_free), M_free(n_free, n_free);
-            {
-                std::vector<TripletC> kf, mf;
-                std::vector<int> reduced_to_free(n_reduced, -1);
-                for (int i = 0; i < n_free; i++) {
-                    reduced_to_free[free_reduced_map[i]] = i;
-                }
+            // K_k = K_const + P*K_phase + conj(P)*K_phase^H  (sparse add, no triple products)
+            std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
+            SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
+            SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
 
-                for (int col = 0; col < K_k.outerSize(); ++col) {
-                    for (SpMatcd::InnerIterator it(K_k, col); it; ++it) {
-                        int ri = reduced_to_free[it.row()];
-                        int rj = reduced_to_free[it.col()];
-                        if (ri >= 0 && rj >= 0) {
-                            kf.emplace_back(ri, rj, it.value());
-                        }
-                    }
-                }
-                for (int col = 0; col < M_k.outerSize(); ++col) {
-                    for (SpMatcd::InnerIterator it(M_k, col); it; ++it) {
-                        int ri = reduced_to_free[it.row()];
-                        int rj = reduced_to_free[it.col()];
-                        if (ri >= 0 && rj >= 0) {
-                            mf.emplace_back(ri, rj, it.value());
-                        }
-                    }
-                }
-                K_free.setFromTriplets(kf.begin(), kf.end());
-                M_free.setFromTriplets(mf.begin(), mf.end());
-            }
-
-            // Step 6: Solve the eigenvalue problem
             SolverConfig config;
             config.nev = std::min(num_modes_per_harmonic, n_free - 1);
             if (config.nev <= 0) return std::nullopt;
             config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
             config.shift = 1.0;
 
-            ModalSolver modal_solver;
             ModalResult result;
             SolverStatus status;
 
             bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
 
             if (is_real_case) {
-                // k=0 or k=N/2: matrices are real symmetric
                 SpMatd K_real(n_free, n_free), M_real(n_free, n_free);
                 {
                     std::vector<Triplet> kr, mr;
@@ -477,20 +551,19 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 }
                 std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
             } else {
-                // General k: complex Hermitian matrices
                 std::tie(result, status) = modal_solver.solve_complex_hermitian(
                     K_free, M_free, config);
             }
 
             if (!status.converged && status.num_converged == 0) return std::nullopt;
 
-            // Step 7: Apply added mass correction
+            // Added mass correction
             double freq_ratio = added_mass_factor(k);
             if (freq_ratio < 1.0 && freq_ratio > 0.0) {
                 result.frequencies *= freq_ratio;
             }
 
-            // Step 8: Compute FW/BW whirl direction for rotating case
+            // FW/BW whirl direction for rotating case
             int num_modes = static_cast<int>(result.frequencies.size());
             result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
 
@@ -538,22 +611,25 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
             }
 
-            // Expand mode shapes from free DOFs to full DOF space (reuse T)
+            // Mode shape expansion: T(k) = S_k * T0
             {
-                int n_reduced_T = static_cast<int>(T.cols());
                 int n_result_modes = static_cast<int>(result.mode_shapes.cols());
 
-                // 9a: Expand from n_free to n_reduced (insert zeros at hub DOFs)
+                // Expand from n_free to n_reduced (insert zeros at hub DOFs)
                 Eigen::MatrixXcd modes_reduced = Eigen::MatrixXcd::Zero(
-                    n_reduced_T, n_result_modes);
-                for (int i = 0; i < static_cast<int>(free_reduced_map.size()); i++) {
-                    if (i < result.mode_shapes.rows()) {
-                        modes_reduced.row(free_reduced_map[i]) = result.mode_shapes.row(i);
-                    }
+                    n_reduced, n_result_modes);
+                for (int i = 0; i < n_free && i < result.mode_shapes.rows(); i++) {
+                    modes_reduced.row(free_reduced_map[i]) = result.mode_shapes.row(i);
                 }
 
-                // 9b: Apply T to get full DOF mode shapes: u_full = T * u_reduced
-                result.mode_shapes = T * modes_reduced;
+                // u_full = T0 * u_reduced, then scale right DOF rows by phase
+                Eigen::MatrixXcd modes_full = T0 * modes_reduced;
+                for (int r : right_dofs_) {
+                    if (r < modes_full.rows()) {
+                        modes_full.row(r) *= P;
+                    }
+                }
+                result.mode_shapes = modes_full;
             }
 
             result.harmonic_index = k;
@@ -565,13 +641,28 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         }
     };
 
-    // Dynamic work-stealing pool: exactly max_concurrent worker threads each
-    // pull the next harmonic from a shared atomic counter as they finish.
-    // This keeps all cores busy without the idle gaps of fixed-batch scheduling,
-    // and bounds peak memory to max_concurrent * per-thread cost.
+    // Dynamic work-stealing pool with memory-aware concurrency cap.
+    // Each worker gets a thread-local ModalSolver that persists across harmonics,
+    // allowing symbolic factorization reuse (same sparsity pattern for all k).
     int max_concurrent = (max_threads > 0) ? max_threads
         : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
     max_concurrent = std::min(max_concurrent, n_harmonics);
+
+    // Memory-aware cap
+    size_t per_harmonic = estimate_per_harmonic_bytes(n_free);
+    size_t total_mem = total_system_memory();
+    if (total_mem > 0 && per_harmonic > 0) {
+        size_t budget = static_cast<size_t>(total_mem * 0.7);
+        int mem_limit = std::max(1, static_cast<int>(budget / per_harmonic));
+        if (mem_limit < max_concurrent) {
+            std::cerr << "[CyclicSolver] Memory cap: " << mem_limit
+                      << " concurrent harmonics (est. "
+                      << (per_harmonic / (1024*1024)) << " MB each, "
+                      << (total_mem / (1024*1024)) << " MB total RAM)"
+                      << std::endl;
+            max_concurrent = mem_limit;
+        }
+    }
 
     std::atomic<int> next_idx{0};
     std::vector<std::optional<ModalResult>> results_vec(n_harmonics);
@@ -580,10 +671,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     workers.reserve(max_concurrent);
     for (int w = 0; w < max_concurrent; w++) {
         workers.emplace_back([&]() {
+            ModalSolver thread_solver;  // persists across harmonics for this thread
             while (true) {
                 int idx = next_idx.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= n_harmonics) break;
-                results_vec[idx] = solve_harmonic(harmonics_to_solve[idx]);
+                results_vec[idx] = solve_harmonic(harmonics_to_solve[idx], thread_solver);
             }
         });
     }

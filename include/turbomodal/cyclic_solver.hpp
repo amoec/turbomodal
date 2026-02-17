@@ -66,6 +66,11 @@ private:
     std::vector<int> left_dofs_;
     std::vector<int> right_dofs_;
 
+    // Cached base K,M (geometry + material only, no RPM dependence)
+    SpMatd K_base_;
+    SpMatd M_base_;
+    bool base_assembled_ = false;
+
     void classify_dofs();
 
     SpMatcd build_cyclic_transformation(int harmonic_index) const;
