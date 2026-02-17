@@ -670,9 +670,8 @@ def load_cad(
             gmsh.model.setPhysicalName(3, pg, "volume")
 
         # Enforce periodic meshing, generate mesh, and verify boundary
-        # node counts match.  If the first setPeriodic strategy fails,
-        # retry with an alternative before giving up.
-        _apply_periodic_and_mesh(
+        # node counts match.
+        periodic_ok = _apply_periodic_and_mesh(
             left_tags,
             right_tags,
             left_cands,
@@ -682,8 +681,20 @@ def load_cad(
             order,
         )
 
-        # Extract mesh data
-        mesh = _gmsh_to_mesh(num_sectors)
+        # Extract raw mesh arrays from gmsh
+        coords, connectivity, node_sets = _extract_mesh_arrays()
+
+        # If setPeriodic didn't produce matching boundaries, snap right
+        # boundary nodes to match rotated left boundary positions.
+        if not periodic_ok:
+            _snap_boundary_nodes(
+                coords, node_sets, num_sectors, info.rotation_axis,
+                mesh_size,
+            )
+
+        # Build C++ Mesh from corrected arrays
+        mesh = Mesh()
+        mesh.load_from_arrays(coords, connectivity, node_sets, num_sectors)
     finally:
         gmsh.finalize()
 
@@ -768,12 +779,11 @@ def _apply_periodic_and_mesh(
     num_sectors: int,
     rotation_axis: int,
     order: int,
-) -> None:
+) -> bool:
     """Apply periodic constraints, generate mesh, verify boundary match.
 
-    Tries centroid-matched setPeriodic first.  If boundary node counts
-    still differ after meshing, clears the mesh and retries with the
-    all-at-once setPeriodic call.  Raises RuntimeError if both fail.
+    Returns True if boundary nodes matched, False if post-mesh node
+    snapping is needed.
     """
     import gmsh
 
@@ -794,53 +804,21 @@ def _apply_periodic_and_mesh(
     gmsh.model.mesh.setOrder(order)
 
     if not has_boundaries:
-        return
+        return True
 
     n_left, n_right = _count_boundary_nodes()
     if n_left == n_right and n_left > 0:
-        return  # periodic meshing worked
+        return True  # periodic meshing worked
 
-    # --- Retry: clear mesh, try all-at-once setPeriodic ---
     import logging
 
-    logger = logging.getLogger("turbomodal.io")
-    logger.warning(
-        "Periodic meshing produced mismatched boundary nodes "
-        "(left=%d, right=%d). Retrying with all-at-once setPeriodic.",
+    logging.getLogger("turbomodal.io").info(
+        "setPeriodic produced mismatched boundary nodes "
+        "(left=%d, right=%d); will apply node snapping.",
         n_left,
         n_right,
     )
-
-    gmsh.model.mesh.clear()
-
-    # Clear any existing periodicity so we start fresh
-    rot = _rotation_matrix_4x4(rotation_axis, sector_angle)
-    try:
-        gmsh.model.mesh.setPeriodic(2, right_tags, left_tags, rot)
-    except Exception as exc:
-        logger.warning("All-at-once setPeriodic failed: %s", exc)
-        # Try individual pairs one more time (order may matter)
-        for lt, rt in zip(left_tags, right_tags):
-            try:
-                gmsh.model.mesh.setPeriodic(2, [rt], [lt], rot)
-            except Exception:
-                pass
-
-    gmsh.model.mesh.generate(3)
-    gmsh.model.mesh.setOrder(order)
-
-    n_left, n_right = _count_boundary_nodes()
-    if n_left != n_right:
-        raise RuntimeError(
-            f"Cyclic boundary node count mismatch after periodic meshing "
-            f"(left={n_left}, right={n_right}). gmsh could not enforce "
-            f"matching meshes on the boundary surfaces. This can happen with "
-            f"complex blade shapes where the left and right boundary surface "
-            f"topologies differ. Try:\n"
-            f"  - Adjusting mesh_size (coarser meshes are easier to match)\n"
-            f"  - Simplifying the CAD geometry near the sector boundaries\n"
-            f"  - Manually assigning matching boundary surfaces in the CAD tool"
-        )
+    return False
 
 
 def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
@@ -1121,13 +1099,17 @@ def _auto_detect_cyclic_boundaries(
     return left_tags, right_tags, left_candidates, right_candidates
 
 
-def _gmsh_to_mesh(num_sectors: int) -> Mesh:
-    """Extract mesh data from gmsh and build a turbomodal Mesh."""
+def _extract_mesh_arrays(
+) -> tuple[np.ndarray, np.ndarray, list[NodeSet]]:
+    """Extract mesh arrays from active gmsh model.
+
+    Returns (coords, connectivity, node_sets) for post-processing
+    before passing to the C++ Mesh.
+    """
     import gmsh
 
     # Get nodes
     node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-    n_nodes = len(node_tags)
     coords = np.array(node_coords).reshape(-1, 3)
 
     # Build gmsh tag -> 0-based index mapping
@@ -1143,7 +1125,6 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
         if etype == 11:  # TET10
             n_elems = len(etags)
             raw = np.array(enodes, dtype=np.int64).reshape(n_elems, 10)
-            # Convert gmsh tags to 0-based indices
             connectivity = np.zeros_like(raw, dtype=np.int32)
             for i in range(n_elems):
                 for j in range(10):
@@ -1156,7 +1137,6 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
             break
 
     if tet10_connectivity is None:
-        # Collect diagnostics to help the user
         volumes = gmsh.model.getEntities(dim=3)
         found_types = {}
         for d in range(4):
@@ -1212,15 +1192,14 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
         raise RuntimeError(msg)
 
     # Extract physical group node sets
-    node_sets = []
+    node_sets: list[NodeSet] = []
     phys_groups = gmsh.model.getPhysicalGroups()
     for dim, tag in phys_groups:
         name = gmsh.model.getPhysicalName(dim, tag)
         if not name:
             continue
-        # Get entities in this physical group
         entities = gmsh.model.getEntitiesForPhysicalGroup(dim, tag)
-        group_nodes = set()
+        group_nodes: set[int] = set()
         for ent in entities:
             n_tags, _, _ = gmsh.model.mesh.getNodes(dim, ent, includeBoundary=True)
             for nt in n_tags:
@@ -1231,15 +1210,98 @@ def _gmsh_to_mesh(num_sectors: int) -> Mesh:
         ns.node_ids = sorted(group_nodes)
         node_sets.append(ns)
 
-    # Build Mesh
-    mesh = Mesh()
-    mesh.load_from_arrays(
-        coords.astype(np.float64),
-        tet10_connectivity.astype(np.int32),
-        node_sets,
-        num_sectors,
-    )
-    return mesh
+    return coords.astype(np.float64), tet10_connectivity.astype(np.int32), node_sets
+
+
+def _snap_boundary_nodes(
+    coords: np.ndarray,
+    node_sets: list[NodeSet],
+    num_sectors: int,
+    rotation_axis: int,
+    mesh_size: float,
+) -> None:
+    """Snap right boundary nodes to match rotated left boundary positions.
+
+    Modifies *coords* and the ``left_boundary`` / ``right_boundary``
+    NodeSets **in place** so that every left boundary node has an exact
+    partner on the right boundary at the rotated position.
+
+    This is the fallback when gmsh's ``setPeriodic`` fails to produce
+    matching meshes on both sector boundaries.
+    """
+    from scipy.spatial import cKDTree
+
+    # Find the left/right node sets
+    left_ns = right_ns = None
+    for ns in node_sets:
+        if ns.name == "left_boundary":
+            left_ns = ns
+        elif ns.name == "right_boundary":
+            right_ns = ns
+    if left_ns is None or right_ns is None:
+        return
+
+    left_ids = np.array(left_ns.node_ids, dtype=int)
+    right_ids = np.array(right_ns.node_ids, dtype=int)
+    if len(left_ids) == 0 or len(right_ids) == 0:
+        return
+
+    # Build 3D rotation matrix for sector_angle around rotation_axis
+    alpha = 2 * np.pi / num_sectors
+    c, s = np.cos(alpha), np.sin(alpha)
+    _PERP = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+    c1, c2 = _PERP[rotation_axis]
+
+    # Rotate left boundary nodes by +sector_angle → target right positions
+    left_coords = coords[left_ids].copy()
+    target = left_coords.copy()
+    target[:, c1] = c * left_coords[:, c1] - s * left_coords[:, c2]
+    target[:, c2] = s * left_coords[:, c1] + c * left_coords[:, c2]
+
+    # KD-tree on right boundary nodes
+    right_coords = coords[right_ids]
+    tree = cKDTree(right_coords)
+
+    tol = mesh_size * 0.5
+    dists, idxs = tree.query(target)
+
+    # Build matched pairs: left_id → right_id (with snapping)
+    matched_left = []
+    matched_right = []
+    used_right: set[int] = set()
+    for i in range(len(left_ids)):
+        if dists[i] > tol:
+            continue  # gap region or no nearby match
+        right_local_idx = idxs[i]
+        right_global_idx = right_ids[right_local_idx]
+        if right_global_idx in used_right:
+            continue  # already matched to another left node
+        used_right.add(right_global_idx)
+        # Snap the right node to the exact target position
+        coords[right_global_idx] = target[i]
+        matched_left.append(int(left_ids[i]))
+        matched_right.append(int(right_global_idx))
+
+    if not matched_left:
+        raise RuntimeError(
+            "Node snapping failed: no left boundary node could be matched "
+            "to a right boundary node within tolerance. The mesh may not "
+            "have periodic boundaries."
+        )
+
+    import logging
+    logger = logging.getLogger("turbomodal.io")
+    n_orig = max(len(left_ids), len(right_ids))
+    n_dropped = len(left_ids) + len(right_ids) - 2 * len(matched_left)
+    if n_dropped > 0:
+        logger.info(
+            "Boundary node snapping: matched %d pairs, dropped %d nodes.",
+            len(matched_left), n_dropped,
+        )
+
+    # Update node sets in place
+    left_ns.node_ids = sorted(matched_left)
+    right_ns.node_ids = sorted(matched_right)
 
 
 def _meshio_to_gmsh_tet10(connectivity: np.ndarray) -> np.ndarray:
