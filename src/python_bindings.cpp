@@ -96,12 +96,14 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("right_boundary", &Mesh::right_boundary)
         .def_readwrite("matched_pairs", &Mesh::matched_pairs)
         .def_readwrite("num_sectors", &Mesh::num_sectors)
+        .def_readwrite("rotation_axis", &Mesh::rotation_axis)
         .def("load_from_gmsh", &Mesh::load_from_gmsh, py::arg("filename"),
              "Load mesh from Gmsh MSH 2.x file",
              py::call_guard<py::gil_scoped_release>())
         .def("load_from_arrays", &Mesh::load_from_arrays,
              py::arg("node_coords"), py::arg("element_connectivity"),
              py::arg("node_sets"), py::arg("num_sectors"),
+             py::arg("rotation_axis") = 2,
              "Load mesh from arrays (auto-identifies cyclic boundaries)")
         .def("identify_cyclic_boundaries", &Mesh::identify_cyclic_boundaries,
              py::arg("tolerance") = 1e-6)

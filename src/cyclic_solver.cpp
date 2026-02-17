@@ -81,9 +81,23 @@ SpMatcd CyclicSymmetrySolver::build_cyclic_transformation(int harmonic_index) co
     // In cyclic symmetry with Cartesian DOFs, the displacement at the right
     // boundary (at angle alpha from left) relates to the left boundary as:
     //   u_right = e^{ik*alpha} * R(alpha) * u_left
-    // where R(alpha) rotates the (x,y) displacement components by the sector angle.
+    // where R(alpha) rotates the two in-plane displacement components by the
+    // sector angle.  The axial component (along the rotation axis) is unchanged.
     double cos_a = std::cos(alpha);
     double sin_a = std::sin(alpha);
+
+    // Determine DOF indices for the rotation plane and the axial direction.
+    // rotation_axis=0 (X): rotate DOFs 1,2 (Y,Z); axial DOF 0 (X)
+    // rotation_axis=1 (Y): rotate DOFs 0,2 (X,Z); axial DOF 1 (Y)
+    // rotation_axis=2 (Z): rotate DOFs 0,1 (X,Y); axial DOF 2 (Z)
+    int dof_c1, dof_c2, dof_ax;
+    if (mesh_.rotation_axis == 0) {
+        dof_c1 = 1; dof_c2 = 2; dof_ax = 0;
+    } else if (mesh_.rotation_axis == 1) {
+        dof_c1 = 0; dof_c2 = 2; dof_ax = 1;
+    } else {
+        dof_c1 = 0; dof_c2 = 1; dof_ax = 2;
+    }
 
     // Process right boundary nodes (all 3 DOFs per node together)
     std::set<int> right_nodes_processed;
@@ -99,23 +113,21 @@ SpMatcd CyclicSymmetrySolver::build_cyclic_transformation(int harmonic_index) co
         }
         int left_node = it->second;
 
-        int right_x = 3 * right_node;
-        int right_y = 3 * right_node + 1;
-        int right_z = 3 * right_node + 2;
-        int left_x_red = full_to_reduced.at(3 * left_node);
-        int left_y_red = full_to_reduced.at(3 * left_node + 1);
-        int left_z_red = full_to_reduced.at(3 * left_node + 2);
+        int right_base = 3 * right_node;
+        int left_base_red_c1 = full_to_reduced.at(3 * left_node + dof_c1);
+        int left_base_red_c2 = full_to_reduced.at(3 * left_node + dof_c2);
+        int left_base_red_ax = full_to_reduced.at(3 * left_node + dof_ax);
 
-        // u_x_right = phase * (cos_a * u_x_left - sin_a * u_y_left)
-        trips.emplace_back(right_x, left_x_red, phase * cos_a);
-        trips.emplace_back(right_x, left_y_red, phase * (-sin_a));
+        // u_c1_right = phase * (cos_a * u_c1_left - sin_a * u_c2_left)
+        trips.emplace_back(right_base + dof_c1, left_base_red_c1, phase * cos_a);
+        trips.emplace_back(right_base + dof_c1, left_base_red_c2, phase * (-sin_a));
 
-        // u_y_right = phase * (sin_a * u_x_left + cos_a * u_y_left)
-        trips.emplace_back(right_y, left_x_red, phase * sin_a);
-        trips.emplace_back(right_y, left_y_red, phase * cos_a);
+        // u_c2_right = phase * (sin_a * u_c1_left + cos_a * u_c2_left)
+        trips.emplace_back(right_base + dof_c2, left_base_red_c1, phase * sin_a);
+        trips.emplace_back(right_base + dof_c2, left_base_red_c2, phase * cos_a);
 
-        // u_z_right = phase * u_z_left (no rotation for axial component)
-        trips.emplace_back(right_z, left_z_red, phase);
+        // u_axial_right = phase * u_axial_left (no rotation for axial component)
+        trips.emplace_back(right_base + dof_ax, left_base_red_ax, phase);
     }
 
     SpMatcd T(full_ndof, reduced_ndof);

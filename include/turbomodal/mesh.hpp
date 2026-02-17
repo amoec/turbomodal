@@ -22,12 +22,14 @@ public:
     std::vector<std::pair<int, int>> matched_pairs;  // (left, right) node pairs
 
     int num_sectors = 0;
+    int rotation_axis = 2;  // 0=X, 1=Y, 2=Z
 
     void load_from_gmsh(const std::string& filename);
     void load_from_arrays(const Eigen::MatrixXd& node_coords,
                           const Eigen::MatrixXi& element_connectivity,
                           const std::vector<NodeSet>& node_sets_in,
-                          int num_sectors_in);
+                          int num_sectors_in,
+                          int rotation_axis_in = 2);
     void identify_cyclic_boundaries(double tolerance = 1e-6);
     void match_boundary_nodes();
 

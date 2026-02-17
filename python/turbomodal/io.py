@@ -687,9 +687,12 @@ def load_cad(
         # Extract raw mesh arrays from gmsh
         coords, connectivity, node_sets = _extract_mesh_arrays()
 
-        # If setPeriodic didn't produce matching boundaries, snap right
-        # boundary nodes to match rotated left boundary positions.
-        if not periodic_ok:
+        # Always snap boundary nodes when boundaries exist.  Even when
+        # setPeriodic reports matching counts, mesh optimization passes
+        # can perturb boundary node positions enough to break the strict
+        # C++ matching tolerance.
+        has_boundaries = bool(left_tags and right_tags)
+        if has_boundaries:
             _snap_boundary_nodes(
                 coords, node_sets, num_sectors, info.rotation_axis,
                 mesh_size,
@@ -697,7 +700,9 @@ def load_cad(
 
         # Build C++ Mesh from corrected arrays
         mesh = Mesh()
-        mesh.load_from_arrays(coords, connectivity, node_sets, num_sectors)
+        mesh.load_from_arrays(
+            coords, connectivity, node_sets, num_sectors, info.rotation_axis
+        )
     finally:
         gmsh.finalize()
 

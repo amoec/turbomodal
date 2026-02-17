@@ -204,17 +204,22 @@ void Mesh::load_from_gmsh(const std::string& filename) {
 void Mesh::load_from_arrays(const Eigen::MatrixXd& node_coords,
                             const Eigen::MatrixXi& element_connectivity,
                             const std::vector<NodeSet>& node_sets_in,
-                            int num_sectors_in) {
+                            int num_sectors_in,
+                            int rotation_axis_in) {
     if (node_coords.cols() != 3) {
         throw std::runtime_error("node_coords must have 3 columns (x, y, z)");
     }
     if (element_connectivity.cols() != 10) {
         throw std::runtime_error("element_connectivity must have 10 columns (TET10)");
     }
+    if (rotation_axis_in < 0 || rotation_axis_in > 2) {
+        throw std::runtime_error("rotation_axis must be 0 (X), 1 (Y), or 2 (Z)");
+    }
     nodes = node_coords;
     elements = element_connectivity;
     node_sets = node_sets_in;
     num_sectors = num_sectors_in;
+    rotation_axis = rotation_axis_in;
     identify_cyclic_boundaries();
     match_boundary_nodes();
 }
@@ -258,15 +263,27 @@ void Mesh::match_boundary_nodes() {
     double cos_a = std::cos(-alpha);  // Rotate right boundary back by -alpha
     double sin_a = std::sin(-alpha);
 
+    // Determine which coordinate axes form the rotation plane.
+    // rotation_axis=0 (X) → rotate in YZ, rotation_axis=1 (Y) → XZ,
+    // rotation_axis=2 (Z) → XY.
+    int c1, c2, c_axial;
+    if (rotation_axis == 0) {
+        c1 = 1; c2 = 2; c_axial = 0;
+    } else if (rotation_axis == 1) {
+        c1 = 0; c2 = 2; c_axial = 1;
+    } else {
+        c1 = 0; c2 = 1; c_axial = 2;
+    }
+
     matched_pairs.clear();
     matched_pairs.reserve(left_boundary.size());
 
     std::vector<bool> used(right_boundary.size(), false);
 
     for (int left_id : left_boundary) {
-        double lx = nodes(left_id, 0);
-        double ly = nodes(left_id, 1);
-        double lz = nodes(left_id, 2);
+        double l1 = nodes(left_id, c1);
+        double l2 = nodes(left_id, c2);
+        double l_ax = nodes(left_id, c_axial);
 
         double best_dist = std::numeric_limits<double>::max();
         int best_idx = -1;
@@ -274,18 +291,18 @@ void Mesh::match_boundary_nodes() {
         for (int j = 0; j < static_cast<int>(right_boundary.size()); j++) {
             if (used[j]) continue;
             int right_id = right_boundary[j];
-            double rx = nodes(right_id, 0);
-            double ry = nodes(right_id, 1);
-            double rz = nodes(right_id, 2);
+            double r1 = nodes(right_id, c1);
+            double r2 = nodes(right_id, c2);
+            double r_ax = nodes(right_id, c_axial);
 
-            // Rotate right node back by -alpha to compare with left
-            double rx_rot = cos_a * rx - sin_a * ry;
-            double ry_rot = sin_a * rx + cos_a * ry;
+            // Rotate right node back by -alpha in the rotation plane
+            double r1_rot = cos_a * r1 - sin_a * r2;
+            double r2_rot = sin_a * r1 + cos_a * r2;
 
-            double ddx = lx - rx_rot;
-            double ddy = ly - ry_rot;
-            double ddz = lz - rz;
-            double dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            double d1 = l1 - r1_rot;
+            double d2 = l2 - r2_rot;
+            double d_ax = l_ax - r_ax;
+            double dist = std::sqrt(d1 * d1 + d2 * d2 + d_ax * d_ax);
 
             if (dist < best_dist) {
                 best_dist = dist;
@@ -301,8 +318,8 @@ void Mesh::match_boundary_nodes() {
         }
 
         // Tolerance: relative to radial distance of the left-side node
-        double r_ref = std::sqrt(lx * lx + ly * ly);
-        double tol = std::max(1e-10, 1e-6 * r_ref);
+        double r_ref = std::sqrt(l1 * l1 + l2 * l2);
+        double tol = std::max(1e-6, 1e-4 * r_ref);
 
         if (best_dist > tol) {
             throw std::runtime_error(
