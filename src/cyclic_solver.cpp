@@ -599,9 +599,29 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     max_res = std::max(max_res, res);
                 }
                 if (max_res > 1e-4) {
+                    // Check M Hermiticity
+                    SpMatcd M_diff = M_free - SpMatcd(M_free.adjoint());
+                    double herm_err = 0.0;
+                    for (int col = 0; col < M_diff.outerSize(); ++col)
+                        for (SpMatcd::InnerIterator it(M_diff, col); it; ++it)
+                            herm_err = std::max(herm_err, std::abs(it.value()));
+
+                    // Check BEM added mass contribution
+                    double bem_norm = 0.0;
+                    if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()))
+                        bem_norm = M_added_free_cache_[k].norm();
+                    SpMatcd M_struct = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+                    double M_struct_norm = M_struct.norm();
+
                     std::cerr << "  [residual] k=" << k
-                              << " max_residual=" << std::scientific << max_res
-                              << std::defaultfloat << std::endl;
+                              << " max_res=" << std::scientific << max_res
+                              << " M_herm_err=" << herm_err
+                              << " M_struct=" << M_struct_norm
+                              << " BEM=" << bem_norm
+                              << " ratio=" << std::defaultfloat
+                              << (M_struct_norm > 0 ? bem_norm / M_struct_norm : 0.0)
+                              << " n=" << n_free
+                              << std::endl;
                 }
             }
 
