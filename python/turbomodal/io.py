@@ -691,20 +691,25 @@ def load_cad(
 
         # Extract mesh and run authoritative geometric boundary detection.
         coords, connectivity, node_sets, tag_to_idx = _extract_mesh_arrays()
-        n_orphans = _detect_boundaries_geometric(
+        n_free = _detect_boundaries_geometric(
             coords, connectivity, node_sets,
             num_sectors, info.rotation_axis,
         )
 
-        # --- Pass 2: Remesh with corrected setPeriodic if needed ---
-        # If orphaned boundary nodes exist, the first setPeriodic used
-        # wrong or incomplete surface pairs.  Map the geometrically-
-        # detected boundaries back to gmsh surface entities and remesh.
-        if n_orphans > 0:
+        # Check if boundary detection found any matched pairs at all.
+        # Zero matched pairs indicates a fundamental problem (wrong
+        # setPeriodic surface pairs); free boundary nodes are expected
+        # for complex blade geometries and do NOT trigger remeshing.
+        left_ns = next(
+            (ns for ns in node_sets if ns.name == "left_boundary"), None,
+        )
+        n_matched = len(left_ns.node_ids) if left_ns else 0
+
+        if n_matched == 0:
             import logging
             logging.getLogger("turbomodal.io").info(
-                "Pass 1 had %d orphaned boundary nodes; remeshing with "
-                "geometrically-detected surface pairs.", n_orphans,
+                "Pass 1 found zero matched boundary pairs; remeshing with "
+                "geometrically-detected surface pairs.",
             )
 
             detected_left, detected_right = _map_boundaries_to_gmsh_surfaces(
@@ -763,19 +768,10 @@ def load_cad(
                 coords, connectivity, node_sets, tag_to_idx = (
                     _extract_mesh_arrays()
                 )
-                n_orphans_2 = _detect_boundaries_geometric(
+                _detect_boundaries_geometric(
                     coords, connectivity, node_sets,
                     num_sectors, info.rotation_axis,
                 )
-                if n_orphans_2 > 0:
-                    import warnings
-                    warnings.warn(
-                        f"After remeshing with corrected boundary surfaces, "
-                        f"{n_orphans_2} orphaned boundary nodes remain. "
-                        f"The mesh may have incompatible topology on the "
-                        f"sector faces.",
-                        stacklevel=2,
-                    )
 
         # Build C++ Mesh from corrected arrays
         mesh = Mesh()
@@ -1716,10 +1712,10 @@ def _detect_boundaries_geometric(
     left_ns.node_ids = sorted(matched_left)
     right_ns.node_ids = sorted(matched_right)
 
-    # Orphan detection: find surface nodes that lie on the boundary faces
-    # (very close to a matched boundary node) but weren't themselves matched.
-    # These would have unconstrained DOFs at the sector boundary.
-    n_orphans = 0
+    # Classify unmatched sector-face nodes as free boundary.
+    # These are nodes near the matched boundary but without a rotational
+    # partner — e.g. inset blade edges that don't connect to adjacent sectors.
+    free_nodes = []
     matched_set = set(matched_left) | set(matched_right)
     if matched_left:
         matched_left_coords = coords[np.array(matched_left)]
@@ -1727,23 +1723,36 @@ def _detect_boundaries_geometric(
         boundary_tree = cKDTree(
             np.vstack([matched_left_coords, matched_right_coords])
         )
-        orphan_tol = tolerance * 3.0  # slightly wider to catch near-misses
+        proximity_tol = tolerance * 3.0  # slightly wider to catch near-misses
         for sid in surface_ids:
             if int(sid) in matched_set:
                 continue
             dist, _ = boundary_tree.query(coords[sid])
-            if dist < orphan_tol:
-                n_orphans += 1
+            if dist < proximity_tol:
+                free_nodes.append(int(sid))
+
+    # Create or update free_boundary node set
+    free_ns = None
+    for ns in node_sets:
+        if ns.name == "free_boundary":
+            free_ns = ns
+            break
+    if free_ns is None and free_nodes:
+        free_ns = NodeSet()
+        free_ns.name = "free_boundary"
+        node_sets.append(free_ns)
+    if free_ns is not None:
+        free_ns.node_ids = sorted(free_nodes)
 
     import logging
     logger = logging.getLogger("turbomodal.io")
     logger.info(
         "Geometric boundary detection: matched %d node pairs, "
-        "%d orphans (tolerance=%.2e, %d surface nodes total).",
-        len(matched_left), n_orphans, tolerance, len(surface_ids),
+        "%d free boundary nodes (tolerance=%.2e, %d surface nodes total).",
+        len(matched_left), len(free_nodes), tolerance, len(surface_ids),
     )
 
-    return n_orphans
+    return len(free_nodes)
 
 
 def _snap_boundary_nodes(

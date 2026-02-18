@@ -317,14 +317,21 @@ def plot_mesh(
         n_nodes = mesh.num_nodes()
         left_set = set(mesh.left_boundary)
         right_set = set(mesh.right_boundary)
+        free_set = (
+            set(mesh.free_boundary)
+            if hasattr(mesh, "free_boundary")
+            else set()
+        )
         hub_ns = next(
             (ns for ns in mesh.node_sets if ns.name == "hub_constraint"), None
         )
         hub_set = set(hub_ns.node_ids) if hub_ns else set()
 
-        interior_ids, left_ids, right_ids, hub_ids = [], [], [], []
+        interior_ids, left_ids, right_ids, hub_ids, free_ids = [], [], [], [], []
         for i in range(n_nodes):
-            if i in left_set:
+            if i in free_set:
+                free_ids.append(i)
+            elif i in left_set:
                 left_ids.append(i)
             elif i in right_set:
                 right_ids.append(i)
@@ -338,6 +345,7 @@ def plot_mesh(
             (left_ids, "#2166ac", 10, "Left boundary"),
             (right_ids, "#d62728", 10, "Right boundary"),
             (hub_ids, "#2ca02c", 10, "Hub"),
+            (free_ids, "#ff7f0e", 10, "Free boundary"),
         ]
         for ids, color, size, label in class_groups:
             if ids:
