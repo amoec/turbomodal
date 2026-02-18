@@ -568,6 +568,7 @@ def load_cad(
     units: str | None = None,
     optimize: bool = True,
     geometry_tolerance: float = 1e-6,
+    hub_radius_fraction: float = 0.15,
     verbosity: int = 0,
 ) -> Mesh:
     """Load a CAD file and generate a TET10 mesh for cyclic symmetry analysis.
@@ -588,6 +589,10 @@ def load_cad(
     geometry_tolerance : OCC geometry tolerance in metres for matching sector
         boundary points during periodic meshing. Increase if you see Gmsh
         ``setPeriodic`` errors about unmatched points. Default 1e-6 (1 micron).
+    hub_radius_fraction : fraction of ``(r_max - r_min)`` above ``r_min``
+        used for post-mesh hub detection.  Increase for geometries with wide
+        bore regions; set to 0 to disable geometric hub detection.  Default
+        0.15.
     verbosity : gmsh verbosity level (0=silent, 1=errors, 5=debug)
 
     Returns
@@ -712,6 +717,7 @@ def load_cad(
         n_free = _detect_boundaries_geometric(
             coords, connectivity, node_sets,
             num_sectors, info.rotation_axis,
+            hub_radius_fraction=hub_radius_fraction,
         )
 
         # Check if boundary detection found any matched pairs at all.
@@ -789,6 +795,7 @@ def load_cad(
                 _detect_boundaries_geometric(
                     coords, connectivity, node_sets,
                     num_sectors, info.rotation_axis,
+                    hub_radius_fraction=hub_radius_fraction,
                 )
 
         # Build C++ Mesh from corrected arrays
@@ -1549,8 +1556,10 @@ def _extract_mesh_arrays(
     return coords.astype(np.float64), tet10_connectivity.astype(np.int32), node_sets, tag_to_idx
 
 
-def _extract_surface_node_ids(connectivity: np.ndarray) -> np.ndarray:
-    """Extract node IDs that lie on the surface (boundary faces) of TET10 mesh.
+def _extract_surface_faces(
+    connectivity: np.ndarray,
+) -> tuple[list[list[int]], np.ndarray]:
+    """Extract surface faces and node IDs from a TET10 mesh.
 
     A face is on the surface if it belongs to exactly one element.
 
@@ -1560,7 +1569,9 @@ def _extract_surface_node_ids(connectivity: np.ndarray) -> np.ndarray:
 
     Returns
     -------
-    Sorted array of unique surface node IDs.
+    faces : list of 6-element lists ``[c0, c1, c2, m01, m12, m02]`` for
+        each surface face (3 corner nodes followed by 3 mid-side nodes).
+    surface_node_ids : sorted array of unique surface node IDs.
     """
     # TET10 face definitions: (corner_indices, all_6_node_indices)
     # Gmsh convention: corners 0-3, mid-edge 4(0-1) 5(1-2) 6(0-2) 7(0-3) 8(1-3) 9(2-3)
@@ -1583,13 +1594,108 @@ def _extract_surface_node_ids(connectivity: np.ndarray) -> np.ndarray:
                 # Mark as shared (interior) by setting to empty
                 face_count[key] = []
 
-    # Collect unique node IDs from faces appearing exactly once
+    # Collect surface faces and unique node IDs
+    faces: list[list[int]] = []
     surface_nodes: set[int] = set()
     for nodes_list in face_count.values():
         if nodes_list:  # non-empty = surface face
+            faces.append(nodes_list)
             surface_nodes.update(nodes_list)
 
-    return np.array(sorted(surface_nodes), dtype=np.int64)
+    return faces, np.array(sorted(surface_nodes), dtype=np.int64)
+
+
+def _extract_surface_node_ids(connectivity: np.ndarray) -> np.ndarray:
+    """Extract node IDs that lie on the surface (boundary faces) of TET10 mesh.
+
+    A face is on the surface if it belongs to exactly one element.
+
+    Parameters
+    ----------
+    connectivity : (N_elements, 10) TET10 element connectivity (0-based)
+
+    Returns
+    -------
+    Sorted array of unique surface node IDs.
+    """
+    _, surface_ids = _extract_surface_faces(connectivity)
+    return surface_ids
+
+
+def _detect_hub_nodes_geometric(
+    coords: np.ndarray,
+    faces: list[list[int]],
+    rotation_axis: int,
+    excluded_nodes: set[int],
+    hub_radius_fraction: float = 0.15,
+) -> list[int]:
+    """Detect hub (inner bore) nodes from mesh surface face geometry.
+
+    Identifies surface faces at minimum radius whose normals are not
+    tangential (i.e. not sector boundary faces).  This captures
+    cylindrical bore surfaces (radial normals), flat hub faces (axial
+    normals), and fillets (mixed normals).
+
+    Parameters
+    ----------
+    coords : (N_nodes, 3) node coordinates
+    faces : surface face definitions from :func:`_extract_surface_faces`
+    rotation_axis : 0=X, 1=Y, 2=Z
+    excluded_nodes : node IDs to skip (typically left + right boundary)
+    hub_radius_fraction : fraction of ``(r_max - r_min)`` above ``r_min``
+        that defines the hub radius band.  Default 0.15.
+
+    Returns
+    -------
+    Sorted list of hub node IDs.
+    """
+    _PERP = {0: (1, 2), 1: (0, 2), 2: (0, 1)}
+    c1, c2 = _PERP[rotation_axis]
+
+    if not faces:
+        return []
+
+    # Compute per-face centroid, normal, and centroid radius
+    face_data: list[tuple[list[int], float, np.ndarray]] = []  # (face, radius, normal)
+    for f in faces:
+        p0 = coords[f[0]]
+        p1 = coords[f[1]]
+        p2 = coords[f[2]]
+        centroid = (p0 + p1 + p2) / 3.0
+        normal = np.cross(p1 - p0, p2 - p0)
+        norm_len = np.linalg.norm(normal)
+        if norm_len > 1e-30:
+            normal = normal / norm_len
+        r = np.sqrt(centroid[c1] ** 2 + centroid[c2] ** 2)
+        face_data.append((f, r, normal, centroid))
+
+    radii = np.array([d[1] for d in face_data])
+    r_min = radii.min()
+    r_max = radii.max()
+    if r_max - r_min < 1e-12:
+        return []  # degenerate geometry
+
+    r_hub_max = r_min + hub_radius_fraction * (r_max - r_min)
+
+    hub_nodes: set[int] = set()
+    for f, r, normal, centroid in face_data:
+        if r > r_hub_max:
+            continue
+        # Exclude faces with tangential normals (sector boundary faces at
+        # the bore).  Tangential direction is perpendicular to both the
+        # rotation axis and the radial direction at this angular position.
+        if r > 1e-10:
+            tangential = np.zeros(3)
+            tangential[c1] = -centroid[c2] / r
+            tangential[c2] = centroid[c1] / r
+            if abs(np.dot(normal, tangential)) > 0.5:
+                continue  # sector boundary face at low radius
+        # Accept this face — add all 6 node IDs
+        for nid in f:
+            if nid not in excluded_nodes:
+                hub_nodes.add(nid)
+
+    return sorted(hub_nodes)
 
 
 def _detect_boundaries_geometric(
@@ -1599,13 +1705,17 @@ def _detect_boundaries_geometric(
     num_sectors: int,
     rotation_axis: int,
     tolerance: float | None = None,
+    hub_radius_fraction: float = 0.15,
 ) -> int:
     """Detect cyclic boundaries by rotating the surface shell and finding contact.
 
     Extracts surface nodes, rotates them by the sector angle, and finds
-    coincident pairs.  Sets ``left_boundary`` and ``right_boundary`` node
-    sets on *node_sets* in place, and snaps right boundary node coordinates
-    in *coords*.
+    coincident pairs.  Sets ``left_boundary``, ``right_boundary``,
+    ``hub_constraint``, and ``free_boundary`` node sets on *node_sets*
+    in place, and snaps right boundary node coordinates in *coords*.
+
+    All surface nodes are classified into one of the four categories
+    above.  Only truly volumetric interior nodes remain unclassified.
 
     Parameters
     ----------
@@ -1615,6 +1725,8 @@ def _detect_boundaries_geometric(
     num_sectors : number of sectors in the full annulus
     rotation_axis : 0=X, 1=Y, 2=Z
     tolerance : matching distance threshold (None = auto from mesh)
+    hub_radius_fraction : fraction of ``(r_max - r_min)`` above ``r_min``
+        used to identify hub (inner bore) surface faces.  Default 0.15.
 
     Returns
     -------
@@ -1623,7 +1735,7 @@ def _detect_boundaries_geometric(
     """
     from scipy.spatial import cKDTree
 
-    surface_ids = _extract_surface_node_ids(connectivity)
+    faces, surface_ids = _extract_surface_faces(connectivity)
     if len(surface_ids) == 0:
         raise RuntimeError("No surface nodes found — mesh may be empty.")
 
@@ -1730,24 +1842,33 @@ def _detect_boundaries_geometric(
     left_ns.node_ids = sorted(matched_left)
     right_ns.node_ids = sorted(matched_right)
 
-    # Classify unmatched sector-face nodes as free boundary.
-    # These are nodes near the matched boundary but without a rotational
-    # partner — e.g. inset blade edges that don't connect to adjacent sectors.
-    free_nodes = []
+    # --- Hub detection (post-mesh, authoritative) ---
     matched_set = set(matched_left) | set(matched_right)
-    if matched_left:
-        matched_left_coords = coords[np.array(matched_left)]
-        matched_right_coords = coords[np.array(matched_right)]
-        boundary_tree = cKDTree(
-            np.vstack([matched_left_coords, matched_right_coords])
-        )
-        proximity_tol = tolerance * 3.0  # slightly wider to catch near-misses
-        for sid in surface_ids:
-            if int(sid) in matched_set:
-                continue
-            dist, _ = boundary_tree.query(coords[sid])
-            if dist < proximity_tol:
-                free_nodes.append(int(sid))
+    hub_node_ids = _detect_hub_nodes_geometric(
+        coords, faces, rotation_axis,
+        excluded_nodes=matched_set,
+        hub_radius_fraction=hub_radius_fraction,
+    )
+
+    # Create or update hub_constraint node set (overrides any pre-mesh detection)
+    hub_ns = None
+    for ns in node_sets:
+        if ns.name == "hub_constraint":
+            hub_ns = ns
+            break
+    if hub_ns is None and hub_node_ids:
+        hub_ns = NodeSet()
+        hub_ns.name = "hub_constraint"
+        node_sets.append(hub_ns)
+    if hub_ns is not None:
+        hub_ns.node_ids = sorted(hub_node_ids)
+
+    # --- Free boundary: ALL remaining surface nodes ---
+    # Every surface node not in left/right/hub is a free (unconstrained)
+    # surface.  This ensures no surface node is ever classified as
+    # "interior" — only truly volumetric nodes are interior.
+    classified = matched_set | set(hub_node_ids)
+    free_nodes = [int(sid) for sid in surface_ids if int(sid) not in classified]
 
     # Create or update free_boundary node set
     free_ns = None
@@ -1766,8 +1887,10 @@ def _detect_boundaries_geometric(
     logger = logging.getLogger("turbomodal.io")
     logger.info(
         "Geometric boundary detection: matched %d node pairs, "
-        "%d free boundary nodes (tolerance=%.2e, %d surface nodes total).",
-        len(matched_left), len(free_nodes), tolerance, len(surface_ids),
+        "%d hub nodes, %d free boundary nodes "
+        "(tolerance=%.2e, %d surface nodes total).",
+        len(matched_left), len(hub_node_ids), len(free_nodes),
+        tolerance, len(surface_ids),
     )
 
     return len(free_nodes)
