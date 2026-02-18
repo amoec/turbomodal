@@ -340,43 +340,76 @@ def plot_mesh(
             else:
                 interior_ids.append(i)
 
+        # Compute a sphere radius from the mesh bounding box so that glyphs
+        # have a consistent physical size across platforms (GPU-based
+        # render_points_as_spheres is unreliable on Windows).
+        bbox = grid.bounds  # (xmin, xmax, ymin, ymax, zmin, zmax)
+        diag = np.sqrt(
+            (bbox[1] - bbox[0]) ** 2
+            + (bbox[3] - bbox[2]) ** 2
+            + (bbox[5] - bbox[4]) ** 2
+        )
+        r_small = diag * 0.003
+        r_large = diag * 0.006
+
         class_groups = [
-            (interior_ids, "#aaaaaa", 4, "Interior"),
-            (left_ids, "#2166ac", 10, "Left boundary"),
-            (right_ids, "#d62728", 10, "Right boundary"),
-            (hub_ids, "#2ca02c", 10, "Hub"),
-            (free_ids, "#ff7f0e", 10, "Free boundary"),
+            (interior_ids, "#aaaaaa", r_small, "Interior"),
+            (left_ids, "#2166ac", r_large, "Left boundary"),
+            (right_ids, "#d62728", r_large, "Right boundary"),
+            (hub_ids, "#2ca02c", r_large, "Hub"),
+            (free_ids, "#ff7f0e", r_large, "Free boundary"),
         ]
-        for ids, color, size, label in class_groups:
+        for ids, color, radius, label in class_groups:
             if ids:
-                plotter.add_points(
-                    nodes[ids], color=color, point_size=size,
-                    render_points_as_spheres=True, label=label,
+                pts = pv.PolyData(nodes[ids])
+                glyphs = pts.glyph(
+                    geom=pv.Sphere(radius=radius), scale=False, orient=False,
                 )
+                plotter.add_mesh(glyphs, color=color, label=label)
 
     if show_boundaries and not show_node_classes:
+        bbox = grid.bounds
+        diag = np.sqrt(
+            (bbox[1] - bbox[0]) ** 2
+            + (bbox[3] - bbox[2]) ** 2
+            + (bbox[5] - bbox[4]) ** 2
+        )
+        r = diag * 0.006
         left = mesh.left_boundary
         right = mesh.right_boundary
         if left:
-            pts_left = nodes[left]
-            plotter.add_points(pts_left, color="blue", point_size=10,
-                               render_points_as_spheres=True, label="Left boundary")
+            pts = pv.PolyData(nodes[left])
+            glyphs = pts.glyph(
+                geom=pv.Sphere(radius=r), scale=False, orient=False,
+            )
+            plotter.add_mesh(glyphs, color="blue", label="Left boundary")
         if right:
-            pts_right = nodes[right]
-            plotter.add_points(pts_right, color="red", point_size=10,
-                               render_points_as_spheres=True, label="Right boundary")
+            pts = pv.PolyData(nodes[right])
+            glyphs = pts.glyph(
+                geom=pv.Sphere(radius=r), scale=False, orient=False,
+            )
+            plotter.add_mesh(glyphs, color="red", label="Right boundary")
 
     if show_node_sets and not show_node_classes:
+        bbox = grid.bounds
+        diag = np.sqrt(
+            (bbox[1] - bbox[0]) ** 2
+            + (bbox[3] - bbox[2]) ** 2
+            + (bbox[5] - bbox[4]) ** 2
+        )
+        r = diag * 0.005
         colors = ["green", "orange", "cyan", "magenta", "yellow"]
         ci = 0
         for ns in mesh.node_sets:
             if ns.name in ("left_boundary", "right_boundary"):
                 continue
             if ns.node_ids:
-                pts = nodes[ns.node_ids]
-                plotter.add_points(pts, color=colors[ci % len(colors)],
-                                   point_size=8, render_points_as_spheres=True,
-                                   label=ns.name)
+                pts = pv.PolyData(nodes[ns.node_ids])
+                glyphs = pts.glyph(
+                    geom=pv.Sphere(radius=r), scale=False, orient=False,
+                )
+                plotter.add_mesh(glyphs, color=colors[ci % len(colors)],
+                                 label=ns.name)
                 ci += 1
 
     axis_label = {0: "X", 1: "Y", 2: "Z"}.get(mesh.rotation_axis, "Z")
