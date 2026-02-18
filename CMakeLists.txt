@@ -111,6 +111,7 @@ add_library(turbomodal_core STATIC
   src/forced_response.cpp
   src/mistuning.cpp
   src/mode_identification.cpp
+  src/potential_flow.cpp
 )
 target_include_directories(turbomodal_core PUBLIC include)
 target_link_libraries(turbomodal_core PUBLIC Eigen3::Eigen spectra)
@@ -195,6 +196,10 @@ if(BUILD_TESTS)
   target_compile_definitions(test_mode_identification PRIVATE
     TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_data")
   add_test(NAME ModeIdentificationTests COMMAND test_mode_identification)
+
+  add_executable(test_potential_flow tests/test_potential_flow.cpp)
+  target_link_libraries(test_potential_flow turbomodal_core GTest::gtest_main)
+  add_test(NAME PotentialFlowTests COMMAND test_potential_flow)
 
   if(BUILD_VALIDATION_TESTS)
     add_executable(test_validation tests/test_validation.cpp)
