@@ -368,3 +368,95 @@ class TestLoadMeshValidation:
         dummy.write_text("dummy")
         with pytest.raises(ValueError, match="Unsupported mesh format"):
             load_mesh(str(dummy), num_sectors=24)
+
+
+class TestSurfaceClassification:
+    """Tests for surface face extraction, hub detection, and complete
+    surface node classification."""
+
+    def test_extract_surface_faces_returns_faces_and_nodes(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.io import _extract_surface_faces
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        connectivity = np.asarray(mesh.elements)
+        faces, surface_ids = _extract_surface_faces(connectivity)
+        assert len(faces) > 0, "No surface faces found"
+        assert len(surface_ids) > 0, "No surface node IDs found"
+        # Each face has 6 nodes (3 corners + 3 midsides)
+        for f in faces:
+            assert len(f) == 6, f"Face has {len(f)} nodes, expected 6"
+        # All face node IDs should be in surface_ids
+        surface_set = set(int(s) for s in surface_ids)
+        for f in faces:
+            for nid in f:
+                assert nid in surface_set, f"Face node {nid} not in surface_ids"
+
+    def test_extract_surface_faces_matches_node_ids(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.io import _extract_surface_faces, _extract_surface_node_ids
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        connectivity = np.asarray(mesh.elements)
+        _, surface_ids_from_faces = _extract_surface_faces(connectivity)
+        surface_ids_direct = _extract_surface_node_ids(connectivity)
+        np.testing.assert_array_equal(surface_ids_from_faces, surface_ids_direct)
+
+    def test_hub_detection_finds_inner_radius(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.io import _extract_surface_faces, _detect_hub_nodes_geometric
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        coords = np.asarray(mesh.nodes)
+        connectivity = np.asarray(mesh.elements)
+        faces, _ = _extract_surface_faces(connectivity)
+        hub_ids = _detect_hub_nodes_geometric(
+            coords, faces, rotation_axis=2, excluded_nodes=set(),
+        )
+        assert len(hub_ids) > 0, "No hub nodes detected"
+        # Hub nodes should be at minimum radius (Z-axis rotation → XY plane)
+        hub_radii = np.sqrt(coords[hub_ids, 0] ** 2 + coords[hub_ids, 1] ** 2)
+        all_radii = np.sqrt(coords[:, 0] ** 2 + coords[:, 1] ** 2)
+        assert hub_radii.max() < np.median(all_radii), (
+            "Hub nodes not at inner radius"
+        )
+
+    def test_no_surface_nodes_classified_as_interior(self, wedge_mesh_path):
+        """After geometric boundary detection, every surface node should be
+        in left/right/hub/free — none should remain unclassified (interior)."""
+        from turbomodal._core import Mesh, NodeSet
+        from turbomodal.io import (
+            _extract_surface_node_ids,
+            _detect_boundaries_geometric,
+        )
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        coords = np.asarray(mesh.nodes).copy()
+        connectivity = np.asarray(mesh.elements)
+
+        node_sets: list[NodeSet] = []
+        _detect_boundaries_geometric(
+            coords, connectivity, node_sets, 24, rotation_axis=2,
+        )
+
+        surface_ids = set(int(s) for s in _extract_surface_node_ids(connectivity))
+
+        classified: set[int] = set()
+        for ns in node_sets:
+            if ns.name in (
+                "left_boundary", "right_boundary", "hub_constraint", "free_boundary",
+            ):
+                classified.update(ns.node_ids)
+
+        unclassified = surface_ids - classified
+        assert len(unclassified) == 0, (
+            f"{len(unclassified)} surface nodes not classified: {sorted(unclassified)[:10]}"
+        )
