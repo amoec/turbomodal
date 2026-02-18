@@ -1,7 +1,6 @@
 #pragma once
 
 #include "turbomodal/common.hpp"
-#include "turbomodal/hermitian_lanczos.hpp"
 
 namespace turbomodal {
 
@@ -32,7 +31,7 @@ struct ModalResult {
 
 struct SolverConfig {
     int nev = 20;            // Number of eigenvalues to compute
-    int ncv = 0;             // Lanczos vectors (0 = auto: max(2*nev+1, 20))
+    int ncv = 0;             // Subspace dimension (0 = auto: max(2*nev+1, 20))
     double shift = 0.0;      // Shift-invert shift sigma
     double tolerance = 1e-8;
     int max_iterations = 1000;
@@ -54,8 +53,8 @@ public:
         const SpMatd& K, const SpMatd& M,
         const SolverConfig& config = SolverConfig());
 
-    // Solve complex Hermitian generalized eigenvalue problem via Hermitian Lanczos
-    // K and M are complex Hermitian sparse matrices (solved natively, no doubling)
+    // Solve complex Hermitian generalized eigenvalue problem via 2n real doubling + Spectra
+    // K and M are complex Hermitian sparse matrices
     std::pair<ModalResult, SolverStatus> solve_complex_hermitian(
         const SpMatcd& K, const SpMatcd& M,
         const SolverConfig& config = SolverConfig());
@@ -73,11 +72,6 @@ public:
         int full_ndof,
         const std::vector<int>& free_dof_map);
 
-    // Reset cached factorization (call when matrix sparsity pattern changes)
-    void reset_pattern() { m_lanczos.reset_pattern(); }
-
-private:
-    HermitianLanczosEigenSolver m_lanczos;
 };
 
 }  // namespace turbomodal
