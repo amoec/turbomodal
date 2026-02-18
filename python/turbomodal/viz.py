@@ -282,6 +282,7 @@ def plot_mesh(
     mesh: Mesh,
     show_boundaries: bool = True,
     show_node_sets: bool = True,
+    show_node_classes: bool = True,
     off_screen: bool = False,
 ):
     """Plot the sector mesh with boundary highlights.
@@ -289,8 +290,10 @@ def plot_mesh(
     Parameters
     ----------
     mesh : Mesh object
-    show_boundaries : highlight left/right cyclic boundary nodes
-    show_node_sets : highlight hub and other node sets
+    show_boundaries : highlight left/right cyclic boundary nodes as spheres
+    show_node_sets : highlight hub and other node sets as spheres
+    show_node_classes : color every surface node by classification
+        (interior=gray, left=blue, right=red, hub=green)
     off_screen : render off-screen (for testing)
 
     Returns
@@ -300,13 +303,55 @@ def plot_mesh(
     import pyvista as pv
 
     grid = _mesh_to_pyvista(mesh)
-    # Extract outer surface so interior tet faces don't occlude boundary points
-    surface = grid.extract_surface(algorithm="dataset_surface")
-    plotter = pv.Plotter(off_screen=off_screen)
-    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
-                     edge_color="gray", line_width=0.5)
-
     nodes = np.asarray(mesh.nodes)
+
+    if show_node_classes:
+        # Build per-node classification: 0=interior, 1=left, 2=right, 3=hub
+        n_nodes = mesh.num_nodes()
+        cls = np.zeros(n_nodes, dtype=np.int32)
+
+        left_set = set(mesh.left_boundary)
+        right_set = set(mesh.right_boundary)
+        hub_ns = next(
+            (ns for ns in mesh.node_sets if ns.name == "hub_constraint"), None
+        )
+        hub_set = set(hub_ns.node_ids) if hub_ns else set()
+
+        for i in range(n_nodes):
+            if i in left_set:
+                cls[i] = 1
+            elif i in right_set:
+                cls[i] = 2
+            elif i in hub_set:
+                cls[i] = 3
+
+        grid.point_data["node_class"] = cls
+        surface = grid.extract_surface(algorithm="dataset_surface")
+
+        from matplotlib.colors import ListedColormap
+        class_cmap = ListedColormap(["#cccccc", "#2166ac", "#d62728", "#2ca02c"])
+        class_labels = {0: "Interior", 1: "Left boundary", 2: "Right boundary", 3: "Hub"}
+
+        plotter = pv.Plotter(off_screen=off_screen)
+        plotter.add_mesh(
+            surface, scalars="node_class", cmap=class_cmap,
+            clim=[0, 3], show_scalar_bar=False, show_edges=True,
+            edge_color="gray", line_width=0.5,
+        )
+
+        # Build legend entries for classes present in the mesh
+        present = set(cls)
+        class_colors = {0: "#cccccc", 1: "#2166ac", 2: "#d62728", 3: "#2ca02c"}
+        legend_entries = [
+            [class_labels[c], class_colors[c]] for c in sorted(present)
+        ]
+        plotter.add_legend(legend_entries, bcolor="white", face="circle")
+    else:
+        # Fallback: plain gray surface
+        surface = grid.extract_surface(algorithm="dataset_surface")
+        plotter = pv.Plotter(off_screen=off_screen)
+        plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
+                         edge_color="gray", line_width=0.5)
 
     if show_boundaries:
         left = mesh.left_boundary
@@ -340,7 +385,8 @@ def plot_mesh(
         f"{sector_angle:.1f} deg, axis={axis_label})",
         font_size=12, position="upper_edge",
     )
-    plotter.add_legend()
+    if not show_node_classes:
+        plotter.add_legend()
     plotter.add_axes()
     return plotter
 
