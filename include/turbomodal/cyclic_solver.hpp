@@ -30,7 +30,8 @@ struct FluidConfig {
 class CyclicSymmetrySolver {
 public:
     CyclicSymmetrySolver(const Mesh& mesh, const Material& mat,
-                         const FluidConfig& fluid = FluidConfig());
+                         const FluidConfig& fluid = FluidConfig(),
+                         bool apply_hub_constraint = true);
 
     std::vector<ModalResult> solve_at_rpm(
         double rpm, int num_modes_per_harmonic,
@@ -67,6 +68,7 @@ private:
     const Mesh& mesh_;
     Material mat_;
     FluidConfig fluid_;
+    bool apply_hub_constraint_;
     GlobalAssembler assembler_;
 
     // DOF classification for cyclic symmetry

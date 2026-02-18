@@ -56,8 +56,10 @@ static size_t estimate_per_harmonic_bytes(int n_dofs) {
 }
 
 CyclicSymmetrySolver::CyclicSymmetrySolver(
-    const Mesh& mesh, const Material& mat, const FluidConfig& fluid)
-    : mesh_(mesh), mat_(mat), fluid_(fluid) {
+    const Mesh& mesh, const Material& mat, const FluidConfig& fluid,
+    bool apply_hub_constraint)
+    : mesh_(mesh), mat_(mat), fluid_(fluid),
+      apply_hub_constraint_(apply_hub_constraint) {
     classify_dofs();
 }
 
@@ -261,7 +263,8 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     for (int dof : interior_dofs_) reduced_to_full.push_back(dof);
     for (int dof : left_dofs_) reduced_to_full.push_back(dof);
 
-    const NodeSet* hub = mesh_.find_node_set("hub_constraint");
+    const NodeSet* hub = apply_hub_constraint_
+        ? mesh_.find_node_set("hub_constraint") : nullptr;
     std::set<int> hub_full_set;
     if (hub) {
         for (int node_id : hub->node_ids) {
@@ -349,29 +352,31 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     SpMatd K_sector = K_base_;
     SpMatd M_sector = M_base_;
 
-    // Step 2: Rotating effects (if rpm > 0)
+    // Step 2: Rotating effects
     SpMatd K_eff = K_sector;
 
     if (omega > 0.0) {
-        // 2a: Static prestress analysis
-        Eigen::VectorXd u_static = static_centrifugal(omega);
-
-        // 2b: Assemble stress stiffening from prestress
-        assembler_.assemble_stress_stiffening(mesh_, mat_, u_static, omega);
-        SpMatd K_sigma = assembler_.K_sigma();
-
-        // 2c: Assemble spin softening and gyroscopic matrices
+        // 2a: Spin softening — pure kinematic effect of rotating frame,
+        //     K_omega = rho * omega^2 * N^T * (I - a*a^T) * N.
+        //     Always applied when omega > 0, regardless of hub constraint.
         assembler_.assemble_rotating_effects(mesh_, mat_, omega);
         SpMatd K_omega = assembler_.K_omega();
+        K_eff = K_sector - K_omega;
 
-        // 2d: Form effective stiffness
-        // K_sigma already contains omega^2 dependence (from prestress proportional to omega^2)
-        // K_omega already contains omega^2 (from spin softening formula)
-        K_eff = K_sector + K_sigma - K_omega;
+        // 2b: Stress stiffening from centrifugal prestress.
+        //     Requires solving static K*u = F_centrifugal, which needs hub
+        //     constraints to make K non-singular.  Skipped for free hub.
+        if (apply_hub_constraint_) {
+            Eigen::VectorXd u_static = static_centrifugal(omega);
+            assembler_.assemble_stress_stiffening(mesh_, mat_, u_static, omega);
+            SpMatd K_sigma = assembler_.K_sigma();
+            K_eff += K_sigma;
+        }
     }
 
     // Step 3: Apply hub boundary conditions
-    const NodeSet* hub = mesh_.find_node_set("hub_constraint");
+    const NodeSet* hub = apply_hub_constraint_
+        ? mesh_.find_node_set("hub_constraint") : nullptr;
     std::vector<int> hub_constrained_dofs;
     if (hub) {
         for (int node_id : hub->node_ids) {
