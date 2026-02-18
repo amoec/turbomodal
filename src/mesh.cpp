@@ -229,6 +229,7 @@ void Mesh::load_from_arrays(const Eigen::MatrixXd& node_coords,
 void Mesh::identify_cyclic_boundaries(double tolerance) {
     left_boundary.clear();
     right_boundary.clear();
+    free_boundary.clear();
 
     const NodeSet* left_ns = find_node_set("left_boundary");
     const NodeSet* right_ns = find_node_set("right_boundary");
@@ -242,15 +243,16 @@ void Mesh::identify_cyclic_boundaries(double tolerance) {
     left_boundary = left_ns->node_ids;
     right_boundary = right_ns->node_ids;
 
-    if (left_boundary.size() != right_boundary.size()) {
-        throw std::runtime_error(
-            "Left and right cyclic boundaries have different node counts (left="
-            + std::to_string(left_boundary.size()) + ", right="
-            + std::to_string(right_boundary.size())
-            + "). This usually means gmsh could not enforce periodic meshing. "
-            "The Python-side node snapping should have equalised the boundaries "
-            "before reaching C++ — this indicates a bug.");
+    // Load free boundary if present (sector-face nodes not connected to
+    // adjacent sectors, e.g. inset blade edges)
+    const NodeSet* free_ns = find_node_set("free_boundary");
+    if (free_ns) {
+        free_boundary = free_ns->node_ids;
     }
+
+    // Note: left/right counts may differ for complex blade geometries.
+    // match_boundary_nodes() will match what it can and move unmatched
+    // nodes to free_boundary.
 }
 
 void Mesh::match_boundary_nodes() {
@@ -278,8 +280,8 @@ void Mesh::match_boundary_nodes() {
     }
 
     matched_pairs.clear();
-    matched_pairs.reserve(left_boundary.size());
-
+    std::vector<int> new_left, new_right;
+    std::vector<int> free_left, free_right;
     std::vector<bool> used(right_boundary.size(), false);
 
     for (int left_id : left_boundary) {
@@ -312,33 +314,38 @@ void Mesh::match_boundary_nodes() {
             }
         }
 
-        if (best_idx < 0) {
-            throw std::runtime_error(
-                "No matching right boundary node found for left node " +
-                std::to_string(left_id) + ". The Python-side node snapping "
-                "should have ensured exact matching — this indicates a bug.");
-        }
-
         // Tolerance: relative to radial distance of the left-side node
         double r_ref = std::sqrt(l1 * l1 + l2 * l2);
         double tol = std::max(1e-6, 1e-4 * r_ref);
 
-        if (best_dist > tol) {
-            throw std::runtime_error(
-                "Left node " + std::to_string(left_id)
-                + " has no matching right boundary node within tolerance "
-                "(closest distance: " + std::to_string(best_dist)
-                + ", tolerance: " + std::to_string(tol) + ").");
+        if (best_idx < 0 || best_dist > tol) {
+            // No match — this is a free boundary node (e.g. inset blade edge)
+            free_left.push_back(left_id);
+            continue;
         }
 
         used[best_idx] = true;
+        new_left.push_back(left_id);
+        new_right.push_back(right_boundary[best_idx]);
         matched_pairs.push_back({left_id, right_boundary[best_idx]});
     }
 
-    // Reorder right_boundary to match left_boundary ordering
-    for (size_t i = 0; i < matched_pairs.size(); i++) {
-        right_boundary[i] = matched_pairs[i].second;
+    // Unmatched right nodes are also free boundary
+    for (int j = 0; j < static_cast<int>(right_boundary.size()); j++) {
+        if (!used[j]) {
+            free_right.push_back(right_boundary[j]);
+        }
     }
+
+    // Update boundaries to contain ONLY matched nodes
+    left_boundary = new_left;
+    right_boundary = new_right;
+
+    // Merge free nodes from both sides with any pre-existing free_boundary
+    std::set<int> free_set(free_boundary.begin(), free_boundary.end());
+    free_set.insert(free_left.begin(), free_left.end());
+    free_set.insert(free_right.begin(), free_right.end());
+    free_boundary.assign(free_set.begin(), free_set.end());
 }
 
 const NodeSet* Mesh::find_node_set(const std::string& name) const {
@@ -457,9 +464,10 @@ std::vector<int> Mesh::get_wetted_nodes() const {
         return ws->node_ids;
     }
 
-    // Auto-detect: wetted = boundary face nodes not on left/right/hub
+    // Auto-detect: wetted = boundary face nodes not on left/right/hub/free
     std::set<int> left_set(left_boundary.begin(), left_boundary.end());
     std::set<int> right_set(right_boundary.begin(), right_boundary.end());
+    std::set<int> free_set(free_boundary.begin(), free_boundary.end());
 
     std::set<int> hub_set;
     const NodeSet* hub = find_node_set("hub_constraint");
@@ -472,13 +480,14 @@ std::vector<int> Mesh::get_wetted_nodes() const {
 
     for (const auto& face : boundary_faces) {
         // Check corner nodes: if all 3 are in the same boundary set, skip
-        bool all_left = true, all_right = true, all_hub = true;
+        bool all_left = true, all_right = true, all_hub = true, all_free = true;
         for (int i = 0; i < 3; i++) {
             if (left_set.count(face.nodes[i]) == 0) all_left = false;
             if (right_set.count(face.nodes[i]) == 0) all_right = false;
             if (hub_set.count(face.nodes[i]) == 0) all_hub = false;
+            if (free_set.count(face.nodes[i]) == 0) all_free = false;
         }
-        if (all_left || all_right || all_hub) continue;
+        if (all_left || all_right || all_hub || all_free) continue;
 
         // This face is on the wetted surface — add all 6 nodes
         for (int i = 0; i < 6; i++) {

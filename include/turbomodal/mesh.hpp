@@ -29,6 +29,7 @@ public:
     std::vector<int> left_boundary;
     std::vector<int> right_boundary;
     std::vector<std::pair<int, int>> matched_pairs;  // (left, right) node pairs
+    std::vector<int> free_boundary;  // Sector-face nodes not connected to adjacent sectors
 
     int num_sectors = 0;
     int rotation_axis = 2;  // 0=X, 1=Y, 2=Z

@@ -95,6 +95,7 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("left_boundary", &Mesh::left_boundary)
         .def_readwrite("right_boundary", &Mesh::right_boundary)
         .def_readwrite("matched_pairs", &Mesh::matched_pairs)
+        .def_readwrite("free_boundary", &Mesh::free_boundary)
         .def_readwrite("num_sectors", &Mesh::num_sectors)
         .def_readwrite("rotation_axis", &Mesh::rotation_axis)
         .def("load_from_gmsh", &Mesh::load_from_gmsh, py::arg("filename"),
