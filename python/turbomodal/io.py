@@ -567,6 +567,7 @@ def load_cad(
     rotation_axis: int | None = None,
     units: str | None = None,
     optimize: bool = True,
+    geometry_tolerance: float = 1e-6,
     verbosity: int = 0,
 ) -> Mesh:
     """Load a CAD file and generate a TET10 mesh for cyclic symmetry analysis.
@@ -584,6 +585,9 @@ def load_cad(
     rotation_axis : override rotation axis (0=X, 1=Y, 2=Z, None=auto-detect)
     units : override unit detection ("mm", "m", "inch", None=auto-detect)
     optimize : run mesh optimization passes to improve element quality
+    geometry_tolerance : OCC geometry tolerance in metres for matching sector
+        boundary points during periodic meshing. Increase if you see Gmsh
+        ``setPeriodic`` errors about unmatched points. Default 1e-6 (1 micron).
     verbosity : gmsh verbosity level (0=silent, 1=errors, 5=debug)
 
     Returns
@@ -604,6 +608,12 @@ def load_cad(
     try:
         gmsh.option.setNumber("General.Verbosity", verbosity)
         gmsh.option.setString("Geometry.OCCTargetUnit", "M")
+        # Increase the geometry tolerance so that setPeriodic can match
+        # sector boundary points that are close but not identical due to
+        # CAD cutting operations.  1 micron is well below machining
+        # precision while covering typical floating-point gaps in STEP
+        # exports (the default ~1e-9 is far too tight).
+        gmsh.option.setNumber("Geometry.Tolerance", geometry_tolerance)
 
         gmsh.model.occ.importShapes(str(filepath))
         gmsh.model.occ.synchronize()
@@ -622,6 +632,7 @@ def load_cad(
             gmsh.model.occ.healShapes(
                 sewFaces=True,
                 makeSolids=True,
+                tolerance=geometry_tolerance,
             )
             gmsh.model.occ.synchronize()
             volumes = gmsh.model.getEntities(dim=3)
@@ -634,6 +645,13 @@ def load_cad(
                     f"CAD tool to create a watertight solid, or use "
                     f"load_mesh() with a pre-meshed volumetric file."
                 )
+        else:
+            # Heal with a generous tolerance to upgrade per-entity OCC
+            # tolerances (from the STEP file) so that setPeriodic can
+            # match sector boundary points that differ by tiny amounts
+            # due to CAD cutting operations.
+            gmsh.model.occ.healShapes(tolerance=geometry_tolerance)
+            gmsh.model.occ.synchronize()
 
         # Inspect geometry for mesh size and rotation axis
         info = _build_cad_info(
