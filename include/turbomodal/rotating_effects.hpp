@@ -17,10 +17,12 @@ public:
         const std::array<Vector6d, 4>& prestress);
 
     static Matrix30d spin_softening(
-        const TET10Element& elem, const Material& mat, double omega);
+        const TET10Element& elem, const Material& mat, double omega,
+        const Eigen::Vector3d& axis);
 
     static Matrix30d gyroscopic(
-        const TET10Element& elem, const Material& mat);
+        const TET10Element& elem, const Material& mat,
+        const Eigen::Vector3d& axis);
 };
 
 }  // namespace turbomodal

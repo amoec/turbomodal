@@ -141,7 +141,7 @@ TEST(Rotating, GyroscopicSkewSymmetric) {
     TET10Element elem = make_offset_element();
     Material mat(200e9, 0.3, 7850);
 
-    Matrix30d G = RotatingEffects::gyroscopic(elem, mat);
+    Matrix30d G = RotatingEffects::gyroscopic(elem, mat, Eigen::Vector3d::UnitZ());
 
     // G + G^T should be zero (skew-symmetric)
     Matrix30d sym = G + G.transpose();
@@ -152,7 +152,7 @@ TEST(Rotating, GyroscopicNonzero) {
     TET10Element elem = make_offset_element();
     Material mat(200e9, 0.3, 7850);
 
-    Matrix30d G = RotatingEffects::gyroscopic(elem, mat);
+    Matrix30d G = RotatingEffects::gyroscopic(elem, mat, Eigen::Vector3d::UnitZ());
     EXPECT_GT(G.norm(), 0.0) << "Gyroscopic matrix should be nonzero";
 }
 
@@ -163,7 +163,7 @@ TEST(Rotating, SpinSofteningSymmetric) {
     Material mat(200e9, 0.3, 7850);
     double omega = 100.0;
 
-    Matrix30d Kw = RotatingEffects::spin_softening(elem, mat, omega);
+    Matrix30d Kw = RotatingEffects::spin_softening(elem, mat, omega, Eigen::Vector3d::UnitZ());
 
     // K_omega should be symmetric
     Matrix30d diff = Kw - Kw.transpose();
@@ -174,8 +174,8 @@ TEST(Rotating, SpinSofteningScalesWithOmegaSquared) {
     TET10Element elem = make_offset_element();
     Material mat(200e9, 0.3, 7850);
 
-    Matrix30d Kw1 = RotatingEffects::spin_softening(elem, mat, 100.0);
-    Matrix30d Kw2 = RotatingEffects::spin_softening(elem, mat, 200.0);
+    Matrix30d Kw1 = RotatingEffects::spin_softening(elem, mat, 100.0, Eigen::Vector3d::UnitZ());
+    Matrix30d Kw2 = RotatingEffects::spin_softening(elem, mat, 200.0, Eigen::Vector3d::UnitZ());
 
     // Kw2 should be 4x Kw1
     double ratio = Kw2.norm() / Kw1.norm();
@@ -186,7 +186,7 @@ TEST(Rotating, SpinSofteningPositiveSemiDefinite) {
     TET10Element elem = make_offset_element();
     Material mat(200e9, 0.3, 7850);
 
-    Matrix30d Kw = RotatingEffects::spin_softening(elem, mat, 100.0);
+    Matrix30d Kw = RotatingEffects::spin_softening(elem, mat, 100.0, Eigen::Vector3d::UnitZ());
 
     Eigen::SelfAdjointEigenSolver<Matrix30d> es(Kw);
     // All eigenvalues should be >= 0 (PSD)

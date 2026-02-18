@@ -10,12 +10,20 @@
 namespace turbomodal {
 
 struct FluidConfig {
-    enum class Type { NONE, GAS_AIC, LIQUID_ANALYTICAL, LIQUID_ACOUSTIC_FEM };
+    enum class Type {
+        NONE,
+        GAS_AIC,
+        KWAK_ANALYTICAL,       // Legacy Kwak (1991) flat-disk formula
+        LIQUID_ANALYTICAL = KWAK_ANALYTICAL,  // Backward-compatible alias
+        POTENTIAL_FLOW_BEM,    // Axisymmetric BEM potential flow
+        LIQUID_ACOUSTIC_FEM
+    };
+
     Type type = Type::NONE;
 
     double fluid_density = 0.0;    // kg/m^3
-    double disk_radius = 0.0;      // m (for Kwak formula)
-    double disk_thickness = 0.0;   // m (for Kwak formula)
+    double disk_radius = 0.0;      // m (Kwak formula only)
+    double disk_thickness = 0.0;   // m (Kwak formula only)
     double speed_of_sound = 0.0;   // m/s
 };
 
@@ -70,6 +78,11 @@ private:
     SpMatd K_base_;
     SpMatd M_base_;
     bool base_assembled_ = false;
+
+    // BEM added mass cache (precomputed once per geometry, reused across RPM points)
+    std::unique_ptr<PotentialFlowAddedMass> bem_added_mass_;
+    std::vector<SpMatcd> M_added_free_cache_;  // per-harmonic, in free-DOF space
+    bool bem_precomputed_ = false;
 
     void classify_dofs();
 

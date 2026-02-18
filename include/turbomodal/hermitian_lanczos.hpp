@@ -40,6 +40,12 @@ public:
     // Reset cached symbolic factorization (call when matrix size/pattern changes)
     void reset_pattern() { m_pattern_set = false; }
 
+    // Dense solver for reference/testing — Cholesky-based, exact for small systems.
+    static HermitianLanczosResult solve_dense_public(
+        const SpMatcd& K, const SpMatcd& M, int nev, double sigma) {
+        return solve_dense(K, M, nev, sigma);
+    }
+
 private:
 #ifdef TURBOMODAL_HAS_CHOLMOD
     using LDLTSolver = Eigen::CholmodDecomposition<SpMatcd>;

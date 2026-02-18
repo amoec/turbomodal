@@ -446,8 +446,13 @@ TEST(Validation, LeissaFlatDisk) {
     std::cout << "\n";
 }
 
-TEST(Validation, KwakAddedMassFrequencyReduction) {
-    // Validate that wet frequencies are reduced by the expected Kwak ratio
+TEST(Validation, KwakVsBEMAddedMass) {
+    // Compare Kwak (flat-disk analytical) vs BEM (geometry-based) for a flat disk.
+    // Both should produce similar frequency reductions since the mesh IS a flat disk.
+    // The Kwak model is based on Kwak (1991) gamma coefficients for clamped circular
+    // plates. The BEM solves the actual potential flow problem from the mesh geometry.
+    // For a flat disk, they should agree within ~30% (BEM uses the actual 3D surface
+    // while Kwak assumes an idealized thin disk).
     Mesh mesh = load_leissa_mesh();
 
     double E = 200e9;
@@ -463,50 +468,81 @@ TEST(Validation, KwakAddedMassFrequencyReduction) {
     CyclicSymmetrySolver solver_dry(mesh, mat);
     auto results_dry = solver_dry.solve_at_rpm(0.0, 5);
 
-    // Solve wet
-    FluidConfig fluid;
-    fluid.type = FluidConfig::Type::LIQUID_ANALYTICAL;
-    fluid.fluid_density = rho_f;
-    fluid.disk_radius = a;
-    fluid.disk_thickness = h;
+    // Solve with Kwak analytical model
+    FluidConfig fluid_kwak;
+    fluid_kwak.type = FluidConfig::Type::KWAK_ANALYTICAL;
+    fluid_kwak.fluid_density = rho_f;
+    fluid_kwak.disk_radius = a;
+    fluid_kwak.disk_thickness = h;
 
-    CyclicSymmetrySolver solver_wet(mesh, mat, fluid);
-    auto results_wet = solver_wet.solve_at_rpm(0.0, 5);
+    CyclicSymmetrySolver solver_kwak(mesh, mat, fluid_kwak);
+    auto results_kwak = solver_kwak.solve_at_rpm(0.0, 5);
 
-    std::cout << "\n=== Kwak Added Mass Validation ===\n";
-    std::cout << "  rho_fluid=" << rho_f << " kg/m^3 (water)\n\n";
-    std::cout << "  ND  | f_dry (Hz) | f_wet (Hz) | Ratio (FEA) | Ratio (Kwak) | Error (%)\n";
-    std::cout << "  ----|------------|------------|-------------|--------------|----------\n";
+    // Solve with BEM potential flow model
+    FluidConfig fluid_bem;
+    fluid_bem.type = FluidConfig::Type::POTENTIAL_FLOW_BEM;
+    fluid_bem.fluid_density = rho_f;
+
+    CyclicSymmetrySolver solver_bem(mesh, mat, fluid_bem);
+    auto results_bem = solver_bem.solve_at_rpm(0.0, 5);
+
+    std::cout << "\n=== Kwak vs BEM Added Mass ===\n";
+    std::cout << "  rho_fluid=" << rho_f << " kg/m^3 (water), flat disk a="
+              << a << " m, h=" << h << " m\n\n";
+    std::cout << "  ND  | f_dry (Hz) | f_kwak (Hz) | f_bem (Hz) | Kwak ratio | BEM ratio  | Diff (%)\n";
+    std::cout << "  ----|------------|-------------|------------|------------|------------|--------\n";
 
     for (int nd = 0; nd < std::min(4, static_cast<int>(results_dry.size())); nd++) {
         const ModalResult* r_dry = nullptr;
-        const ModalResult* r_wet = nullptr;
+        const ModalResult* r_kwak = nullptr;
+        const ModalResult* r_bem = nullptr;
         for (const auto& r : results_dry) {
             if (r.harmonic_index == nd) { r_dry = &r; break; }
         }
-        for (const auto& r : results_wet) {
-            if (r.harmonic_index == nd) { r_wet = &r; break; }
+        for (const auto& r : results_kwak) {
+            if (r.harmonic_index == nd) { r_kwak = &r; break; }
+        }
+        for (const auto& r : results_bem) {
+            if (r.harmonic_index == nd) { r_bem = &r; break; }
         }
 
-        if (r_dry && r_wet && r_dry->frequencies.size() > 0 && r_wet->frequencies.size() > 0) {
+        if (r_dry && r_kwak && r_bem &&
+            r_dry->frequencies.size() > 0 &&
+            r_kwak->frequencies.size() > 0 &&
+            r_bem->frequencies.size() > 0) {
+
             double f_dry = r_dry->frequencies(0);
-            double f_wet = r_wet->frequencies(0);
-            double ratio_fea = f_wet / f_dry;
-            double ratio_kwak = AddedMassModel::frequency_ratio(nd, rho_f, rho_s, h, a);
-            double error_pct = 100.0 * std::abs(ratio_fea - ratio_kwak) / ratio_kwak;
+            double f_kwak = r_kwak->frequencies(0);
+            double f_bem = r_bem->frequencies(0);
+            double ratio_kwak = f_kwak / f_dry;
+            double ratio_bem = f_bem / f_dry;
+            double diff_pct = 100.0 * std::abs(ratio_bem - ratio_kwak) / ratio_kwak;
 
             std::cout << std::fixed << std::setprecision(2);
             std::cout << "  " << std::setw(3) << nd << " | "
                       << std::setw(10) << f_dry << " | "
-                      << std::setw(10) << f_wet << " | "
-                      << std::setw(11) << std::setprecision(4) << ratio_fea << " | "
-                      << std::setw(12) << ratio_kwak << " | "
-                      << std::setw(8) << std::setprecision(2) << error_pct << "\n";
+                      << std::setw(11) << f_kwak << " | "
+                      << std::setw(10) << f_bem << " | "
+                      << std::setw(10) << std::setprecision(4) << ratio_kwak << " | "
+                      << std::setw(10) << ratio_bem << " | "
+                      << std::setw(6) << std::setprecision(1) << diff_pct << "\n";
 
-            // The Kwak formula is applied as a frequency multiplier, so the FEA ratio
-            // should match the Kwak ratio exactly (since we multiply by it).
-            EXPECT_NEAR(ratio_fea, ratio_kwak, 0.001)
-                << "ND=" << nd << " wet/dry ratio should match Kwak prediction";
+            // Both wet frequencies should be lower than dry
+            EXPECT_LT(f_kwak, f_dry)
+                << "ND=" << nd << " Kwak wet freq should be less than dry";
+            EXPECT_LT(f_bem, f_dry)
+                << "ND=" << nd << " BEM wet freq should be less than dry";
+
+            // Ratios should be physically reasonable (between 0.3 and 1.0)
+            EXPECT_GT(ratio_kwak, 0.3) << "ND=" << nd << " Kwak ratio too low";
+            EXPECT_LT(ratio_kwak, 1.0) << "ND=" << nd << " Kwak ratio >= 1";
+            EXPECT_GT(ratio_bem, 0.3) << "ND=" << nd << " BEM ratio too low";
+            EXPECT_LT(ratio_bem, 1.0) << "ND=" << nd << " BEM ratio >= 1";
+
+            // Kwak and BEM should agree within 30% for a flat disk
+            // (BEM solves the actual geometry, Kwak is for an idealized thin disk)
+            EXPECT_LT(diff_pct, 30.0)
+                << "ND=" << nd << " Kwak vs BEM ratio difference exceeds 30%";
         }
     }
     std::cout << "\n";

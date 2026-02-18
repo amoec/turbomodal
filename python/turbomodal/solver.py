@@ -23,8 +23,14 @@ PROGRESS = 1
 DETAILED = 2
 
 
-def _progress_bar(current: int, total: int, width: int = 40, prefix: str = "",
-                  suffix: str = "", elapsed: float = 0.0) -> str:
+def _progress_bar(
+    current: int,
+    total: int,
+    width: int = 40,
+    prefix: str = "",
+    suffix: str = "",
+    elapsed: float = 0.0,
+) -> str:
     """Render a text progress bar."""
     frac = current / max(total, 1)
     filled = int(width * frac)
@@ -49,7 +55,7 @@ def solve(
     num_modes: int = 20,
     fluid: FluidConfig | None = None,
     config: SolverConfig | None = None,
-    verbose: int = SILENT,
+    verbose: int = PROGRESS,
     harmonic_indices: list[int] | None = None,
     max_threads: int = 0,
 ) -> list[ModalResult]:
@@ -79,9 +85,11 @@ def solve(
     if verbose >= PROGRESS:
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
-        print(f"Solving at {rpm:.0f} RPM  ({mesh.num_nodes()} nodes, "
-              f"{mesh.num_elements()} elements, {mesh.num_sectors} sectors, "
-              f"{nd_str}, {num_modes} modes/ND)")
+        print(
+            f"Solving at {rpm:.0f} RPM  ({mesh.num_nodes()} nodes, "
+            f"{mesh.num_elements()} elements, {mesh.num_sectors} sectors, "
+            f"{nd_str}, {num_modes} modes/ND)"
+        )
 
     t0 = time.perf_counter()
     solver = CyclicSymmetrySolver(mesh, material, fluid)
@@ -143,8 +151,10 @@ def rpm_sweep(
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
         print(f"RPM sweep: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
-        print(f"  Mesh: {mesh.num_nodes()} nodes, {mesh.num_elements()} elements, "
-              f"{mesh.num_sectors} sectors")
+        print(
+            f"  Mesh: {mesh.num_nodes()} nodes, {mesh.num_elements()} elements, "
+            f"{mesh.num_sectors} sectors"
+        )
         print(f"  Solving {nd_str}, {num_modes} modes/ND")
         print()
 
@@ -161,24 +171,30 @@ def rpm_sweep(
         all_results.append(results)
 
         if verbose == PROGRESS:
-            bar = _progress_bar(i + 1, n_rpm, prefix="  ", elapsed=elapsed,
-                                suffix=f"  {rpm:7.0f} RPM ({dt:.1f}s)")
+            bar = _progress_bar(
+                i + 1,
+                n_rpm,
+                prefix="  ",
+                elapsed=elapsed,
+                suffix=f"  {rpm:7.0f} RPM ({dt:.1f}s)",
+            )
             sys.stdout.write(bar)
             sys.stdout.flush()
             if i == n_rpm - 1:
                 sys.stdout.write("\n")
 
         elif verbose >= DETAILED:
-            print(f"  [{i+1}/{n_rpm}] {rpm:.0f} RPM  "
-                  f"({len(results)} harmonics, {dt:.1f}s)")
+            print(
+                f"  [{i+1}/{n_rpm}] {rpm:.0f} RPM  "
+                f"({len(results)} harmonics, {dt:.1f}s)"
+            )
             for r in results:
                 freqs = ", ".join(f"{f:.1f}" for f in r.frequencies[:3])
                 print(f"      ND={r.harmonic_index:2d}: [{freqs}] Hz")
 
     total = time.perf_counter() - t_start
     if verbose >= PROGRESS:
-        print(f"  Sweep complete in {total:.1f}s "
-              f"({total/n_rpm:.1f}s/point avg)")
+        print(f"  Sweep complete in {total:.1f}s " f"({total/n_rpm:.1f}s/point avg)")
 
     return all_results
 
@@ -202,8 +218,12 @@ def campbell_data(
     where N=number of RPM points, H=number of harmonics, M=number of modes
     """
     if not results:
-        return {"rpm": np.array([]), "frequencies": np.array([]),
-                "harmonic_index": np.array([]), "whirl_direction": np.array([])}
+        return {
+            "rpm": np.array([]),
+            "frequencies": np.array([]),
+            "harmonic_index": np.array([]),
+            "whirl_direction": np.array([]),
+        }
 
     n_rpm = len(results)
 

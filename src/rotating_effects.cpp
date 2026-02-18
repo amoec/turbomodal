@@ -135,13 +135,16 @@ Matrix30d RotatingEffects::stress_stiffening(
 }
 
 Matrix30d RotatingEffects::spin_softening(
-    const TET10Element& elem, const Material& mat, double omega) {
+    const TET10Element& elem, const Material& mat, double omega,
+    const Eigen::Vector3d& axis) {
 
     // K_omega = integral(rho * N_mat^T * Omega_mat * N_mat * dV)
-    // where Omega_mat = [[omega^2, 0, 0], [0, omega^2, 0], [0, 0, 0]]
-    // for z-axis rotation.
+    // where Omega_mat = omega^2 * (I - a*a^T) projects onto the plane
+    // perpendicular to the rotation axis a.
 
+    Eigen::Vector3d a = axis.normalized();
     double omega2 = omega * omega;
+    Eigen::Matrix3d Omega_mat = omega2 * (Eigen::Matrix3d::Identity() - a * a.transpose());
     Matrix30d Kw = Matrix30d::Zero();
 
     for (int gp = 0; gp < 4; gp++) {
@@ -162,11 +165,6 @@ Matrix30d RotatingEffects::spin_softening(
             N_mat(2, 3 * i + 2) = N(i);
         }
 
-        // Omega_mat = diag(omega^2, omega^2, 0)
-        Eigen::Matrix3d Omega_mat = Eigen::Matrix3d::Zero();
-        Omega_mat(0, 0) = omega2;
-        Omega_mat(1, 1) = omega2;
-
         // K_omega += rho * N_mat^T * Omega_mat * N_mat * detJ * w
         Kw.noalias() += mat.rho * N_mat.transpose() * Omega_mat * N_mat * (detJ * w);
     }
@@ -175,14 +173,21 @@ Matrix30d RotatingEffects::spin_softening(
 }
 
 Matrix30d RotatingEffects::gyroscopic(
-    const TET10Element& elem, const Material& mat) {
+    const TET10Element& elem, const Material& mat,
+    const Eigen::Vector3d& axis) {
 
     // G = integral(rho * N_mat^T * Omega_cross * N_mat * dV)
-    // where Omega_cross = [[0, -1, 0], [1, 0, 0], [0, 0, 0]]
-    // for z-axis rotation.
+    // where Omega_cross = skew(a) is the skew-symmetric matrix of the
+    // rotation axis unit vector a.
     //
     // The full Coriolis term in the equation of motion is 2*omega*G,
     // but this function returns the base G matrix without the 2*omega factor.
+
+    Eigen::Vector3d a = axis.normalized();
+    Eigen::Matrix3d Omega_cross;
+    Omega_cross <<     0, -a(2),  a(1),
+                    a(2),     0, -a(0),
+                   -a(1),  a(0),     0;
 
     Matrix30d Ge = Matrix30d::Zero();
 
@@ -203,11 +208,6 @@ Matrix30d RotatingEffects::gyroscopic(
             N_mat(1, 3 * i + 1) = N(i);
             N_mat(2, 3 * i + 2) = N(i);
         }
-
-        // Omega_cross for z-axis rotation
-        Eigen::Matrix3d Omega_cross = Eigen::Matrix3d::Zero();
-        Omega_cross(0, 1) = -1.0;
-        Omega_cross(1, 0) =  1.0;
 
         // G += rho * N_mat^T * Omega_cross * N_mat * detJ * w
         Ge.noalias() += mat.rho * N_mat.transpose() * Omega_cross * N_mat * (detJ * w);

@@ -2,12 +2,21 @@
 
 #include "turbomodal/common.hpp"
 #include <map>
+#include <set>
 
 namespace turbomodal {
 
 struct NodeSet {
     std::string name;
     std::vector<int> node_ids;
+};
+
+struct BoundaryFace {
+    std::array<int, 6> nodes;      // 3 corners + 3 midsides (TRI6)
+    int parent_element;
+    int face_index;                // 0-3 within parent TET10
+    Eigen::Vector3d outward_normal;
+    double area;
 };
 
 class Mesh {
@@ -35,6 +44,18 @@ public:
 
     // Find a node set by name, returns nullptr if not found
     const NodeSet* find_node_set(const std::string& name) const;
+
+    // Extract all boundary TRI6 faces from TET10 elements
+    std::vector<BoundaryFace> extract_boundary_faces() const;
+
+    // Get sorted unique node IDs on the wetted surface
+    // Wetted = boundary faces not on left/right/hub surfaces
+    // If "wetted_surface" node set exists, uses that instead.
+    std::vector<int> get_wetted_nodes() const;
+
+    // Build ordered meridional (r,z) boundary points from wetted surface
+    // rotation_axis determines which coordinates map to (r, z)
+    Eigen::MatrixXd get_meridional_profile() const;
 
     int num_nodes() const { return static_cast<int>(nodes.rows()); }
     int num_elements() const { return static_cast<int>(elements.rows()); }
