@@ -305,11 +305,16 @@ def plot_mesh(
     grid = _mesh_to_pyvista(mesh)
     nodes = np.asarray(mesh.nodes)
 
-    if show_node_classes:
-        # Build per-node classification: 0=interior, 1=left, 2=right, 3=hub
-        n_nodes = mesh.num_nodes()
-        cls = np.zeros(n_nodes, dtype=np.int32)
+    # Extract outer surface so interior tet faces don't occlude boundary points
+    surface = grid.extract_surface(algorithm="dataset_surface")
+    plotter = pv.Plotter(off_screen=off_screen)
+    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
+                     edge_color="gray", line_width=0.5)
 
+    if show_node_classes:
+        # Classify every node and render as colored point spheres per class.
+        # This avoids VTK scalar interpolation artifacts on triangle faces.
+        n_nodes = mesh.num_nodes()
         left_set = set(mesh.left_boundary)
         right_set = set(mesh.right_boundary)
         hub_ns = next(
@@ -317,43 +322,31 @@ def plot_mesh(
         )
         hub_set = set(hub_ns.node_ids) if hub_ns else set()
 
+        interior_ids, left_ids, right_ids, hub_ids = [], [], [], []
         for i in range(n_nodes):
             if i in left_set:
-                cls[i] = 1
+                left_ids.append(i)
             elif i in right_set:
-                cls[i] = 2
+                right_ids.append(i)
             elif i in hub_set:
-                cls[i] = 3
+                hub_ids.append(i)
+            else:
+                interior_ids.append(i)
 
-        grid.point_data["node_class"] = cls
-        surface = grid.extract_surface(algorithm="dataset_surface")
-
-        from matplotlib.colors import ListedColormap
-        class_cmap = ListedColormap(["#cccccc", "#2166ac", "#d62728", "#2ca02c"])
-        class_labels = {0: "Interior", 1: "Left boundary", 2: "Right boundary", 3: "Hub"}
-
-        plotter = pv.Plotter(off_screen=off_screen)
-        plotter.add_mesh(
-            surface, scalars="node_class", cmap=class_cmap,
-            clim=[0, 3], show_scalar_bar=False, show_edges=True,
-            edge_color="gray", line_width=0.5,
-        )
-
-        # Build legend entries for classes present in the mesh
-        present = set(cls)
-        class_colors = {0: "#cccccc", 1: "#2166ac", 2: "#d62728", 3: "#2ca02c"}
-        legend_entries = [
-            [class_labels[c], class_colors[c]] for c in sorted(present)
+        class_groups = [
+            (interior_ids, "#aaaaaa", 4, "Interior"),
+            (left_ids, "#2166ac", 10, "Left boundary"),
+            (right_ids, "#d62728", 10, "Right boundary"),
+            (hub_ids, "#2ca02c", 10, "Hub"),
         ]
-        plotter.add_legend(legend_entries, bcolor="white", face="circle")
-    else:
-        # Fallback: plain gray surface
-        surface = grid.extract_surface(algorithm="dataset_surface")
-        plotter = pv.Plotter(off_screen=off_screen)
-        plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
-                         edge_color="gray", line_width=0.5)
+        for ids, color, size, label in class_groups:
+            if ids:
+                plotter.add_points(
+                    nodes[ids], color=color, point_size=size,
+                    render_points_as_spheres=True, label=label,
+                )
 
-    if show_boundaries:
+    if show_boundaries and not show_node_classes:
         left = mesh.left_boundary
         right = mesh.right_boundary
         if left:
@@ -365,7 +358,7 @@ def plot_mesh(
             plotter.add_points(pts_right, color="red", point_size=10,
                                render_points_as_spheres=True, label="Right boundary")
 
-    if show_node_sets:
+    if show_node_sets and not show_node_classes:
         colors = ["green", "orange", "cyan", "magenta", "yellow"]
         ci = 0
         for ns in mesh.node_sets:
@@ -385,8 +378,7 @@ def plot_mesh(
         f"{sector_angle:.1f} deg, axis={axis_label})",
         font_size=12, position="upper_edge",
     )
-    if not show_node_classes:
-        plotter.add_legend()
+    plotter.add_legend()
     plotter.add_axes()
     return plotter
 
