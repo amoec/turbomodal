@@ -128,3 +128,41 @@ def test_campbell_data_rpm_values(wedge_mesh, steel_material):
 def test_campbell_data_empty():
     cd = campbell_data([])
     assert len(cd["rpm"]) == 0
+
+
+# ---- hub_constraint parameter ----
+
+def test_solve_hub_fixed_default(wedge_mesh, steel_material):
+    """Default hub_constraint='fixed' should produce positive frequencies."""
+    results = solve(wedge_mesh, steel_material, rpm=0.0, num_modes=3,
+                    verbose=0, harmonic_indices=[0])
+    assert len(results) > 0
+    assert all(f > 1.0 for f in results[0].frequencies)
+
+
+def test_solve_hub_free(wedge_mesh, steel_material):
+    """hub_constraint='free' should produce results with near-zero rigid body modes."""
+    results = solve(wedge_mesh, steel_material, rpm=0.0, num_modes=5,
+                    hub_constraint="free", verbose=0, harmonic_indices=[0])
+    assert len(results) > 0
+    # At k=0 without hub constraint, first few modes should be near-zero
+    # (rigid body rotation about the axis)
+    freqs = results[0].frequencies
+    assert len(freqs) >= 1
+    assert freqs[0] < 10.0, f"Expected near-zero mode, got {freqs[0]:.1f} Hz"
+
+
+def test_solve_hub_free_spin_softening(wedge_mesh, steel_material):
+    """Spin softening should lower elastic frequencies even with free hub."""
+    res_0 = solve(wedge_mesh, steel_material, rpm=0.0, num_modes=5,
+                  hub_constraint="free", verbose=0, harmonic_indices=[0])
+    res_hi = solve(wedge_mesh, steel_material, rpm=10000.0, num_modes=5,
+                   hub_constraint="free", verbose=0, harmonic_indices=[0])
+    # Find first elastic mode (skip near-zero rigid body modes)
+    f0_elastic = [f for f in res_0[0].frequencies if f > 10.0]
+    fhi_elastic = [f for f in res_hi[0].frequencies if f > 10.0]
+    assert len(f0_elastic) > 0 and len(fhi_elastic) > 0, \
+        "Expected elastic modes above 10 Hz"
+    # Spin softening (without stress stiffening) should reduce frequency
+    assert fhi_elastic[0] < f0_elastic[0], \
+        f"Expected spin softening: {fhi_elastic[0]:.1f} Hz should be < {f0_elastic[0]:.1f} Hz"

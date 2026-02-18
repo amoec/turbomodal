@@ -58,6 +58,7 @@ def solve(
     verbose: int = PROGRESS,
     harmonic_indices: list[int] | None = None,
     max_threads: int = 0,
+    hub_constraint: str = "fixed",
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -72,6 +73,9 @@ def solve(
     verbose : 0=silent, 1=progress bar, 2=detailed output
     harmonic_indices : list of harmonic indices to solve (None = all 0..N/2)
     max_threads : max concurrent solver threads (0 = auto, uses hardware_concurrency)
+    hub_constraint : ``"fixed"`` clamps all hub DOFs (default).  ``"free"``
+        leaves the hub unconstrained (free-rotating assembly, no shaft
+        contact).  Centrifugal prestress is disabled when hub is free.
 
     Returns
     -------
@@ -80,6 +84,7 @@ def solve(
     if fluid is None:
         fluid = FluidConfig()
 
+    apply_hub = hub_constraint == "fixed"
     hi = harmonic_indices or []
 
     if verbose >= PROGRESS:
@@ -92,7 +97,7 @@ def solve(
         )
 
     t0 = time.perf_counter()
-    solver = CyclicSymmetrySolver(mesh, material, fluid)
+    solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
     results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads)
     elapsed = time.perf_counter() - t0
 
@@ -121,6 +126,7 @@ def rpm_sweep(
     verbose: int = SILENT,
     harmonic_indices: list[int] | None = None,
     max_threads: int = 0,
+    hub_constraint: str = "fixed",
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -134,6 +140,9 @@ def rpm_sweep(
     verbose : 0=silent, 1=progress bar, 2=detailed output
     harmonic_indices : list of harmonic indices to solve (None = all 0..N/2)
     max_threads : max concurrent solver threads (0 = auto, uses hardware_concurrency)
+    hub_constraint : ``"fixed"`` clamps all hub DOFs (default).  ``"free"``
+        leaves the hub unconstrained (free-rotating assembly, no shaft
+        contact).  Centrifugal prestress is disabled when hub is free.
 
     Returns
     -------
@@ -142,6 +151,7 @@ def rpm_sweep(
     if fluid is None:
         fluid = FluidConfig()
 
+    apply_hub = hub_constraint == "fixed"
     hi = harmonic_indices or []
 
     rpm_arr = np.asarray(rpm_values, dtype=np.float64)
@@ -158,7 +168,7 @@ def rpm_sweep(
         print(f"  Solving {nd_str}, {num_modes} modes/ND")
         print()
 
-    solver = CyclicSymmetrySolver(mesh, material, fluid)
+    solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
     all_results = []
     t_start = time.perf_counter()
 

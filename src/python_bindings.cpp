@@ -215,9 +215,10 @@ PYBIND11_MODULE(_core, m) {
 
     // --- CyclicSymmetrySolver ---
     py::class_<CyclicSymmetrySolver>(m, "CyclicSymmetrySolver")
-        .def(py::init<const Mesh&, const Material&, const FluidConfig&>(),
+        .def(py::init<const Mesh&, const Material&, const FluidConfig&, bool>(),
              py::arg("mesh"), py::arg("material"),
              py::arg("fluid") = FluidConfig(),
+             py::arg("apply_hub_constraint") = true,
              py::keep_alive<1, 2>())  // solver keeps mesh alive
         .def("solve_at_rpm", &CyclicSymmetrySolver::solve_at_rpm,
              py::arg("rpm"), py::arg("num_modes_per_harmonic"),
