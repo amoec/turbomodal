@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "turbomodal/modal_solver.hpp"
+#include "turbomodal/hermitian_lanczos.hpp"
 #include "turbomodal/assembler.hpp"
 #include "turbomodal/element.hpp"
 #include "turbomodal/mesh.hpp"
@@ -479,4 +480,75 @@ TEST(Solver, SolverStatusDefaults) {
     EXPECT_FALSE(status.converged);
     EXPECT_EQ(status.num_converged, 0);
     EXPECT_EQ(status.iterations, 0);
+}
+
+// ---- Lanczos vs Dense Comparison ----
+
+// Helper: build complex sparse matrix from dense complex matrix
+static SpMatcd cdense_to_sparse(const Eigen::MatrixXcd& D) {
+    int n = static_cast<int>(D.rows());
+    std::vector<TripletC> trips;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            if (std::abs(D(i, j)) > 1e-15) {
+                trips.emplace_back(i, j, D(i, j));
+            }
+        }
+    }
+    SpMatcd S(n, n);
+    S.setFromTriplets(trips.begin(), trips.end());
+    return S;
+}
+
+TEST(Solver, LanczosVsDenseComparison) {
+    // Build a complex Hermitian system of size 300 (above n<=200 dense fallback).
+    // K = tridiagonal with complex off-diagonals, M = identity.
+    // Both Lanczos and dense should produce identical eigenvalues.
+    const int n = 300;
+    const int nev = 10;
+
+    // Build K as a complex Hermitian tridiagonal matrix:
+    // K(i,i) = 3.0 + 0.01*i  (real diagonal, distinct to avoid degeneracy)
+    // K(i,i+1) = -1.0 + 0.2i  (complex off-diagonal)
+    // K(i+1,i) = conj(K(i,i+1))  (Hermitian)
+    Eigen::MatrixXcd K_dense = Eigen::MatrixXcd::Zero(n, n);
+    std::complex<double> off(-1.0, 0.2);
+    for (int i = 0; i < n; i++) {
+        K_dense(i, i) = std::complex<double>(3.0 + 0.01 * i, 0.0);
+        if (i < n - 1) {
+            K_dense(i, i + 1) = off;
+            K_dense(i + 1, i) = std::conj(off);
+        }
+    }
+
+    // M = identity (sparse)
+    Eigen::MatrixXcd M_dense = Eigen::MatrixXcd::Identity(n, n);
+
+    SpMatcd K = cdense_to_sparse(K_dense);
+    SpMatcd M = cdense_to_sparse(M_dense);
+
+    // Solve with dense (reference — exact for any size)
+    double sigma = 0.0;
+    auto result_dense = HermitianLanczosEigenSolver::solve_dense_public(K, M, nev, sigma);
+    ASSERT_TRUE(result_dense.converged) << "Dense solver failed";
+    ASSERT_EQ(result_dense.eigenvalues.size(), nev);
+
+    // Solve with Lanczos (the iterative path, since n > 200)
+    HermitianLanczosEigenSolver lanczos;
+    int ncv = 4 * nev;
+    auto result_lanczos = lanczos.solve(K, M, nev, ncv, sigma, 1e-10, 500);
+    ASSERT_TRUE(result_lanczos.converged)
+        << "Lanczos solver did not converge, got " << result_lanczos.num_converged << "/" << nev;
+    ASSERT_EQ(result_lanczos.eigenvalues.size(), nev);
+
+    // Compare eigenvalues — should match to high precision
+    for (int i = 0; i < nev; i++) {
+        double lam_dense = result_dense.eigenvalues(i);
+        double lam_lanczos = result_lanczos.eigenvalues(i);
+        double rel_err = std::abs(lam_lanczos - lam_dense) /
+                         std::max(1.0, std::abs(lam_dense));
+        EXPECT_LT(rel_err, 1e-4)
+            << "Eigenvalue " << i << ": Lanczos=" << lam_lanczos
+            << " Dense=" << lam_dense << " rel_err=" << rel_err;
+    }
 }

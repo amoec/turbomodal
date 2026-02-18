@@ -2,8 +2,10 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <numeric>
 #include <set>
 #include <map>
+#include <unordered_map>
 
 namespace turbomodal {
 
@@ -346,6 +348,318 @@ const NodeSet* Mesh::find_node_set(const std::string& name) const {
         }
     }
     return nullptr;
+}
+
+// TET10 face definitions: 4 faces, each with 3 corners + 3 midsides
+// Face i is opposite to vertex i (standard convention)
+static const int tet10_face_corners[4][3] = {
+    {0, 2, 1},  // face 0 (opp node 3)
+    {0, 1, 3},  // face 1 (opp node 2)
+    {0, 3, 2},  // face 2 (opp node 1)
+    {1, 2, 3},  // face 3 (opp node 0)
+};
+static const int tet10_face_midsides[4][3] = {
+    {6, 5, 4},  // face 0
+    {4, 8, 7},  // face 1
+    {7, 9, 6},  // face 2
+    {5, 9, 8},  // face 3
+};
+
+std::vector<BoundaryFace> Mesh::extract_boundary_faces() const {
+    int n_elem = num_elements();
+
+    // Hash each face by sorted corner node IDs.
+    // Key: sorted triple of global corner IDs.
+    // Value: list of (element_idx, face_idx).
+    struct FaceKey {
+        int a, b, c;
+        bool operator==(const FaceKey& o) const { return a == o.a && b == o.b && c == o.c; }
+    };
+    struct FaceHash {
+        size_t operator()(const FaceKey& k) const {
+            size_t h = std::hash<int>()(k.a);
+            h ^= std::hash<int>()(k.b) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<int>()(k.c) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
+    struct FaceInfo {
+        int elem_idx;
+        int face_idx;
+    };
+
+    std::unordered_map<FaceKey, std::vector<FaceInfo>, FaceHash> face_map;
+
+    for (int e = 0; e < n_elem; e++) {
+        for (int f = 0; f < 4; f++) {
+            int c0 = elements(e, tet10_face_corners[f][0]);
+            int c1 = elements(e, tet10_face_corners[f][1]);
+            int c2 = elements(e, tet10_face_corners[f][2]);
+            // Sort corners for hashing
+            std::array<int, 3> sorted = {c0, c1, c2};
+            std::sort(sorted.begin(), sorted.end());
+            FaceKey key{sorted[0], sorted[1], sorted[2]};
+            face_map[key].push_back({e, f});
+        }
+    }
+
+    // Boundary faces appear exactly once
+    std::vector<BoundaryFace> boundary_faces;
+    for (auto& [key, infos] : face_map) {
+        if (infos.size() != 1) continue;
+
+        int e = infos[0].elem_idx;
+        int f = infos[0].face_idx;
+
+        BoundaryFace bf;
+        for (int i = 0; i < 3; i++) {
+            bf.nodes[i] = elements(e, tet10_face_corners[f][i]);
+            bf.nodes[i + 3] = elements(e, tet10_face_midsides[f][i]);
+        }
+        bf.parent_element = e;
+        bf.face_index = f;
+
+        // Compute outward normal from corner cross product
+        Eigen::Vector3d p0 = nodes.row(bf.nodes[0]).transpose();
+        Eigen::Vector3d p1 = nodes.row(bf.nodes[1]).transpose();
+        Eigen::Vector3d p2 = nodes.row(bf.nodes[2]).transpose();
+        Eigen::Vector3d v1 = p1 - p0;
+        Eigen::Vector3d v2 = p2 - p0;
+        Eigen::Vector3d normal = v1.cross(v2);
+        bf.area = 0.5 * normal.norm();
+        if (bf.area > 0.0) {
+            normal.normalize();
+        }
+
+        // Orient outward: check against tet centroid
+        Eigen::Vector3d tet_centroid = Eigen::Vector3d::Zero();
+        for (int n = 0; n < 4; n++) {  // only corner nodes for centroid
+            tet_centroid += nodes.row(elements(e, n)).transpose();
+        }
+        tet_centroid /= 4.0;
+
+        Eigen::Vector3d face_center = (p0 + p1 + p2) / 3.0;
+        if (normal.dot(face_center - tet_centroid) < 0.0) {
+            normal = -normal;
+        }
+        bf.outward_normal = normal;
+
+        boundary_faces.push_back(bf);
+    }
+    return boundary_faces;
+}
+
+std::vector<int> Mesh::get_wetted_nodes() const {
+    // Check for explicit wetted_surface node set
+    const NodeSet* ws = find_node_set("wetted_surface");
+    if (ws) {
+        return ws->node_ids;
+    }
+
+    // Auto-detect: wetted = boundary face nodes not on left/right/hub
+    std::set<int> left_set(left_boundary.begin(), left_boundary.end());
+    std::set<int> right_set(right_boundary.begin(), right_boundary.end());
+
+    std::set<int> hub_set;
+    const NodeSet* hub = find_node_set("hub_constraint");
+    if (hub) {
+        hub_set.insert(hub->node_ids.begin(), hub->node_ids.end());
+    }
+
+    auto boundary_faces = extract_boundary_faces();
+    std::set<int> wetted_set;
+
+    for (const auto& face : boundary_faces) {
+        // Check corner nodes: if all 3 are in the same boundary set, skip
+        bool all_left = true, all_right = true, all_hub = true;
+        for (int i = 0; i < 3; i++) {
+            if (left_set.count(face.nodes[i]) == 0) all_left = false;
+            if (right_set.count(face.nodes[i]) == 0) all_right = false;
+            if (hub_set.count(face.nodes[i]) == 0) all_hub = false;
+        }
+        if (all_left || all_right || all_hub) continue;
+
+        // This face is on the wetted surface — add all 6 nodes
+        for (int i = 0; i < 6; i++) {
+            wetted_set.insert(face.nodes[i]);
+        }
+    }
+
+    return std::vector<int>(wetted_set.begin(), wetted_set.end());
+}
+
+Eigen::MatrixXd Mesh::get_meridional_profile() const {
+    auto wetted = get_wetted_nodes();
+    if (wetted.empty()) return Eigen::MatrixXd();
+
+    // Determine coordinate axes
+    int c1, c2, c_axial;
+    if (rotation_axis == 0) {
+        c1 = 1; c2 = 2; c_axial = 0;
+    } else if (rotation_axis == 1) {
+        c1 = 0; c2 = 2; c_axial = 1;
+    } else {
+        c1 = 0; c2 = 1; c_axial = 2;
+    }
+
+    // Project wetted nodes to (r, z) and merge duplicates
+    struct RZPoint {
+        double r, z;
+        int node_id;
+    };
+    std::vector<RZPoint> rz_points;
+    for (int nid : wetted) {
+        double x1 = nodes(nid, c1);
+        double x2 = nodes(nid, c2);
+        double r = std::sqrt(x1 * x1 + x2 * x2);
+        double z = nodes(nid, c_axial);
+
+        // Check if a close point already exists
+        bool merged = false;
+        for (auto& p : rz_points) {
+            if (std::abs(p.r - r) < 1e-10 && std::abs(p.z - z) < 1e-10) {
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            rz_points.push_back({r, z, nid});
+        }
+    }
+
+    if (rz_points.size() < 2) return Eigen::MatrixXd();
+
+    // Build adjacency from wetted boundary edges.
+    // Extract edges from boundary faces that are on the wetted surface.
+    auto boundary_faces = extract_boundary_faces();
+    std::set<int> left_set(left_boundary.begin(), left_boundary.end());
+    std::set<int> right_set(right_boundary.begin(), right_boundary.end());
+    std::set<int> hub_set;
+    const NodeSet* hub = find_node_set("hub_constraint");
+    if (hub) hub_set.insert(hub->node_ids.begin(), hub->node_ids.end());
+
+    // Map from node_id to rz_point index
+    std::map<int, int> node_to_rz;
+    for (int i = 0; i < static_cast<int>(rz_points.size()); i++) {
+        node_to_rz[rz_points[i].node_id] = i;
+    }
+    // Also map all merged nodes
+    std::set<int> wetted_set(wetted.begin(), wetted.end());
+    for (int nid : wetted) {
+        double x1 = nodes(nid, c1);
+        double x2 = nodes(nid, c2);
+        double r = std::sqrt(x1 * x1 + x2 * x2);
+        double z = nodes(nid, c_axial);
+        for (int i = 0; i < static_cast<int>(rz_points.size()); i++) {
+            if (std::abs(rz_points[i].r - r) < 1e-10 &&
+                std::abs(rz_points[i].z - z) < 1e-10) {
+                node_to_rz[nid] = i;
+                break;
+            }
+        }
+    }
+
+    // Count how many wetted faces share each edge (in rz-projected space)
+    // An edge on the boundary of the wetted region appears in only 1 wetted face
+    struct Edge {
+        int a, b;
+        bool operator<(const Edge& o) const {
+            return std::tie(a, b) < std::tie(o.a, o.b);
+        }
+    };
+    std::map<Edge, int> edge_count;
+
+    for (const auto& face : boundary_faces) {
+        bool all_left = true, all_right = true, all_hub = true;
+        for (int i = 0; i < 3; i++) {
+            if (left_set.count(face.nodes[i]) == 0) all_left = false;
+            if (right_set.count(face.nodes[i]) == 0) all_right = false;
+            if (hub_set.count(face.nodes[i]) == 0) all_hub = false;
+        }
+        if (all_left || all_right || all_hub) continue;
+
+        // Wetted face: count corner edges in rz space
+        for (int i = 0; i < 3; i++) {
+            int n0 = face.nodes[i];
+            int n1 = face.nodes[(i + 1) % 3];
+            auto it0 = node_to_rz.find(n0);
+            auto it1 = node_to_rz.find(n1);
+            if (it0 == node_to_rz.end() || it1 == node_to_rz.end()) continue;
+            int a = it0->second, b = it1->second;
+            if (a == b) continue;  // degenerate after merging
+            if (a > b) std::swap(a, b);
+            edge_count[{a, b}]++;
+        }
+    }
+
+    // Edges appearing once or that connect points with different r OR z are boundary.
+    // Build adjacency for the meridional boundary.
+    std::map<int, std::vector<int>> adj;
+    for (auto& [edge, count] : edge_count) {
+        if (count == 1) {
+            adj[edge.a].push_back(edge.b);
+            adj[edge.b].push_back(edge.a);
+        }
+    }
+
+    // If no boundary edges found, fall back to convex-hull-like approach:
+    // sort all points by angle from centroid
+    if (adj.empty()) {
+        double r_mean = 0, z_mean = 0;
+        for (auto& p : rz_points) { r_mean += p.r; z_mean += p.z; }
+        r_mean /= rz_points.size();
+        z_mean /= rz_points.size();
+
+        std::vector<int> idx(rz_points.size());
+        std::iota(idx.begin(), idx.end(), 0);
+        std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+            return std::atan2(rz_points[a].z - z_mean, rz_points[a].r - r_mean) <
+                   std::atan2(rz_points[b].z - z_mean, rz_points[b].r - r_mean);
+        });
+
+        Eigen::MatrixXd result(idx.size(), 2);
+        for (int i = 0; i < static_cast<int>(idx.size()); i++) {
+            result(i, 0) = rz_points[idx[i]].r;
+            result(i, 1) = rz_points[idx[i]].z;
+        }
+        return result;
+    }
+
+    // Chain boundary edges into an ordered polyline
+    // Find a starting point (prefer one with only 1 neighbor = endpoint)
+    int start = adj.begin()->first;
+    for (auto& [node, nbrs] : adj) {
+        if (nbrs.size() == 1) { start = node; break; }
+    }
+
+    std::vector<int> chain;
+    std::set<int> visited;
+    chain.push_back(start);
+    visited.insert(start);
+
+    while (true) {
+        int cur = chain.back();
+        auto it = adj.find(cur);
+        if (it == adj.end()) break;
+        bool found = false;
+        for (int next : it->second) {
+            if (visited.count(next) == 0) {
+                chain.push_back(next);
+                visited.insert(next);
+                found = true;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+
+    Eigen::MatrixXd result(chain.size(), 2);
+    for (int i = 0; i < static_cast<int>(chain.size()); i++) {
+        result(i, 0) = rz_points[chain[i]].r;
+        result(i, 1) = rz_points[chain[i]].z;
+    }
+    return result;
 }
 
 }  // namespace turbomodal

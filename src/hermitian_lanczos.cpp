@@ -305,8 +305,20 @@ HermitianLanczosEigenSolver::solve(const SpMatcd &K, const SpMatcd &M, int nev,
     }
 
     // Update Lanczos vectors: V_new = V * Q_total(:, 0:nev-1)
-    Eigen::MatrixXcd V_new =
-        V.leftCols(ncv) * Q_total.leftCols(nev).cast<std::complex<double>>();
+    // CRITICAL: compute BOTH V_new and V_next from the OLD V before any
+    // overwrite.  Q_total was built relative to the old basis, so all
+    // products that use Q_total must reference the original columns.
+    Eigen::MatrixXcd Q_nev = Q_total.leftCols(nev).cast<std::complex<double>>();
+    Eigen::MatrixXcd V_new = V.leftCols(ncv) * Q_nev;
+
+    // Pre-compute the continuation vector from OLD V (before overwrite)
+    Eigen::VectorXcd V_next;
+    bool have_next = false;
+    if (nev < ncv && std::abs(T(nev, nev - 1)) > 1e-14) {
+      V_next = V.leftCols(ncv) *
+               Q_total.col(nev).cast<std::complex<double>>();
+      have_next = true;
+    }
 
     // Update tridiagonal entries
     for (int j = 0; j < nev; j++) {
@@ -316,7 +328,7 @@ HermitianLanczosEigenSolver::solve(const SpMatcd &K, const SpMatcd &M, int nev,
       }
     }
 
-    // Set up continuation vector for extending Lanczos
+    // NOW safe to overwrite V with the new basis
     V.leftCols(nev) = V_new;
 
     // Recompute MV cache for updated basis vectors
@@ -324,14 +336,12 @@ HermitianLanczosEigenSolver::solve(const SpMatcd &K, const SpMatcd &M, int nev,
       MV.col(j) = M * V.col(j);
     }
 
-    // The residual vector for restarting
+    // Assign the pre-computed continuation vector
     if (nev < ncv) {
       beta(nev - 1) = T(nev, nev - 1);
-      // V(:, nev) is the residual direction from the QR compression
-      if (std::abs(beta(nev - 1)) > 1e-14) {
-        V.col(nev) =
-            V.leftCols(ncv) * Q_total.col(nev).cast<std::complex<double>>();
-        // Re-normalize
+      if (have_next) {
+        V.col(nev) = V_next;
+        // M-normalize
         Eigen::VectorXcd Mv = M * V.col(nev);
         double nm = std::sqrt(std::abs(V.col(nev).dot(Mv)));
         if (nm > 1e-14) {

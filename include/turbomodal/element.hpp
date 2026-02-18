@@ -24,9 +24,13 @@ public:
     // B matrix (strain-displacement) at a point (6 x 30)
     Matrix6x30d B_matrix(double xi, double eta, double zeta) const;
 
-    // Gauss quadrature data
+    // 4-point Gauss quadrature (degree 2) — exact for stiffness on straight-sided TET10
     static const std::array<Eigen::Vector3d, 4> gauss_points;
     static const std::array<double, 4> gauss_weights;
+
+    // 5-point Stroud quadrature (degree 3) — for mass-type integrals (N^T*N, degree 4)
+    static const std::array<Eigen::Vector3d, 5> mass_gauss_points;
+    static const std::array<double, 5> mass_gauss_weights;
 };
 
 }  // namespace turbomodal

@@ -213,7 +213,7 @@ std::pair<SpMatcd, SpMatcd> CyclicSymmetrySolver::apply_cyclic_bc(
 }
 
 double CyclicSymmetrySolver::added_mass_factor(int harmonic_index) const {
-    if (fluid_.type != FluidConfig::Type::LIQUID_ANALYTICAL || fluid_.fluid_density <= 0.0) {
+    if (fluid_.type != FluidConfig::Type::KWAK_ANALYTICAL || fluid_.fluid_density <= 0.0) {
         return 1.0;
     }
     return AddedMassModel::frequency_ratio(
@@ -225,8 +225,8 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     // Solve K * u = F_centrifugal with k=0 cyclic BCs and hub constraints.
     // Cyclic BCs are essential: without them the sector boundaries are free,
     // hoop stress doesn't develop, and K_sigma is far too small.
-    Eigen::Vector3d z_axis(0, 0, 1);
-    Eigen::VectorXd F = assembler_.assemble_centrifugal_load(mesh_, mat_, omega, z_axis);
+    Eigen::Vector3d rot_axis = Eigen::Vector3d::Unit(mesh_.rotation_axis);
+    Eigen::VectorXd F = assembler_.assemble_centrifugal_load(mesh_, mat_, omega, rot_axis);
 
     SpMatd K = assembler_.K();
     int ndof = mesh_.num_dof();
@@ -500,6 +500,28 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     SpMatcd Kpf_H = Kpf.adjoint();
     SpMatcd Mpf_H = Mpf.adjoint();
 
+    // BEM added mass precomputation (once per geometry, cached)
+    if (fluid_.type == FluidConfig::Type::POTENTIAL_FLOW_BEM &&
+        fluid_.fluid_density > 0.0 && !bem_precomputed_) {
+        bem_added_mass_ = std::make_unique<PotentialFlowAddedMass>(mesh_, fluid_.fluid_density);
+        bem_added_mass_->precompute(max_k);
+
+        M_added_free_cache_.resize(max_k + 1);
+        for (int k = 0; k <= max_k; k++) {
+            // Get sector-level added mass for this ND
+            SpMatcd M_added_sector = bem_added_mass_->get_sector_added_mass(k);
+
+            // Project through cyclic transformation T(k)
+            SpMatcd T_k = build_cyclic_transformation(k);
+            SpMatcd T_k_H = T_k.adjoint();
+            SpMatcd M_added_cyclic = (T_k_H * M_added_sector * T_k).pruned(1e-15);
+
+            // Extract free DOFs (same elimination as structural M)
+            M_added_free_cache_[k] = extract_free(M_added_cyclic);
+        }
+        bem_precomputed_ = true;
+    }
+
     // Determine which harmonics to solve
     std::vector<int> harmonics_to_solve;
     if (harmonic_indices.empty()) {
@@ -520,6 +542,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
             SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
             SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+
+            // Add BEM potential flow added mass (precomputed, one sparse addition)
+            if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
+                M_added_free_cache_[k].nonZeros() > 0) {
+                M_free += M_added_free_cache_[k];
+            }
 
             SolverConfig config;
             config.nev = std::min(num_modes_per_harmonic, n_free - 1);
@@ -556,6 +584,26 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             }
 
             if (!status.converged && status.num_converged == 0) return std::nullopt;
+
+            // Eigenvalue residual diagnostics: r_i = ||K*x_i - λ_i*M*x_i|| / ||K*x_i||
+            {
+                int n_modes = static_cast<int>(result.mode_shapes.cols());
+                double max_res = 0.0;
+                for (int m = 0; m < n_modes; m++) {
+                    double lambda = std::pow(2.0 * PI * result.frequencies(m), 2);
+                    Eigen::VectorXcd x = result.mode_shapes.col(m);
+                    Eigen::VectorXcd Kx = K_free * x;
+                    Eigen::VectorXcd r = Kx - lambda * (M_free * x);
+                    double Kx_norm = Kx.norm();
+                    double res = (Kx_norm > 0) ? r.norm() / Kx_norm : r.norm();
+                    max_res = std::max(max_res, res);
+                }
+                if (max_res > 1e-4) {
+                    std::cerr << "  [residual] k=" << k
+                              << " max_residual=" << std::scientific << max_res
+                              << std::defaultfloat << std::endl;
+                }
+            }
 
             // Added mass correction
             double freq_ratio = added_mass_factor(k);

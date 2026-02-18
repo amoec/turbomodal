@@ -17,6 +17,20 @@ const std::array<double, 4> TET10Element::gauss_weights = {{
     1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0
 }};
 
+// 5-point Stroud degree-3 quadrature for tetrahedra (sum = 1/6 = ref tet volume)
+// Used for mass-type integrals where integrand is N^T*N (degree 4).
+const std::array<Eigen::Vector3d, 5> TET10Element::mass_gauss_points = {{
+    {1.0 / 4.0, 1.0 / 4.0, 1.0 / 4.0},   // centroid
+    {1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0},
+    {1.0 / 2.0, 1.0 / 6.0, 1.0 / 6.0},
+    {1.0 / 6.0, 1.0 / 2.0, 1.0 / 6.0},
+    {1.0 / 6.0, 1.0 / 6.0, 1.0 / 2.0}
+}};
+
+const std::array<double, 5> TET10Element::mass_gauss_weights = {{
+    -2.0 / 15.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0
+}};
+
 // TET10 node ordering (standard Gmsh convention):
 //   Corners: 0,1,2,3  (vertices of tetrahedron)
 //   Mid-edge: 4(0-1), 5(1-2), 6(0-2), 7(0-3), 8(1-3), 9(2-3)

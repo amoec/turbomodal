@@ -159,6 +159,7 @@ void GlobalAssembler::assemble_rotating_effects(
 
     int ndof = mesh.num_dof();
     int n_elem = mesh.num_elements();
+    Eigen::Vector3d axis = Eigen::Vector3d::Unit(mesh.rotation_axis);
 
 #ifdef _OPENMP
     int n_threads = omp_get_max_threads();
@@ -179,8 +180,8 @@ void GlobalAssembler::assemble_rotating_effects(
             dof_map(3 * n + 1) = 3 * node_id + 1;
             dof_map(3 * n + 2) = 3 * node_id + 2;
         }
-        Matrix30d Kw_e = RotatingEffects::spin_softening(elem, mat, omega);
-        Matrix30d Ge = RotatingEffects::gyroscopic(elem, mat);
+        Matrix30d Kw_e = RotatingEffects::spin_softening(elem, mat, omega, axis);
+        Matrix30d Ge = RotatingEffects::gyroscopic(elem, mat, axis);
         add_element_matrix(kw_per_thread[tid], Kw_e, dof_map);
         add_element_matrix(g_per_thread[tid], Ge, dof_map);
     }
@@ -203,8 +204,8 @@ void GlobalAssembler::assemble_rotating_effects(
             dof_map(3 * n + 1) = 3 * node_id + 1;
             dof_map(3 * n + 2) = 3 * node_id + 2;
         }
-        Matrix30d Kw_e = RotatingEffects::spin_softening(elem, mat, omega);
-        Matrix30d Ge = RotatingEffects::gyroscopic(elem, mat);
+        Matrix30d Kw_e = RotatingEffects::spin_softening(elem, mat, omega, axis);
+        Matrix30d Ge = RotatingEffects::gyroscopic(elem, mat, axis);
         add_element_matrix(kw_triplets, Kw_e, dof_map);
         add_element_matrix(g_triplets, Ge, dof_map);
     }

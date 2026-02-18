@@ -200,6 +200,8 @@ PYBIND11_MODULE(_core, m) {
         .value("NONE", FluidConfig::Type::NONE)
         .value("GAS_AIC", FluidConfig::Type::GAS_AIC)
         .value("LIQUID_ANALYTICAL", FluidConfig::Type::LIQUID_ANALYTICAL)
+        .value("KWAK_ANALYTICAL", FluidConfig::Type::KWAK_ANALYTICAL)
+        .value("POTENTIAL_FLOW_BEM", FluidConfig::Type::POTENTIAL_FLOW_BEM)
         .value("LIQUID_ACOUSTIC_FEM", FluidConfig::Type::LIQUID_ACOUSTIC_FEM);
 
     py::class_<FluidConfig>(m, "FluidConfig")
