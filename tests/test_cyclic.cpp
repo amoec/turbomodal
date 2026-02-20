@@ -393,3 +393,126 @@ TEST(Cyclic, AddedMassReducesFrequencies) {
         }
     }
 }
+
+// ---- Rotating-frame frequency consistency ----
+
+TEST(Cyclic, ConsistentModeCountAcrossHarmonics) {
+    // At non-zero RPM, all harmonics should return the same number of modes
+    // (rotating-frame eigenvalues, no FW/BW doubling)
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(5000.0, 5);
+    ASSERT_GE(results.size(), 3u);
+
+    int expected_modes = static_cast<int>(results[0].frequencies.size());
+    for (const auto& r : results) {
+        EXPECT_EQ(static_cast<int>(r.frequencies.size()), expected_modes)
+            << "k=" << r.harmonic_index << " has different mode count";
+    }
+}
+
+TEST(Cyclic, WhirlDirectionZeroInRotatingFrame) {
+    // In the rotating frame, whirl_direction should be 0 for all modes
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(5000.0, 5);
+    for (const auto& r : results) {
+        for (int m = 0; m < r.whirl_direction.size(); m++) {
+            EXPECT_EQ(r.whirl_direction(m), 0)
+                << "k=" << r.harmonic_index << " mode " << m
+                << " has non-zero whirl in rotating frame";
+        }
+    }
+}
+
+// ---- compute_stationary_frame ----
+
+TEST(Cyclic, ComputeStationaryFrameFWBWSplit) {
+    // For k=3, RPM=6000: omega = 200*pi rad/s, k_omega_hz = 300 Hz
+    ModalResult rot;
+    rot.harmonic_index = 3;
+    rot.rpm = 6000.0;
+    rot.frequencies.resize(2);
+    rot.frequencies << 500.0, 1000.0;
+    rot.whirl_direction = Eigen::VectorXi::Zero(2);
+    rot.mode_shapes = Eigen::MatrixXcd::Zero(6, 2);
+
+    auto sf = CyclicSymmetrySolver::compute_stationary_frame(rot, 24);
+
+    // FW: 500+300=800, 1000+300=1300
+    // BW: |500-300|=200, |1000-300|=700
+    // Sorted: 200, 700, 800, 1300
+    ASSERT_EQ(sf.frequencies.size(), 4);
+    EXPECT_NEAR(sf.frequencies(0), 200.0, 0.1);
+    EXPECT_NEAR(sf.frequencies(1), 700.0, 0.1);
+    EXPECT_NEAR(sf.frequencies(2), 800.0, 0.1);
+    EXPECT_NEAR(sf.frequencies(3), 1300.0, 0.1);
+
+    // Check whirl directions
+    EXPECT_EQ(sf.whirl_direction(0), -1);  // 200 = BW
+    EXPECT_EQ(sf.whirl_direction(1), -1);  // 700 = BW
+    EXPECT_EQ(sf.whirl_direction(2), 1);   // 800 = FW
+    EXPECT_EQ(sf.whirl_direction(3), 1);   // 1300 = FW
+}
+
+TEST(Cyclic, ComputeStationaryFrameK0NoSplit) {
+    // k=0: no splitting regardless of RPM
+    ModalResult rot;
+    rot.harmonic_index = 0;
+    rot.rpm = 6000.0;
+    rot.frequencies.resize(3);
+    rot.frequencies << 100.0, 200.0, 300.0;
+    rot.whirl_direction = Eigen::VectorXi::Zero(3);
+    rot.mode_shapes = Eigen::MatrixXcd::Zero(6, 3);
+
+    auto sf = CyclicSymmetrySolver::compute_stationary_frame(rot, 24);
+
+    ASSERT_EQ(sf.frequencies.size(), 3);
+    EXPECT_NEAR(sf.frequencies(0), 100.0, 1e-10);
+    EXPECT_NEAR(sf.frequencies(1), 200.0, 1e-10);
+    EXPECT_NEAR(sf.frequencies(2), 300.0, 1e-10);
+    for (int i = 0; i < 3; i++) {
+        EXPECT_EQ(sf.whirl_direction(i), 0);
+    }
+}
+
+TEST(Cyclic, ComputeStationaryFrameKN2NoSplit) {
+    // k=N/2=12 for N=24: no splitting (standing wave)
+    ModalResult rot;
+    rot.harmonic_index = 12;
+    rot.rpm = 6000.0;
+    rot.frequencies.resize(2);
+    rot.frequencies << 500.0, 1000.0;
+    rot.whirl_direction = Eigen::VectorXi::Zero(2);
+    rot.mode_shapes = Eigen::MatrixXcd::Zero(6, 2);
+
+    auto sf = CyclicSymmetrySolver::compute_stationary_frame(rot, 24);
+
+    ASSERT_EQ(sf.frequencies.size(), 2);
+    EXPECT_NEAR(sf.frequencies(0), 500.0, 1e-10);
+    EXPECT_NEAR(sf.frequencies(1), 1000.0, 1e-10);
+    for (int i = 0; i < 2; i++) {
+        EXPECT_EQ(sf.whirl_direction(i), 0);
+    }
+}
+
+TEST(Cyclic, ComputeStationaryFrameZeroRpmNoSplit) {
+    // At RPM=0, no splitting for any k
+    ModalResult rot;
+    rot.harmonic_index = 5;
+    rot.rpm = 0.0;
+    rot.frequencies.resize(2);
+    rot.frequencies << 500.0, 1000.0;
+    rot.whirl_direction = Eigen::VectorXi::Zero(2);
+    rot.mode_shapes = Eigen::MatrixXcd::Zero(6, 2);
+
+    auto sf = CyclicSymmetrySolver::compute_stationary_frame(rot, 24);
+
+    ASSERT_EQ(sf.frequencies.size(), 2);
+    EXPECT_NEAR(sf.frequencies(0), 500.0, 1e-10);
+    EXPECT_NEAR(sf.frequencies(1), 1000.0, 1e-10);
+}

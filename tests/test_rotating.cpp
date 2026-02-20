@@ -433,25 +433,34 @@ TEST(Rotating, FrequenciesChangeWithRPM) {
 }
 
 TEST(Rotating, FWBWSplittingAtNonzeroRPM) {
-    // For k > 0, modes should split into FW and BW with RPM > 0
+    // For k > 0, compute_stationary_frame should produce FW and BW modes
     Mesh mesh = load_wedge_mesh();
     Material mat(200e9, 0.3, 7850);
 
     CyclicSymmetrySolver solver(mesh, mat);
     auto results = solver.solve_at_rpm(5000.0, 3);
 
-    // Find a result with k > 0 and k < N/2
+    // Rotating-frame result should have whirl_direction = 0
+    for (const auto& r : results) {
+        for (int m = 0; m < r.whirl_direction.size(); m++) {
+            EXPECT_EQ(r.whirl_direction(m), 0);
+        }
+    }
+
+    // Stationary-frame conversion should produce FW/BW for 0 < k < N/2
     bool found_split = false;
     for (const auto& r : results) {
         if (r.harmonic_index > 0 && r.harmonic_index < mesh.num_sectors / 2) {
-            // Should have FW (+1) and BW (-1) modes
+            auto sf = CyclicSymmetrySolver::compute_stationary_frame(r, mesh.num_sectors);
             bool has_fw = false, has_bw = false;
-            for (int m = 0; m < r.whirl_direction.size(); m++) {
-                if (r.whirl_direction(m) == 1) has_fw = true;
-                if (r.whirl_direction(m) == -1) has_bw = true;
+            for (int m = 0; m < sf.whirl_direction.size(); m++) {
+                if (sf.whirl_direction(m) == 1) has_fw = true;
+                if (sf.whirl_direction(m) == -1) has_bw = true;
             }
             EXPECT_TRUE(has_fw) << "k=" << r.harmonic_index << " should have forward whirl modes";
             EXPECT_TRUE(has_bw) << "k=" << r.harmonic_index << " should have backward whirl modes";
+            // Stationary frame should have 2x the modes
+            EXPECT_EQ(sf.frequencies.size(), 2 * r.frequencies.size());
             found_split = true;
         }
     }
@@ -531,17 +540,12 @@ TEST(Rotating, FWGreaterThanBWInStationaryFrame) {
 
     for (const auto& r : results) {
         if (r.harmonic_index > 0 && r.harmonic_index < mesh.num_sectors / 2) {
-            // Collect FW and BW frequencies
+            auto sf = CyclicSymmetrySolver::compute_stationary_frame(r, mesh.num_sectors);
+            // Collect FW and BW frequencies from stationary-frame result
             std::vector<double> fw_freqs, bw_freqs;
-            for (int m = 0; m < r.whirl_direction.size(); m++) {
-                if (r.whirl_direction(m) == 1) fw_freqs.push_back(r.frequencies(m));
-                if (r.whirl_direction(m) == -1) bw_freqs.push_back(r.frequencies(m));
-            }
-            // For corresponding mode pairs, FW should be higher
-            // Since we interleaved them, FW[i] corresponds to BW[i]
-            int n_pairs = std::min(fw_freqs.size(), bw_freqs.size());
-            for (int i = 0; i < n_pairs; i++) {
-                // Sort both and compare (not guaranteed to be paired exactly)
+            for (int m = 0; m < sf.whirl_direction.size(); m++) {
+                if (sf.whirl_direction(m) == 1) fw_freqs.push_back(sf.frequencies(m));
+                if (sf.whirl_direction(m) == -1) bw_freqs.push_back(sf.frequencies(m));
             }
             // At minimum, max FW > min BW
             if (!fw_freqs.empty() && !bw_freqs.empty()) {
