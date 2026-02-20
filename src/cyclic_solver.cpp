@@ -774,14 +774,14 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 // Expand from n_free to n_reduced (insert zeros at hub DOFs)
                 Eigen::MatrixXcd modes_reduced = Eigen::MatrixXcd::Zero(
                     n_reduced, n_result_modes);
-                for (int i = 0; i < n_free && i < result.mode_shapes.rows(); i++) {
+                for (Eigen::Index i = 0; i < n_free && i < result.mode_shapes.rows(); i++) {
                     modes_reduced.row(free_reduced_map[i]) = result.mode_shapes.row(i);
                 }
 
                 // u_full = T0 * u_reduced, then scale right DOF rows by phase
                 Eigen::MatrixXcd modes_full = T0 * modes_reduced;
-                for (int r : right_dofs_) {
-                    if (r < modes_full.rows()) {
+                for (auto r : right_dofs_) {
+                    if (r < static_cast<int>(modes_full.rows())) {
                         modes_full.row(r) *= P;
                     }
                 }
@@ -890,7 +890,7 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_rpm_sweep(
     bool include_coriolis) {
     std::vector<std::vector<ModalResult>> all_results;
     all_results.reserve(rpm_values.size());
-    for (int i = 0; i < rpm_values.size(); i++) {
+    for (Eigen::Index i = 0; i < rpm_values.size(); i++) {
         all_results.push_back(solve_at_rpm(rpm_values(i), num_modes_per_harmonic,
                                             harmonic_indices, max_threads,
                                             include_coriolis));
@@ -911,7 +911,7 @@ void CyclicSymmetrySolver::export_campbell_csv(
     for (const auto& rpm_results : results) {
         for (const auto& r : rpm_results) {
             auto sf = compute_stationary_frame(r, mesh_.num_sectors);
-            for (int m = 0; m < sf.frequencies.size(); m++) {
+            for (Eigen::Index m = 0; m < sf.frequencies.size(); m++) {
                 int whirl = (sf.whirl_direction.size() > m) ? sf.whirl_direction(m) : 0;
                 file << r.rpm << "," << r.harmonic_index << ","
                      << (m + 1) << "," << sf.frequencies(m) << ","
@@ -932,7 +932,7 @@ void CyclicSymmetrySolver::export_zzenf_csv(
     file << std::fixed << std::setprecision(6);
 
     for (const auto& r : results_at_rpm) {
-        for (int m = 0; m < r.frequencies.size(); m++) {
+        for (Eigen::Index m = 0; m < r.frequencies.size(); m++) {
             file << r.harmonic_index << "," << (m + 1) << ","
                  << r.frequencies(m) << "," << r.rpm << "\n";
         }
@@ -1001,7 +1001,7 @@ void CyclicSymmetrySolver::export_mode_shape_vtk(
          << "NumberOfComponents=\"3\" format=\"ascii\">\n";
     for (int i = 0; i < n_nodes; i++) {
         double ux = 0, uy = 0, uz = 0;
-        if (3 * i + 2 < mode.size()) {
+        if (3 * i + 2 < static_cast<int>(mode.size())) {
             ux = mode(3 * i).real();
             uy = mode(3 * i + 1).real();
             uz = mode(3 * i + 2).real();
@@ -1014,7 +1014,7 @@ void CyclicSymmetrySolver::export_mode_shape_vtk(
          << "NumberOfComponents=\"3\" format=\"ascii\">\n";
     for (int i = 0; i < n_nodes; i++) {
         double ux = 0, uy = 0, uz = 0;
-        if (3 * i + 2 < mode.size()) {
+        if (3 * i + 2 < static_cast<int>(mode.size())) {
             ux = mode(3 * i).imag();
             uy = mode(3 * i + 1).imag();
             uz = mode(3 * i + 2).imag();
@@ -1027,7 +1027,7 @@ void CyclicSymmetrySolver::export_mode_shape_vtk(
          << "format=\"ascii\">\n";
     for (int i = 0; i < n_nodes; i++) {
         double mag = 0;
-        if (3 * i + 2 < mode.size()) {
+        if (3 * i + 2 < static_cast<int>(mode.size())) {
             double ux = std::abs(mode(3 * i));
             double uy = std::abs(mode(3 * i + 1));
             double uz = std::abs(mode(3 * i + 2));

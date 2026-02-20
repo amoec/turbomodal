@@ -425,8 +425,8 @@ TEST(Solver, ComplexHermitianRealCase) {
   ASSERT_TRUE(status_real.converged) << status_real.message;
   ASSERT_TRUE(status_complex.converged) << status_complex.message;
 
-  int num_compare = std::min(result_real.frequencies.size(),
-                             result_complex.frequencies.size());
+  int num_compare = static_cast<int>(std::min(result_real.frequencies.size(),
+                                              result_complex.frequencies.size()));
   EXPECT_GE(num_compare, 4);
 
   for (int i = 0; i < num_compare; i++) {
