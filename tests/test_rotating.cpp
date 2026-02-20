@@ -410,7 +410,7 @@ TEST(Rotating, FrequenciesChangeWithRPM) {
     ASSERT_NE(r0, nullptr) << "No k=0 result at 0 RPM";
     ASSERT_NE(r_rpm, nullptr) << "No k=0 result at 10000 RPM";
 
-    int n_compare = std::min(r0->frequencies.size(), r_rpm->frequencies.size());
+    int n_compare = static_cast<int>(std::min(r0->frequencies.size(), r_rpm->frequencies.size()));
     ASSERT_GE(n_compare, 1);
 
     // Frequencies should change (not be exactly equal)

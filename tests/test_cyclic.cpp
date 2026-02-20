@@ -189,7 +189,7 @@ TEST(Cyclic, SolveAtRpmZeroProducesResults) {
         EXPECT_GE(r.harmonic_index, 0);
         EXPECT_LE(r.harmonic_index, 12);
         EXPECT_EQ(r.rpm, 0.0);
-        for (int i = 0; i < r.frequencies.size(); i++) {
+        for (Eigen::Index i = 0; i < r.frequencies.size(); i++) {
             EXPECT_GT(r.frequencies(i), 0.0)
                 << "k=" << r.harmonic_index << " mode " << i << " has non-positive frequency";
         }
@@ -205,7 +205,7 @@ TEST(Cyclic, SolveAtRpmZeroFrequenciesOrdered) {
 
     // Within each harmonic index, frequencies should be ascending
     for (const auto& r : results) {
-        for (int i = 1; i < r.frequencies.size(); i++) {
+        for (Eigen::Index i = 1; i < r.frequencies.size(); i++) {
             EXPECT_GE(r.frequencies(i), r.frequencies(i - 1) - 1e-6)
                 << "k=" << r.harmonic_index << " frequencies not ascending at mode " << i;
         }
@@ -323,8 +323,8 @@ TEST(Cyclic, ExportModeShapeVtk) {
     full_result.frequencies = results[0].frequencies;
     full_result.mode_shapes = Eigen::MatrixXcd::Zero(mesh.num_dof(), results[0].frequencies.size());
     // Fill with dummy data
-    for (int i = 0; i < full_result.mode_shapes.rows() && i < results[0].mode_shapes.rows(); i++) {
-        for (int j = 0; j < full_result.mode_shapes.cols() && j < results[0].mode_shapes.cols(); j++) {
+    for (Eigen::Index i = 0; i < full_result.mode_shapes.rows() && i < results[0].mode_shapes.rows(); i++) {
+        for (Eigen::Index j = 0; j < full_result.mode_shapes.cols() && j < results[0].mode_shapes.cols(); j++) {
             full_result.mode_shapes(i, j) = results[0].mode_shapes(i, j);
         }
     }
@@ -384,9 +384,9 @@ TEST(Cyclic, AddedMassReducesFrequencies) {
     // Wet frequencies should be lower than dry for each harmonic index
     for (size_t i = 0; i < results_dry.size(); i++) {
         ASSERT_EQ(results_dry[i].harmonic_index, results_wet[i].harmonic_index);
-        int n_modes = std::min(results_dry[i].frequencies.size(),
-                               results_wet[i].frequencies.size());
-        for (int m = 0; m < n_modes; m++) {
+        auto n_modes = std::min(results_dry[i].frequencies.size(),
+                                results_wet[i].frequencies.size());
+        for (Eigen::Index m = 0; m < n_modes; m++) {
             EXPECT_LT(results_wet[i].frequencies(m), results_dry[i].frequencies(m))
                 << "k=" << results_dry[i].harmonic_index << " mode " << m
                 << ": wet frequency should be lower than dry";
@@ -421,7 +421,7 @@ TEST(Cyclic, WhirlDirectionZeroInRotatingFrame) {
 
     auto results = solver.solve_at_rpm(5000.0, 5);
     for (const auto& r : results) {
-        for (int m = 0; m < r.whirl_direction.size(); m++) {
+        for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
             EXPECT_EQ(r.whirl_direction(m), 0)
                 << "k=" << r.harmonic_index << " mode " << m
                 << " has non-zero whirl in rotating frame";
@@ -529,7 +529,7 @@ TEST(Cyclic, CoriolisOffMatchesBaseline) {
     ASSERT_GT(results.size(), 0u);
 
     for (const auto& r : results) {
-        for (int m = 0; m < r.whirl_direction.size(); m++) {
+        for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
             EXPECT_EQ(r.whirl_direction(m), 0)
                 << "k=" << r.harmonic_index << " mode=" << m;
         }
@@ -545,7 +545,7 @@ TEST(Cyclic, CoriolisK0FallsBackToStandard) {
     auto results = solver.solve_at_rpm(5000.0, 5, {0}, 0, true);
     ASSERT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].harmonic_index, 0);
-    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+    for (Eigen::Index m = 0; m < results[0].whirl_direction.size(); m++) {
         EXPECT_EQ(results[0].whirl_direction(m), 0);
     }
 }
@@ -561,9 +561,9 @@ TEST(Cyclic, CoriolisZeroRPMSameAsNoCoriolis) {
     ASSERT_EQ(results_no.size(), 1u);
     ASSERT_EQ(results_yes.size(), 1u);
 
-    int nm = std::min(results_no[0].frequencies.size(),
-                      results_yes[0].frequencies.size());
-    for (int m = 0; m < nm; m++) {
+    auto nm = std::min(results_no[0].frequencies.size(),
+                       results_yes[0].frequencies.size());
+    for (Eigen::Index m = 0; m < nm; m++) {
         EXPECT_NEAR(results_no[0].frequencies(m),
                     results_yes[0].frequencies(m), 1e-6)
             << "mode=" << m;
@@ -581,7 +581,7 @@ TEST(Cyclic, CoriolisProducesFWBWSplitting) {
     EXPECT_EQ(results[0].harmonic_index, 3);
 
     int n_fw = 0, n_bw = 0, n_stand = 0;
-    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+    for (Eigen::Index m = 0; m < results[0].whirl_direction.size(); m++) {
         int w = results[0].whirl_direction(m);
         if (w == 1) n_fw++;
         else if (w == -1) n_bw++;
@@ -603,7 +603,7 @@ TEST(Cyclic, CoriolisFWGreaterThanBW) {
 
     // Collect first FW and first BW frequencies
     double first_fw = -1, first_bw = -1;
-    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+    for (Eigen::Index m = 0; m < results[0].whirl_direction.size(); m++) {
         if (results[0].whirl_direction(m) == 1 && first_fw < 0)
             first_fw = results[0].frequencies(m);
         if (results[0].whirl_direction(m) == -1 && first_bw < 0)
