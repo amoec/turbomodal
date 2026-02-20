@@ -58,6 +58,18 @@ public:
     // rotation_axis determines which coordinates map to (r, z)
     Eigen::MatrixXd get_meridional_profile() const;
 
+    // Mesh quality: detect and fix elements with negative Jacobians.
+    // Mid-edge nodes are blended toward edge midpoints until all Gauss-point
+    // Jacobians are positive.  Modifies `nodes` in-place.
+    struct MeshQualityReport {
+        int num_negative_jacobian = 0;  // elements with detJ < 0 before fix
+        int num_fixed = 0;              // successfully corrected
+        int num_unfixable = 0;          // inverted corners (can't fix)
+        std::vector<int> fixed_elements;
+        std::vector<int> unfixable_elements;
+    };
+    MeshQualityReport fix_negative_jacobians();
+
     int num_nodes() const { return static_cast<int>(nodes.rows()); }
     int num_elements() const { return static_cast<int>(elements.rows()); }
     int num_dof() const { return 3 * num_nodes(); }

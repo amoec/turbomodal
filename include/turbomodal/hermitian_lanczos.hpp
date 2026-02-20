@@ -3,6 +3,7 @@
 #include "turbomodal/common.hpp"
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
+#include <memory>
 #ifdef TURBOMODAL_HAS_CHOLMOD
 #include <Eigen/CholmodSupport>
 #endif

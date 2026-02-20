@@ -1,6 +1,10 @@
 #include "turbomodal/element.hpp"
+#include <iostream>
 
 namespace turbomodal {
+
+// Thread-local counter to avoid spamming per-Gauss-point warnings.
+static thread_local int s_neg_jac_warnings = 0;
 
 // 4-point Gauss quadrature for tetrahedra
 // Points are in barycentric-like natural coordinates (xi, eta, zeta)
@@ -222,6 +226,18 @@ Matrix30d TET10Element::stiffness(const Material& mat) const {
         Eigen::Matrix3d J = jacobian(xi, eta, zeta);
         double detJ = J.determinant();
 
+        // Safety net: use |detJ| if negative to prevent sign-flip corruption
+        if (detJ <= 0.0) {
+            if (s_neg_jac_warnings < 5) {
+                std::cerr << "[TET10] Warning: negative Jacobian (detJ="
+                          << detJ << ") in stiffness — using |detJ|\n";
+                s_neg_jac_warnings++;
+                if (s_neg_jac_warnings == 5)
+                    std::cerr << "[TET10] (further warnings suppressed)\n";
+            }
+            detJ = std::abs(detJ);
+        }
+
         // K_e += B^T * D * B * det(J) * w
         Ke.noalias() += B.transpose() * D * B * (detJ * w);
     }
@@ -244,6 +260,17 @@ Matrix30d TET10Element::mass(const Material& mat) const {
         Vector10d N = shape_functions(xi, eta, zeta);
         Eigen::Matrix3d J = jacobian(xi, eta, zeta);
         double detJ = J.determinant();
+
+        if (detJ <= 0.0) {
+            if (s_neg_jac_warnings < 5) {
+                std::cerr << "[TET10] Warning: negative Jacobian (detJ="
+                          << detJ << ") in mass — using |detJ|\n";
+                s_neg_jac_warnings++;
+                if (s_neg_jac_warnings == 5)
+                    std::cerr << "[TET10] (further warnings suppressed)\n";
+            }
+            detJ = std::abs(detJ);
+        }
 
         // Build 3x30 shape function matrix N_mat
         // N_mat(d, 3*i + d) = N(i) for d = 0,1,2

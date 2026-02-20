@@ -1,7 +1,9 @@
 #include "turbomodal/mesh.hpp"
+#include "turbomodal/element.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <iostream>
 #include <numeric>
 #include <set>
 #include <map>
@@ -669,6 +671,211 @@ Eigen::MatrixXd Mesh::get_meridional_profile() const {
         result(i, 1) = rz_points[chain[i]].z;
     }
     return result;
+}
+
+// ---- Negative Jacobian detection and correction ----
+
+// TET10 mid-edge node index → (corner_a, corner_b)
+static constexpr int MID_EDGE_MAP[6][3] = {
+    {4, 0, 1}, {5, 1, 2}, {6, 0, 2},
+    {7, 0, 3}, {8, 1, 3}, {9, 2, 3}
+};
+
+// Check if all 4 Gauss-point Jacobians are positive for element with given coords.
+static bool element_jacobians_ok(const Matrix10x3d& coords) {
+    TET10Element elem;
+    elem.node_coords = coords;
+    for (int gp = 0; gp < 4; gp++) {
+        double xi   = TET10Element::gauss_points[gp](0);
+        double eta  = TET10Element::gauss_points[gp](1);
+        double zeta = TET10Element::gauss_points[gp](2);
+        double detJ = elem.jacobian(xi, eta, zeta).determinant();
+        if (detJ <= 0.0) return false;
+    }
+    return true;
+}
+
+// Rotate a 3D position by angle `a` about `rotation_axis` (0=X, 1=Y, 2=Z).
+static Eigen::Vector3d rotate_about_axis(const Eigen::Vector3d& p, double a, int rotation_axis) {
+    double ca = std::cos(a), sa = std::sin(a);
+    Eigen::Vector3d r = p;
+    int c1, c2;
+    if (rotation_axis == 0) { c1 = 1; c2 = 2; }
+    else if (rotation_axis == 1) { c1 = 0; c2 = 2; }
+    else { c1 = 0; c2 = 1; }
+    r(c1) = ca * p(c1) - sa * p(c2);
+    r(c2) = sa * p(c1) + ca * p(c2);
+    return r;
+}
+
+Mesh::MeshQualityReport Mesh::fix_negative_jacobians() {
+    MeshQualityReport report;
+    int n_elem = num_elements();
+
+    // Build lookup: global node ID → matched partner node ID.
+    // Also determine sector angle for rotating corrections between boundaries.
+    bool has_cyclic = !matched_pairs.empty() && num_sectors > 0;
+    double sector_angle = has_cyclic ? (2.0 * PI / num_sectors) : 0.0;
+
+    // left_node → right_node, right_node → left_node
+    std::map<int, int> partner_of;
+    // Track which side each boundary node is on: +1 = left, -1 = right
+    std::map<int, int> boundary_side;
+    if (has_cyclic) {
+        for (const auto& [left_id, right_id] : matched_pairs) {
+            partner_of[left_id] = right_id;
+            partner_of[right_id] = left_id;
+            boundary_side[left_id] = +1;
+            boundary_side[right_id] = -1;
+        }
+    }
+
+    // Per-node blending factors: track the maximum alpha needed across all
+    // elements sharing a mid-edge node.  This ensures that a node shared by
+    // multiple elements gets enough correction for all of them.
+    std::map<int, double> node_alpha;  // global node ID → required alpha
+
+    // Phase 1: determine per-element blending factors
+    struct ElemFix {
+        int elem_idx;
+        double alpha;
+        Eigen::Matrix<double, 6, 3> midpoints;  // straight-edge midpoints
+        Matrix10x3d original_coords;
+    };
+    std::vector<ElemFix> fixes;
+
+    for (int e = 0; e < n_elem; e++) {
+        Matrix10x3d coords;
+        for (int n = 0; n < 10; n++) {
+            coords.row(n) = nodes.row(elements(e, n));
+        }
+
+        if (element_jacobians_ok(coords))
+            continue;
+
+        report.num_negative_jacobian++;
+
+        // Compute edge midpoints for each mid-edge node
+        Eigen::Matrix<double, 6, 3> midpoints;
+        for (int m = 0; m < 6; m++) {
+            int ca = MID_EDGE_MAP[m][1];
+            int cb = MID_EDGE_MAP[m][2];
+            midpoints.row(m) = (coords.row(ca) + coords.row(cb)) * 0.5;
+        }
+
+        // First check if fully straightened (alpha=1) works
+        Matrix10x3d test_coords = coords;
+        for (int m = 0; m < 6; m++) {
+            int mid_node = MID_EDGE_MAP[m][0];
+            test_coords.row(mid_node) = midpoints.row(m);
+        }
+        if (!element_jacobians_ok(test_coords)) {
+            report.num_unfixable++;
+            report.unfixable_elements.push_back(e);
+            std::cerr << "[Mesh] Element " << e
+                      << " has inverted corner tetrahedron — cannot fix by "
+                         "mid-node adjustment\n";
+            continue;
+        }
+
+        // Binary search for minimum alpha (10 iterations → precision ~0.001)
+        double lo = 0.0, hi = 1.0;
+        bool fixed = false;
+        for (int iter = 0; iter < 10; iter++) {
+            double mid_alpha = (lo + hi) * 0.5;
+            test_coords = coords;
+            for (int m = 0; m < 6; m++) {
+                int mid_node = MID_EDGE_MAP[m][0];
+                test_coords.row(mid_node) =
+                    (1.0 - mid_alpha) * coords.row(mid_node) +
+                    mid_alpha * midpoints.row(m);
+            }
+            if (element_jacobians_ok(test_coords)) {
+                hi = mid_alpha;
+                fixed = true;
+            } else {
+                lo = mid_alpha;
+            }
+        }
+
+        if (fixed) {
+            // Record this element's required alpha per mid-edge node
+            for (int m = 0; m < 6; m++) {
+                int gid = elements(e, MID_EDGE_MAP[m][0]);
+                node_alpha[gid] = std::max(node_alpha[gid], hi);
+            }
+            fixes.push_back({e, hi, midpoints, coords});
+            report.num_fixed++;
+            report.fixed_elements.push_back(e);
+        }
+    }
+
+    // Phase 2: propagate blending factors to cyclic partners.
+    // If a boundary node needs alpha, its matched partner needs at least
+    // the same alpha so the geometry remains rotationally symmetric.
+    if (has_cyclic) {
+        // Iterate until stable (typically 1 pass since partners are direct)
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (auto& [nid, alpha_val] : node_alpha) {
+                auto pit = partner_of.find(nid);
+                if (pit == partner_of.end()) continue;
+                int partner = pit->second;
+                double& partner_alpha = node_alpha[partner];
+                if (alpha_val > partner_alpha) {
+                    partner_alpha = alpha_val;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Phase 3: apply corrections.
+    // For each node that needs correction, compute the blended position.
+    // For cyclic boundary nodes, also correct the partner with the
+    // rotationally equivalent displacement.
+    std::set<int> corrected;
+    for (auto& fix : fixes) {
+        for (int m = 0; m < 6; m++) {
+            int mid_local = MID_EDGE_MAP[m][0];
+            int gid = elements(fix.elem_idx, mid_local);
+            if (corrected.count(gid)) continue;
+
+            double alpha = node_alpha[gid];
+            Eigen::Vector3d old_pos = fix.original_coords.row(mid_local).transpose();
+            Eigen::Vector3d straight_pos = fix.midpoints.row(m).transpose();
+            Eigen::Vector3d new_pos = (1.0 - alpha) * old_pos + alpha * straight_pos;
+            Eigen::Vector3d delta = new_pos - old_pos;
+
+            nodes.row(gid) = new_pos.transpose();
+            corrected.insert(gid);
+
+            // Propagate to cyclic partner: set partner position to the
+            // rotated image of the corrected position, enforcing exact symmetry.
+            if (has_cyclic) {
+                auto pit = partner_of.find(gid);
+                if (pit != partner_of.end() && !corrected.count(pit->second)) {
+                    int partner = pit->second;
+                    int side = boundary_side[gid];
+                    // side=+1 (left): partner is right → rotate new_pos by +sector_angle
+                    // side=-1 (right): partner is left → rotate new_pos by -sector_angle
+                    double rot_angle = (side > 0) ? sector_angle : -sector_angle;
+                    nodes.row(partner) = rotate_about_axis(new_pos, rot_angle, rotation_axis).transpose();
+                    corrected.insert(partner);
+                }
+            }
+        }
+    }
+
+    if (report.num_negative_jacobian > 0) {
+        std::cerr << "[Mesh] Negative Jacobian report: "
+                  << report.num_negative_jacobian << " bad elements, "
+                  << report.num_fixed << " fixed, "
+                  << report.num_unfixable << " unfixable\n";
+    }
+
+    return report;
 }
 
 }  // namespace turbomodal
