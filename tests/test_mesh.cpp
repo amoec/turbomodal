@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include <gtest/gtest.h>
 #include "turbomodal/mesh.hpp"
 #include "turbomodal/element.hpp"
