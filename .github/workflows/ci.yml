@@ -63,11 +63,16 @@ jobs:
         with:
           submodules: true
 
+      - name: Block Windows AV from interfering with tests
+        if: runner.os == 'Windows'
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+        shell: powershell
+
       - name: Configure CMake
         run: cmake -B build -DBUILD_TESTS=ON -DBUILD_PYTHON=OFF -DUSE_OPENMP=OFF
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
