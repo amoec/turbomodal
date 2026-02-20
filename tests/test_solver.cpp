@@ -1012,3 +1012,75 @@ TEST(Solver, SolverDeterministic) {
         << "Mode " << i << " frequencies differ between runs";
   }
 }
+
+// ---- Test 9: Distorted Mesh — fix_negative_jacobians then solve ----
+
+TEST(Solver, DistortedMeshFrequencies) {
+  // Build a two-element mesh where one element has a distorted mid-node,
+  // fix the Jacobians, assemble, solve, and verify positive frequencies.
+  Mesh mesh;
+  mesh.nodes.resize(14, 3);
+
+  // Element 1: reference tet (0,0,0)-(1,0,0)-(0,1,0)-(0,0,1)
+  mesh.nodes.row(0)  = Eigen::Vector3d(0, 0, 0);
+  mesh.nodes.row(1)  = Eigen::Vector3d(1, 0, 0);
+  mesh.nodes.row(2)  = Eigen::Vector3d(0, 1, 0);
+  mesh.nodes.row(3)  = Eigen::Vector3d(0, 0, 1);
+  mesh.nodes.row(4)  = Eigen::Vector3d(0.5, 0.0, 0.0);  // mid 0-1
+  mesh.nodes.row(5)  = Eigen::Vector3d(0.5, 0.5, 0.0);  // mid 1-2
+  mesh.nodes.row(6)  = Eigen::Vector3d(0.0, 0.5, 0.0);  // mid 0-2
+  mesh.nodes.row(7)  = Eigen::Vector3d(0.0, 0.0, 0.5);  // mid 0-3
+  mesh.nodes.row(8)  = Eigen::Vector3d(0.5, 0.0, 0.5);  // mid 1-3
+  mesh.nodes.row(9)  = Eigen::Vector3d(0.0, 0.5, 0.5);  // mid 2-3
+
+  // Element 2: shares face 1-2-3 with elem 1, 4th node at (1,1,1)
+  // Node 10 = new corner, nodes 11-13 = new mid-edge nodes
+  mesh.nodes.row(10) = Eigen::Vector3d(1, 1, 1);
+  mesh.nodes.row(11) = Eigen::Vector3d(1.0, 0.5, 0.5);  // mid 1-10
+  mesh.nodes.row(12) = Eigen::Vector3d(0.5, 1.0, 0.5);  // mid 2-10
+  // DISTORTED: mid 3-10 pushed far past corner 10
+  mesh.nodes.row(13) = Eigen::Vector3d(1.5, 1.5, 1.5);  // should be (0.5, 0.5, 1.0)
+
+  mesh.elements.resize(2, 10);
+  mesh.elements.row(0) << 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
+  mesh.elements.row(1) << 1, 2, 3, 10, 5, 9, 8, 11, 12, 13;
+
+  // Fix negative Jacobians
+  auto report = mesh.fix_negative_jacobians();
+  EXPECT_GE(report.num_negative_jacobian, 1)
+      << "Should detect at least one bad element";
+  EXPECT_EQ(report.num_unfixable, 0);
+
+  // Assemble and solve
+  Material mat(200e9, 0.3, 7850);
+  GlobalAssembler assembler;
+  assembler.assemble(mesh, mat);
+
+  // Clamp the face opposite node 1: nodes 0,2,3 and mid-edge nodes 6,7,9
+  // (6 nodes × 3 DOF = 18 constrained, 8 free nodes × 3 = 24 free DOFs)
+  std::vector<int> constrained;
+  for (int node : {0, 2, 3, 6, 7, 9}) {
+    constrained.push_back(3 * node);
+    constrained.push_back(3 * node + 1);
+    constrained.push_back(3 * node + 2);
+  }
+  std::sort(constrained.begin(), constrained.end());
+  auto [K_red, M_red, free_map] =
+      ModalSolver::eliminate_dofs(assembler.K(), assembler.M(), constrained);
+
+  SolverConfig config;
+  config.nev = 5;
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K_red, M_red, config);
+
+  ASSERT_TRUE(status.converged) << status.message;
+  ASSERT_GE(result.frequencies.size(), 3);
+
+  for (int i = 0; i < result.frequencies.size(); i++) {
+    EXPECT_GT(result.frequencies(i), 0.0)
+        << "Mode " << i << " should have positive frequency after Jacobian fix";
+    EXPECT_FALSE(std::isnan(result.frequencies(i)))
+        << "Mode " << i << " frequency is NaN";
+  }
+}

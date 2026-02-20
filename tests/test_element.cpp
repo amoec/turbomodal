@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "turbomodal/element.hpp"
+#include "turbomodal/mesh.hpp"
 #include <Eigen/Eigenvalues>
 
 using namespace turbomodal;
@@ -627,5 +628,119 @@ TEST(TET10, GaussPointsInsideElement) {
         EXPECT_GE(gp(1), 0.0);
         EXPECT_GE(gp(2), 0.0);
         EXPECT_LE(gp(0) + gp(1) + gp(2), 1.0 + 1e-15);
+    }
+}
+
+// ---- Negative Jacobian Handling ----
+
+// Helper: create a TET10 with an intentionally displaced mid-edge node
+// that causes a negative Jacobian at some Gauss points.
+static TET10Element make_distorted_tet10() {
+    TET10Element elem = make_reference_tet10();
+    // Push mid-node 4 (edge 0-1) far past corner 1, folding the element
+    elem.node_coords.row(4) = Eigen::Vector3d(1.5, 0.0, 0.0);
+    return elem;
+}
+
+TEST(TET10, NegativeJacobianDetection) {
+    // Verify that a distorted element has negative Jacobian at some Gauss point
+    TET10Element elem = make_distorted_tet10();
+    bool found_negative = false;
+    for (int gp = 0; gp < 4; gp++) {
+        double xi   = TET10Element::gauss_points[gp](0);
+        double eta  = TET10Element::gauss_points[gp](1);
+        double zeta = TET10Element::gauss_points[gp](2);
+        double detJ = elem.jacobian(xi, eta, zeta).determinant();
+        if (detJ < 0.0) found_negative = true;
+    }
+    EXPECT_TRUE(found_negative) << "Distorted element should have negative Jacobian";
+}
+
+TEST(TET10, NegativeJacobianFixProducesPositiveDetJ) {
+    // Build a single-element mesh with a distorted mid-node, fix it, verify
+    Mesh mesh;
+    mesh.nodes.resize(10, 3);
+    TET10Element elem = make_distorted_tet10();
+    mesh.nodes = elem.node_coords;
+    mesh.elements.resize(1, 10);
+    mesh.elements.row(0) << 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
+
+    auto report = mesh.fix_negative_jacobians();
+    EXPECT_EQ(report.num_negative_jacobian, 1);
+    EXPECT_EQ(report.num_fixed, 1);
+    EXPECT_EQ(report.num_unfixable, 0);
+
+    // Build element from corrected mesh and verify all Gauss-point Jacobians positive
+    TET10Element fixed_elem;
+    for (int n = 0; n < 10; n++)
+        fixed_elem.node_coords.row(n) = mesh.nodes.row(n);
+
+    for (int gp = 0; gp < 4; gp++) {
+        double xi   = TET10Element::gauss_points[gp](0);
+        double eta  = TET10Element::gauss_points[gp](1);
+        double zeta = TET10Element::gauss_points[gp](2);
+        double detJ = fixed_elem.jacobian(xi, eta, zeta).determinant();
+        EXPECT_GT(detJ, 0.0)
+            << "Gauss point " << gp << " still has non-positive Jacobian after fix";
+    }
+}
+
+TEST(TET10, FixedElementStiffnessMassValid) {
+    // After fixing a distorted element, K and M should be valid (SPD)
+    Mesh mesh;
+    mesh.nodes.resize(10, 3);
+    TET10Element elem = make_distorted_tet10();
+    mesh.nodes = elem.node_coords;
+    mesh.elements.resize(1, 10);
+    mesh.elements.row(0) << 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
+
+    mesh.fix_negative_jacobians();
+
+    TET10Element fixed_elem;
+    for (int n = 0; n < 10; n++)
+        fixed_elem.node_coords.row(n) = mesh.nodes.row(n);
+
+    Material mat(200e9, 0.3, 7850);
+    Matrix30d K = fixed_elem.stiffness(mat);
+    Matrix30d M = fixed_elem.mass(mat);
+
+    // Symmetry (relaxed tolerance: the corrected element may have slightly
+    // distorted geometry, but K = B^T D B is structurally symmetric)
+    double k_scale = K.cwiseAbs().maxCoeff();
+    double m_scale = M.cwiseAbs().maxCoeff();
+    EXPECT_LT((K - K.transpose()).cwiseAbs().maxCoeff(), 1e-6 * k_scale);
+    EXPECT_LT((M - M.transpose()).cwiseAbs().maxCoeff(), 1e-6 * m_scale);
+
+    // Mass positive semi-definite
+    Eigen::SelfAdjointEigenSolver<Matrix30d> es_m(
+        (M + M.transpose()) * 0.5);
+    EXPECT_GT(es_m.eigenvalues().minCoeff(), -1e-10)
+        << "Fixed-element mass matrix has negative eigenvalue: "
+        << es_m.eigenvalues().minCoeff();
+}
+
+TEST(TET10, AbsDetJFallbackProducesValidMatrices) {
+    // Even without calling fix_negative_jacobians(), the |detJ| fallback
+    // should prevent stiffness/mass from having NaN or negative traces.
+    TET10Element elem = make_distorted_tet10();
+    Material mat(200e9, 0.3, 7850);
+
+    Matrix30d K = elem.stiffness(mat);
+    Matrix30d M = elem.mass(mat);
+
+    // No NaN/Inf
+    for (int i = 0; i < 30; i++) {
+        for (int j = 0; j < 30; j++) {
+            EXPECT_FALSE(std::isnan(K(i, j))) << "K has NaN at (" << i << "," << j << ")";
+            EXPECT_FALSE(std::isinf(K(i, j))) << "K has Inf at (" << i << "," << j << ")";
+            EXPECT_FALSE(std::isnan(M(i, j))) << "M has NaN at (" << i << "," << j << ")";
+            EXPECT_FALSE(std::isinf(M(i, j))) << "M has Inf at (" << i << "," << j << ")";
+        }
+    }
+
+    // Diagonal of M should be positive (mass must be non-negative)
+    for (int i = 0; i < 30; i++) {
+        EXPECT_GT(M(i, i), 0.0)
+            << "M diagonal at " << i << " is not positive: " << M(i, i);
     }
 }

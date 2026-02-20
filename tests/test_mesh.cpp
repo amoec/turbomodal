@@ -377,6 +377,129 @@ TEST(Mesh, LoadThrowsForBinaryFormat) {
 
 // ---- Integration: Full Workflow ----
 
+TEST(Mesh, NegJacobianFixPreservesCyclicSymmetry) {
+    // Two-element sector mesh with Z-axis rotation (24 sectors, alpha=15°).
+    // Element 1 sits on the left boundary (y=0 face), element 2 is its
+    // rotationally-equivalent copy on the right boundary (rotated by alpha).
+    // Distort a left-boundary mid-edge node, fix, and verify the matched
+    // right-boundary partner receives the rotationally equivalent correction.
+    const int N_SECTORS = 24;
+    const double alpha = 2.0 * M_PI / N_SECTORS;
+    const double ca = std::cos(alpha), sa = std::sin(alpha);
+
+    // Helper: rotate point by alpha about Z
+    auto rot = [&](const Eigen::Vector3d& p) -> Eigen::Vector3d {
+        return {ca * p(0) - sa * p(1), sa * p(0) + ca * p(1), p(2)};
+    };
+
+    // Element 1 corners (positive volume, face 0-1-3 on y=0 plane):
+    //   0: (1, 0, 0)          — left boundary
+    //   1: (2, 0, 0)          — left boundary
+    //   2: (1.5, 0.4, 0.4)   — interior
+    //   3: (1.5, 0, 1)        — left boundary
+    Eigen::Vector3d c0(1, 0, 0), c1(2, 0, 0), c2(1.5, 0.4, 0.4), c3(1.5, 0, 1);
+
+    // Mid-edge nodes (straight-sided):
+    Eigen::Vector3d m4 = (c0 + c1) * 0.5;   // (1.5, 0, 0)    — left boundary
+    Eigen::Vector3d m5 = (c1 + c2) * 0.5;   // interior
+    Eigen::Vector3d m6 = (c0 + c2) * 0.5;   // interior
+    Eigen::Vector3d m7 = (c0 + c3) * 0.5;   // (1.25, 0, 0.5) — left boundary
+    Eigen::Vector3d m8 = (c1 + c3) * 0.5;   // (1.75, 0, 0.5) — left boundary
+    Eigen::Vector3d m9 = (c2 + c3) * 0.5;   // interior
+
+    // Element 2: exact rotation of element 1 by alpha about Z
+    // Nodes 10-19 are rotated copies of nodes 0-9
+    Eigen::MatrixXd coords(20, 3);
+    coords.row(0)  = c0.transpose();
+    coords.row(1)  = c1.transpose();
+    coords.row(2)  = c2.transpose();
+    coords.row(3)  = c3.transpose();
+    coords.row(4)  = m4.transpose();
+    coords.row(5)  = m5.transpose();
+    coords.row(6)  = m6.transpose();
+    coords.row(7)  = m7.transpose();
+    coords.row(8)  = m8.transpose();
+    coords.row(9)  = m9.transpose();
+    for (int i = 0; i < 10; i++) {
+        Eigen::Vector3d p = coords.row(i).transpose();
+        coords.row(10 + i) = rot(p).transpose();
+    }
+
+    Eigen::MatrixXi elems(2, 10);
+    elems.row(0) << 0, 1, 2, 3, 4, 5, 6, 7, 8, 9;
+    elems.row(1) << 10, 11, 12, 13, 14, 15, 16, 17, 18, 19;
+
+    // Left boundary: nodes on the y=0 face (elem 1's boundary face)
+    // Right boundary: rotated copies
+    NodeSet left_ns, right_ns;
+    left_ns.name = "left_boundary";
+    left_ns.node_ids = {0, 1, 3, 4, 7, 8};
+    right_ns.name = "right_boundary";
+    right_ns.node_ids = {10, 11, 13, 14, 17, 18};
+
+    Mesh mesh;
+    mesh.load_from_arrays(coords, elems, {left_ns, right_ns}, N_SECTORS,
+                          /*rotation_axis=*/2);
+
+    ASSERT_FALSE(mesh.matched_pairs.empty());
+    ASSERT_EQ(mesh.matched_pairs.size(), 6u);
+
+    // Now distort left-boundary mid-node 4 = mid(0,1) by pushing it far off
+    // the edge.  Original: (1.5, 0, 0).  Pushed to (0.5, 0, 0).
+    // This happens AFTER matching, simulating a CAD mesh defect discovered
+    // post-import (matching was done on the nominal geometry).
+    mesh.nodes.row(4) = Eigen::Vector3d(0.5, 0, 0).transpose();
+
+    // Record pre-fix position of partner node 14 (matched to distorted node 4)
+    Eigen::Vector3d partner_before = mesh.nodes.row(14).transpose();
+
+    // Fix negative Jacobians
+    auto report = mesh.fix_negative_jacobians();
+
+    EXPECT_GE(report.num_negative_jacobian, 1);
+    EXPECT_EQ(report.num_unfixable, 0);
+    EXPECT_GE(report.num_fixed, 1);
+
+    // Key check: all matched boundary pairs must still satisfy
+    //   right_pos == R(alpha) * left_pos
+    for (const auto& [left_id, right_id] : mesh.matched_pairs) {
+        Eigen::Vector3d left_pos = mesh.nodes.row(left_id).transpose();
+        Eigen::Vector3d right_pos = mesh.nodes.row(right_id).transpose();
+        Eigen::Vector3d expected_right = rot(left_pos);
+
+        double err = (right_pos - expected_right).norm();
+        double scale = std::max(left_pos.norm(), 1e-10);
+        EXPECT_LT(err / scale, 1e-10)
+            << "Cyclic symmetry broken for pair (" << left_id << ", "
+            << right_id << "): right=" << right_pos.transpose()
+            << " expected=" << expected_right.transpose();
+    }
+
+    // Verify node 4 was actually moved (not left at distorted position)
+    double node4_moved = (mesh.nodes.row(4).transpose() -
+                          Eigen::Vector3d(0.5, 0, 0)).norm();
+    EXPECT_GT(node4_moved, 0.01) << "Node 4 should have been corrected";
+
+    // Verify partner node 14 was also moved (cyclic propagation happened)
+    double node14_moved = (mesh.nodes.row(14).transpose() -
+                           partner_before).norm();
+    EXPECT_GT(node14_moved, 0.01)
+        << "Partner node 14 should have been corrected to maintain symmetry";
+
+    // Verify all Gauss-point Jacobians are now positive in element 1
+    TET10Element elem;
+    for (int n = 0; n < 10; n++) {
+        elem.node_coords.row(n) = mesh.nodes.row(mesh.elements(0, n));
+    }
+    for (int gp = 0; gp < 4; gp++) {
+        double xi   = TET10Element::gauss_points[gp](0);
+        double eta  = TET10Element::gauss_points[gp](1);
+        double zeta = TET10Element::gauss_points[gp](2);
+        double detJ = elem.jacobian(xi, eta, zeta).determinant();
+        EXPECT_GT(detJ, 0.0) << "Gauss point " << gp << " has detJ=" << detJ;
+    }
+}
+
 TEST(Mesh, FullWorkflowLoadIdentifyMatch) {
     Mesh mesh;
     mesh.load_from_gmsh(test_data_path("wedge_sector.msh"));
