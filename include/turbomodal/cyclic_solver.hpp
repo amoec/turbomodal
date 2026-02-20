@@ -27,6 +27,12 @@ struct FluidConfig {
     double speed_of_sound = 0.0;   // m/s
 };
 
+// Stationary-frame FW/BW split result (computed from rotating-frame eigenvalues)
+struct StationaryFrameResult {
+    Eigen::VectorXd frequencies;     // Hz, sorted ascending
+    Eigen::VectorXi whirl_direction; // +1 FW, -1 BW, 0 standing
+};
+
 class CyclicSymmetrySolver {
 public:
     CyclicSymmetrySolver(const Mesh& mesh, const Material& mat,
@@ -49,6 +55,12 @@ public:
                           const std::vector<ModalResult>& results_at_rpm);
     void export_mode_shape_vtk(const std::string& filename,
                                 const ModalResult& result, int mode_index);
+
+    // Convert rotating-frame modal result to stationary-frame FW/BW frequencies.
+    // For k=0 and k=N/2: no split, whirl=0 (standing waves).
+    // For 0 < k < N/2: each mode splits into FW and BW, returning 2*N modes.
+    static StationaryFrameResult compute_stationary_frame(
+        const ModalResult& rotating_result, int num_sectors);
 
     // Apply cyclic symmetry boundary conditions for harmonic index k
     // Returns reduced (complex) K_k and M_k matrices

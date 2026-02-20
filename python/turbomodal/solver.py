@@ -107,12 +107,7 @@ def solve(
     if verbose >= DETAILED:
         for r in results:
             freqs = ", ".join(f"{f:.1f}" for f in r.frequencies[:4])
-            whirl_counts = ""
-            if rpm > 0:
-                n_fw = int(np.sum(r.whirl_direction > 0))
-                n_bw = int(np.sum(r.whirl_direction < 0))
-                whirl_counts = f"  ({n_fw} FW, {n_bw} BW)"
-            print(f"    ND={r.harmonic_index:2d}: [{freqs}] Hz{whirl_counts}")
+            print(f"    ND={r.harmonic_index:2d}: [{freqs}] Hz (rotating frame)")
 
     return results
 
@@ -211,21 +206,27 @@ def rpm_sweep(
 
 def campbell_data(
     results: list[list[ModalResult]],
+    num_sectors: int = 0,
 ) -> dict[str, np.ndarray]:
     """Extract Campbell diagram data from RPM sweep results.
+
+    Converts rotating-frame eigenfrequencies to stationary-frame FW/BW
+    frequencies for the Campbell diagram.
 
     Parameters
     ----------
     results : output from rpm_sweep()
+    num_sectors : number of sectors (needed for FW/BW splitting).
+        If 0, inferred from max harmonic index.
 
     Returns
     -------
     Dictionary with keys:
         'rpm' : (N,) array of RPM values
-        'frequencies' : (N, H, M) array of frequencies in Hz
+        'frequencies' : (N, H, M) array of frequencies in Hz (stationary frame)
         'harmonic_index' : (H,) array of harmonic indices
         'whirl_direction' : (N, H, M) array of whirl directions (+1=FW, -1=BW, 0=standing)
-    where N=number of RPM points, H=number of harmonics, M=number of modes
+    where N=number of RPM points, H=number of harmonics, M=max modes per harmonic
     """
     if not results:
         return {
@@ -246,11 +247,19 @@ def campbell_data(
     n_harmonics = len(harmonic_index)
     h_to_idx = {h: i for i, h in enumerate(harmonic_index)}
 
-    # Find max modes
-    n_modes = 0
+    # Infer num_sectors from max harmonic if not provided
+    if num_sectors <= 0:
+        max_k = int(harmonic_index[-1]) if len(harmonic_index) > 0 else 0
+        num_sectors = 2 * max_k  # best guess: max_k = N/2
+
+    max_k = num_sectors // 2
+
+    # Find max modes after FW/BW splitting (2x for 0 < k < N/2)
+    n_modes_rot = 0
     for row in results:
         for r in row:
-            n_modes = max(n_modes, len(r.frequencies))
+            n_modes_rot = max(n_modes_rot, len(r.frequencies))
+    n_modes = 2 * n_modes_rot  # FW+BW doubles the count
 
     rpm = np.zeros(n_rpm)
     frequencies = np.full((n_rpm, n_harmonics, n_modes), np.nan)
@@ -259,13 +268,35 @@ def campbell_data(
     for i in range(n_rpm):
         if results[i]:
             rpm[i] = results[i][0].rpm
+        omega = rpm[i] * 2.0 * np.pi / 60.0
+
         for r in results[i]:
             h_idx = h_to_idx.get(r.harmonic_index)
             if h_idx is None:
                 continue
-            nm = min(n_modes, len(r.frequencies))
-            frequencies[i, h_idx, :nm] = r.frequencies[:nm]
-            whirl[i, h_idx, :nm] = r.whirl_direction[:nm]
+
+            k = r.harmonic_index
+            f_rot = np.asarray(r.frequencies)
+            nm = len(f_rot)
+
+            if omega > 0 and 0 < k < max_k:
+                k_omega_hz = k * omega / (2.0 * np.pi)
+                fw = f_rot + k_omega_hz
+                bw = np.abs(f_rot - k_omega_hz)
+                all_f = np.empty(2 * nm)
+                all_w = np.empty(2 * nm, dtype=np.int32)
+                all_f[0::2] = fw
+                all_f[1::2] = bw
+                all_w[0::2] = 1
+                all_w[1::2] = -1
+                order = np.argsort(all_f)
+                n_out = min(n_modes, 2 * nm)
+                frequencies[i, h_idx, :n_out] = all_f[order][:n_out]
+                whirl[i, h_idx, :n_out] = all_w[order][:n_out]
+            else:
+                n_out = min(n_modes, nm)
+                frequencies[i, h_idx, :n_out] = f_rot[:n_out]
+                # whirl stays 0 (standing)
 
     return {
         "rpm": rpm,

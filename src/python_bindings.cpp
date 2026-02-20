@@ -196,6 +196,12 @@ PYBIND11_MODULE(_core, m) {
                    " n_modes=" + std::to_string(r.frequencies.size()) + ">";
         });
 
+    // --- StationaryFrameResult ---
+    py::class_<StationaryFrameResult>(m, "StationaryFrameResult")
+        .def(py::init<>())
+        .def_readwrite("frequencies", &StationaryFrameResult::frequencies)
+        .def_readwrite("whirl_direction", &StationaryFrameResult::whirl_direction);
+
     // --- FluidConfig ---
     py::enum_<FluidConfig::Type>(m, "FluidType")
         .value("NONE", FluidConfig::Type::NONE)
@@ -232,6 +238,10 @@ PYBIND11_MODULE(_core, m) {
              py::arg("max_threads") = 0,
              "Solve over a range of RPM values",
              py::call_guard<py::gil_scoped_release>())
+        .def_static("compute_stationary_frame",
+             &CyclicSymmetrySolver::compute_stationary_frame,
+             py::arg("rotating_result"), py::arg("num_sectors"),
+             "Convert rotating-frame result to stationary-frame FW/BW frequencies")
         .def("export_campbell_csv", &CyclicSymmetrySolver::export_campbell_csv,
              py::arg("filename"), py::arg("results"))
         .def("export_zzenf_csv", &CyclicSymmetrySolver::export_zzenf_csv,

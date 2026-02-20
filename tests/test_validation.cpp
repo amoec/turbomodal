@@ -586,24 +586,18 @@ TEST(Validation, CentrifugalStiffeningEffect) {
                           << std::setw(13) << f5k << " | "
                           << std::setw(14) << stiff_pct << " |     N/A |    N/A\n";
             } else {
-                // k>0: recover rotating-frame frequency from FW mode
-                // FW = f_rot + k*omega_hz, so f_rot = FW - k*omega_hz
+                // k>0: frequencies are already in rotating frame
                 double k_omega_hz = nd * omega_hz;
-                int n_modes = static_cast<int>(r5k->frequencies.size());
-                // Find first FW frequency
-                double f_fw = -1, f_bw = -1;
-                for (int m = 0; m < n_modes; m++) {
-                    if (r5k->whirl_direction(m) > 0 && f_fw < 0) f_fw = r5k->frequencies(m);
-                    if (r5k->whirl_direction(m) < 0 && f_bw < 0) f_bw = r5k->frequencies(m);
-                }
-                double f_rot = (f_fw >= 0) ? f_fw - k_omega_hz : r5k->frequencies(0);
+                double f_rot = r5k->frequencies(0);
                 double stiff_pct = 100.0 * (f_rot - f0) / f0;
+                double f_bw = std::abs(f_rot - k_omega_hz);
+                double f_fw = f_rot + k_omega_hz;
                 std::cout << "  " << std::setw(3) << nd << " | "
                           << std::setw(11) << f0 << " | "
                           << std::setw(13) << f_rot << " | "
                           << std::setw(14) << stiff_pct << " | "
-                          << std::setw(7) << (f_bw >= 0 ? f_bw : 0.0) << " | "
-                          << std::setw(6) << (f_fw >= 0 ? f_fw : 0.0) << "\n";
+                          << std::setw(7) << f_bw << " | "
+                          << std::setw(6) << f_fw << "\n";
             }
         }
     }
@@ -634,11 +628,13 @@ TEST(Validation, CentrifugalStiffeningEffect) {
                 EXPECT_GT(f5k_first, f0_first * 0.95)
                     << "ND=0 frequency should not decrease at 5000 RPM";
             } else {
-                // k>0: FW mode (highest of first pair) should exceed 0 RPM value
-                // The FW mode gains k*omega/(2*pi) from Coriolis + centrifugal stiffening
-                int n_modes = static_cast<int>(r5k->frequencies.size());
-                double f5k_max = r5k->frequencies(std::min(1, n_modes - 1));
-                EXPECT_GT(f5k_max, f0_first)
+                // k>0: rotating-frame frequency should reflect centrifugal stiffening
+                // The rotating-frame frequency plus k*omega/(2*pi) = FW, which should
+                // exceed the 0 RPM value
+                double f5k_rot = r5k->frequencies(0);
+                double k_omega_hz = nd * 5000.0 / 60.0;
+                double f_fw = f5k_rot + k_omega_hz;
+                EXPECT_GT(f_fw, f0_first)
                     << "ND=" << nd << " FW frequency should exceed 0 RPM value";
             }
         }
@@ -767,8 +763,8 @@ TEST(Validation, FMMWhiteheadBound) {
 }
 
 TEST(Validation, CoriolisFWBWSplitting) {
-    // T3: For k>0 at non-zero RPM, modes should split into FW and BW pairs
-    // Forward whirl has higher frequency, backward whirl has lower (in stationary frame)
+    // T3: For k>0 at non-zero RPM, compute_stationary_frame should produce
+    // FW/BW pairs.  solve_at_rpm returns rotating-frame frequencies.
     Mesh mesh = load_leissa_mesh();
     Material mat(200e9, 0.33, 7850);
 
@@ -779,39 +775,47 @@ TEST(Validation, CoriolisFWBWSplitting) {
 
     std::cout << "\n=== Coriolis FW/BW Splitting Validation ===\n";
     std::cout << "  RPM=" << rpm << "\n\n";
-    std::cout << "  ND  | Mode | Freq (Hz) | Whirl | Expected\n";
-    std::cout << "  ----|------|-----------|-------|----------\n";
+    std::cout << "  ND  | Mode | Rot (Hz) | Stat (Hz) | Whirl\n";
+    std::cout << "  ----|------|----------|-----------|------\n";
 
     ASSERT_FALSE(results.empty());
 
     for (const auto& r : results) {
         int k = r.harmonic_index;
+        // Rotating-frame result: whirl_direction should always be 0
+        for (int m = 0; m < r.whirl_direction.size(); m++) {
+            EXPECT_EQ(r.whirl_direction(m), 0)
+                << "k=" << k << " rotating-frame mode should have whirl=0";
+        }
+
         if (k == 0) {
             // k=0: standing waves, no splitting
-            for (int m = 0; m < std::min(2, (int)r.frequencies.size()); m++) {
+            auto sf = CyclicSymmetrySolver::compute_stationary_frame(r, mesh.num_sectors);
+            for (int m = 0; m < std::min(2, (int)sf.frequencies.size()); m++) {
                 std::cout << std::fixed << std::setprecision(2);
                 std::cout << "  " << std::setw(3) << k << " | "
                           << std::setw(4) << m << " | "
-                          << std::setw(9) << r.frequencies(m) << " | "
-                          << std::setw(5) << r.whirl_direction(m) << " | standing\n";
-                EXPECT_EQ(r.whirl_direction(m), 0)
-                    << "k=0 modes should be standing (whirl=0)";
+                          << std::setw(8) << r.frequencies(m) << " | "
+                          << std::setw(9) << sf.frequencies(m) << " | standing\n";
+                EXPECT_EQ(sf.whirl_direction(m), 0);
             }
         } else if (k > 0 && k < mesh.num_sectors / 2) {
-            // k>0: FW/BW splitting
-            int n_modes = static_cast<int>(r.frequencies.size());
+            // k>0: stationary-frame conversion should produce FW/BW
+            auto sf = CyclicSymmetrySolver::compute_stationary_frame(r, mesh.num_sectors);
+            EXPECT_EQ(sf.frequencies.size(), 2 * r.frequencies.size())
+                << "k=" << k << " should double modes in stationary frame";
+
             int fw_count = 0, bw_count = 0;
-            for (int m = 0; m < std::min(4, n_modes); m++) {
-                const char* label = r.whirl_direction(m) > 0 ? "FW" :
-                                   (r.whirl_direction(m) < 0 ? "BW" : "??");
+            for (int m = 0; m < std::min(4, (int)sf.frequencies.size()); m++) {
+                const char* label = sf.whirl_direction(m) > 0 ? "FW" :
+                                   (sf.whirl_direction(m) < 0 ? "BW" : "??");
                 std::cout << "  " << std::setw(3) << k << " | "
                           << std::setw(4) << m << " | "
-                          << std::setw(9) << r.frequencies(m) << " | "
-                          << std::setw(5) << r.whirl_direction(m) << " | " << label << "\n";
-                if (r.whirl_direction(m) > 0) fw_count++;
-                if (r.whirl_direction(m) < 0) bw_count++;
+                          << std::setw(8) << (m/2 < r.frequencies.size() ? r.frequencies(m/2) : 0.0) << " | "
+                          << std::setw(9) << sf.frequencies(m) << " | " << label << "\n";
+                if (sf.whirl_direction(m) > 0) fw_count++;
+                if (sf.whirl_direction(m) < 0) bw_count++;
             }
-            // Should have both FW and BW modes
             EXPECT_GT(fw_count, 0)
                 << "k=" << k << " should have forward whirl modes";
             EXPECT_GT(bw_count, 0)

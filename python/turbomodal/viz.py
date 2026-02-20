@@ -784,11 +784,14 @@ def plot_campbell(
     figsize: tuple[float, float] = (12, 8),
     confidence_bands: dict | None = None,
     crossing_markers: bool = False,
+    num_sectors: int = 0,
 ):
     """Plot Campbell diagram from RPM sweep results.
 
     Uses MAC (Modal Assurance Criterion) to track modes across RPM points,
     ensuring smooth frequency lines even through mode crossings/veerings.
+    Rotating-frame eigenfrequencies are converted to stationary-frame
+    FW (solid) and BW (dashed) lines.
 
     Parameters
     ----------
@@ -796,6 +799,7 @@ def plot_campbell(
     engine_orders : engine order lines to overlay (e.g. [1, 2, 24])
     max_freq : maximum frequency for y-axis (None = auto)
     figsize : matplotlib figure size
+    num_sectors : number of sectors (0 = infer from max harmonic index)
 
     Returns
     -------
@@ -809,6 +813,12 @@ def plot_campbell(
     n_rpm = len(results)
     if n_rpm == 0:
         return fig
+
+    # Infer num_sectors if not provided
+    if num_sectors <= 0:
+        max_nd = max(r.harmonic_index for row in results for r in row)
+        num_sectors = 2 * max_nd  # best guess: max ND = N/2
+    max_k = num_sectors // 2
 
     # Collect all distinct nodal diameters across all RPM points
     all_nds = set()
@@ -845,10 +855,12 @@ def plot_campbell(
             continue
         n_modes = len(first_r.frequencies)
 
+        # Determine if this harmonic needs FW/BW splitting
+        needs_split = (0 < nd < max_k)
+
         for track_id in range(n_modes):
             track_rpms = []
-            track_freqs = []
-            track_whirls = []
+            track_rot_freqs = []
 
             for i in range(n_rpm):
                 if i >= len(perm):
@@ -856,50 +868,43 @@ def plot_campbell(
                 mode_idx = perm[i][track_id] if track_id < len(perm[i]) else -1
                 if mode_idx < 0:
                     track_rpms.append(rpms[i])
-                    track_freqs.append(np.nan)
-                    track_whirls.append(0)
+                    track_rot_freqs.append(np.nan)
                     continue
 
                 r = _find_harmonic(results[i], nd)
-                if r is None:
+                if r is None or mode_idx >= len(r.frequencies):
                     track_rpms.append(rpms[i])
-                    track_freqs.append(np.nan)
-                    track_whirls.append(0)
+                    track_rot_freqs.append(np.nan)
                     continue
 
-                if mode_idx < len(r.frequencies):
-                    track_rpms.append(rpms[i])
-                    track_freqs.append(r.frequencies[mode_idx])
-                    track_whirls.append(r.whirl_direction[mode_idx])
-                else:
-                    track_rpms.append(rpms[i])
-                    track_freqs.append(np.nan)
-                    track_whirls.append(0)
+                track_rpms.append(rpms[i])
+                track_rot_freqs.append(r.frequencies[mode_idx])
 
             track_rpms = np.array(track_rpms)
-            track_freqs = np.array(track_freqs)
-            track_whirls = np.array(track_whirls)
-
-            # Determine dominant whirl direction for this track
-            valid = ~np.isnan(track_freqs)
+            track_rot_freqs = np.array(track_rot_freqs)
+            valid = ~np.isnan(track_rot_freqs)
             if not np.any(valid):
                 continue
 
-            whirl_vals = track_whirls[valid]
-            n_fw = np.sum(whirl_vals > 0)
-            n_bw = np.sum(whirl_vals < 0)
+            if needs_split:
+                # Compute stationary-frame FW and BW from rotating-frame
+                k_omega = nd * track_rpms / 60.0
+                fw_freqs = track_rot_freqs + k_omega
+                bw_freqs = np.abs(track_rot_freqs - k_omega)
 
-            if n_fw > n_bw:
-                linestyle = "-"
-            elif n_bw > n_fw:
-                linestyle = "--"
+                label_fw = f"ND={nd}" if track_id == 0 else None
+                ax.plot(track_rpms[valid], fw_freqs[valid], "-",
+                        color=color, linewidth=1.2, label=label_fw,
+                        marker=".", markersize=3)
+                ax.plot(track_rpms[valid], bw_freqs[valid], "--",
+                        color=color, linewidth=1.0,
+                        marker=".", markersize=2)
             else:
-                linestyle = "-"
-
-            label = f"ND={nd}" if track_id == 0 else None
-            ax.plot(track_rpms[valid], track_freqs[valid], linestyle,
-                    color=color, linewidth=1.2, label=label,
-                    marker=".", markersize=3)
+                # k=0 or k=N/2: standing waves, plot single line
+                label = f"ND={nd}" if track_id == 0 else None
+                ax.plot(track_rpms[valid], track_rot_freqs[valid], "-",
+                        color=color, linewidth=1.2, label=label,
+                        marker=".", markersize=3)
 
             # D11: Confidence bands
             if confidence_bands is not None:
@@ -1042,11 +1047,7 @@ def plot_zzenf(
 
         for m_idx in range(len(result.frequencies)):
             freq = result.frequencies[m_idx]
-            whirl = result.whirl_direction[m_idx]
-
-            marker = "^" if whirl > 0 else ("v" if whirl < 0 else "o")
-            color = "tab:blue" if whirl > 0 else ("tab:red" if whirl < 0 else "tab:gray")
-            ax.plot(nd_folded, freq, marker, color=color, markersize=6)
+            ax.plot(nd_folded, freq, "o", color="tab:blue", markersize=6)
 
     ax.set_xlabel("Nodal Diameter")
     ax.set_ylabel("Frequency (Hz)")
@@ -1060,12 +1061,8 @@ def plot_zzenf(
     # Legend
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker="^", color="tab:blue", linestyle="None",
-               markersize=8, label="Forward whirl"),
-        Line2D([0], [0], marker="v", color="tab:red", linestyle="None",
-               markersize=8, label="Backward whirl"),
-        Line2D([0], [0], marker="o", color="tab:gray", linestyle="None",
-               markersize=8, label="Standing wave"),
+        Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
+               markersize=8, label="Rotating frame"),
     ]
     ax.legend(handles=legend_elements, loc="upper right")
     fig.tight_layout()

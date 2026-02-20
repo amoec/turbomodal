@@ -223,6 +223,50 @@ double CyclicSymmetrySolver::added_mass_factor(int harmonic_index) const {
         fluid_.disk_thickness, fluid_.disk_radius);
 }
 
+StationaryFrameResult CyclicSymmetrySolver::compute_stationary_frame(
+    const ModalResult& rotating_result, int num_sectors) {
+
+    StationaryFrameResult sf;
+    int k = rotating_result.harmonic_index;
+    int max_k = num_sectors / 2;
+    double omega = rotating_result.rpm * 2.0 * PI / 60.0;
+    int num_modes = static_cast<int>(rotating_result.frequencies.size());
+
+    if (omega > 0.0 && k > 0 && k < max_k) {
+        double k_omega_hz = k * omega / (2.0 * PI);
+
+        Eigen::VectorXd all_freqs(2 * num_modes);
+        Eigen::VectorXi all_whirl(2 * num_modes);
+
+        for (int m = 0; m < num_modes; m++) {
+            all_freqs(2 * m) = rotating_result.frequencies(m) + k_omega_hz;
+            all_whirl(2 * m) = 1;   // FW
+            all_freqs(2 * m + 1) = std::abs(rotating_result.frequencies(m) - k_omega_hz);
+            all_whirl(2 * m + 1) = -1;  // BW
+        }
+
+        // Sort by frequency
+        std::vector<int> sort_idx(2 * num_modes);
+        std::iota(sort_idx.begin(), sort_idx.end(), 0);
+        std::sort(sort_idx.begin(), sort_idx.end(), [&](int a, int b) {
+            return all_freqs(a) < all_freqs(b);
+        });
+
+        sf.frequencies.resize(2 * num_modes);
+        sf.whirl_direction.resize(2 * num_modes);
+        for (int i = 0; i < 2 * num_modes; i++) {
+            sf.frequencies(i) = all_freqs(sort_idx[i]);
+            sf.whirl_direction(i) = all_whirl(sort_idx[i]);
+        }
+    } else {
+        // k=0, k=N/2, or omega=0: no splitting
+        sf.frequencies = rotating_result.frequencies;
+        sf.whirl_direction = Eigen::VectorXi::Zero(num_modes);
+    }
+
+    return sf;
+}
+
 Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     // Solve K * u = F_centrifugal with k=0 cyclic BCs and hub constraints.
     // Cyclic BCs are essential: without them the sector boundaries are free,
@@ -636,53 +680,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 result.frequencies *= freq_ratio;
             }
 
-            // FW/BW whirl direction for rotating case
+            // Frequencies are kept in the rotating frame for all harmonics.
+            // FW/BW stationary-frame splitting is computed on demand (e.g.
+            // in export_campbell_csv / compute_stationary_frame).
             int num_modes = static_cast<int>(result.frequencies.size());
             result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
-
-            if (omega > 0.0 && k > 0 && k < max_k) {
-                double k_omega_hz = k * omega / (2.0 * PI);
-
-                Eigen::VectorXd fw_freqs(num_modes);
-                Eigen::VectorXd bw_freqs(num_modes);
-
-                for (int m = 0; m < num_modes; m++) {
-                    fw_freqs(m) = result.frequencies(m) + k_omega_hz;
-                    bw_freqs(m) = std::abs(result.frequencies(m) - k_omega_hz);
-                }
-
-                Eigen::VectorXd all_freqs(2 * num_modes);
-                Eigen::VectorXi all_whirl(2 * num_modes);
-                Eigen::MatrixXcd all_modes(result.mode_shapes.rows(), 2 * num_modes);
-
-                for (int m = 0; m < num_modes; m++) {
-                    all_freqs(2 * m) = fw_freqs(m);
-                    all_whirl(2 * m) = 1;
-                    all_modes.col(2 * m) = result.mode_shapes.col(m);
-
-                    all_freqs(2 * m + 1) = bw_freqs(m);
-                    all_whirl(2 * m + 1) = -1;
-                    all_modes.col(2 * m + 1) = result.mode_shapes.col(m);
-                }
-
-                std::vector<int> sort_idx(2 * num_modes);
-                std::iota(sort_idx.begin(), sort_idx.end(), 0);
-                std::sort(sort_idx.begin(), sort_idx.end(), [&](int a, int b) {
-                    return all_freqs(a) < all_freqs(b);
-                });
-
-                result.frequencies.resize(2 * num_modes);
-                result.whirl_direction.resize(2 * num_modes);
-                result.mode_shapes.resize(result.mode_shapes.rows(), 2 * num_modes);
-
-                for (int i = 0; i < 2 * num_modes; i++) {
-                    result.frequencies(i) = all_freqs(sort_idx[i]);
-                    result.whirl_direction(i) = all_whirl(sort_idx[i]);
-                    result.mode_shapes.col(i) = all_modes.col(sort_idx[i]);
-                }
-            } else if (omega > 0.0 && (k == 0 || k == max_k)) {
-                result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
-            }
 
             // Mode shape expansion: T(k) = S_k * T0
             {
@@ -794,10 +796,11 @@ void CyclicSymmetrySolver::export_campbell_csv(
 
     for (const auto& rpm_results : results) {
         for (const auto& r : rpm_results) {
-            for (int m = 0; m < r.frequencies.size(); m++) {
-                int whirl = (r.whirl_direction.size() > m) ? r.whirl_direction(m) : 0;
+            auto sf = compute_stationary_frame(r, mesh_.num_sectors);
+            for (int m = 0; m < sf.frequencies.size(); m++) {
+                int whirl = (sf.whirl_direction.size() > m) ? sf.whirl_direction(m) : 0;
                 file << r.rpm << "," << r.harmonic_index << ","
-                     << (m + 1) << "," << r.frequencies(m) << ","
+                     << (m + 1) << "," << sf.frequencies(m) << ","
                      << whirl << "\n";
             }
         }
