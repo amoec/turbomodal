@@ -232,6 +232,9 @@ Matrix30d TET10Element::stiffness(const Material& mat) const {
 Matrix30d TET10Element::mass(const Material& mat) const {
     Matrix30d Me = Matrix30d::Zero();
 
+    // 4-point Gauss quadrature (degree 2) for mass matrix.
+    // Under-integrates the degree-4 integrand N^T*N but guarantees
+    // a positive-definite mass matrix (all weights positive).
     for (int gp = 0; gp < 4; gp++) {
         double xi   = gauss_points[gp](0);
         double eta  = gauss_points[gp](1);

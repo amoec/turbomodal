@@ -12,6 +12,9 @@ Vector30d RotatingEffects::centrifugal_load(
     //
     // More generally, r_perp = pos - (pos . axis_hat) * axis_hat
     // where pos is the physical position at the Gauss point.
+    //
+    // Integrand is N^T * r_perp (degree 3): 4-point Gauss (degree 2) for
+    // positive weights; slight under-integration is acceptable.
 
     Eigen::Vector3d axis_hat = axis.normalized();
     Vector30d Fe = Vector30d::Zero();
@@ -141,6 +144,9 @@ Matrix30d RotatingEffects::spin_softening(
     // K_omega = integral(rho * N_mat^T * Omega_mat * N_mat * dV)
     // where Omega_mat = omega^2 * (I - a*a^T) projects onto the plane
     // perpendicular to the rotation axis a.
+    //
+    // Integrand is N^T * Omega * N (degree 4): 4-point Gauss (degree 2)
+    // for positive weights; slight under-integration is acceptable.
 
     Eigen::Vector3d a = axis.normalized();
     double omega2 = omega * omega;
@@ -182,6 +188,9 @@ Matrix30d RotatingEffects::gyroscopic(
     //
     // The full Coriolis term in the equation of motion is 2*omega*G,
     // but this function returns the base G matrix without the 2*omega factor.
+    //
+    // Integrand is N^T * [a×] * N (degree 4): 4-point Gauss (degree 2)
+    // for positive weights; slight under-integration is acceptable.
 
     Eigen::Vector3d a = axis.normalized();
     Eigen::Matrix3d Omega_cross;

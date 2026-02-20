@@ -104,6 +104,7 @@ add_library(turbomodal_core STATIC
   src/assembler.cpp
   src/rotating_effects.cpp
   src/modal_solver.cpp
+  src/hermitian_lanczos.cpp
   src/cyclic_solver.cpp
   src/added_mass.cpp
   src/damping.cpp

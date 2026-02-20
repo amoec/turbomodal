@@ -284,8 +284,8 @@ TEST(TET10, MassSymmetry) {
 }
 
 TEST(TET10, MassPositiveSemiDefinite) {
-    // 4-point Gauss under-integrates the quartic mass integrand (N^T*N),
-    // so eigenvalues may be very slightly negative (~1e-14). Accept this.
+    // 4-point Gauss under-integrates the quartic mass integrand (N^T*N)
+    // but all weights are positive, so M is positive semi-definite.
     TET10Element elem = make_reference_tet10();
     Material mat(200e9, 0.3, 7850);
     Matrix30d M = elem.mass(mat);
