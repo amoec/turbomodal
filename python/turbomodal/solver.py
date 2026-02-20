@@ -59,6 +59,7 @@ def solve(
     harmonic_indices: list[int] | None = None,
     max_threads: int = 0,
     hub_constraint: str = "fixed",
+    include_coriolis: bool = False,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -76,6 +77,9 @@ def solve(
     hub_constraint : ``"fixed"`` clamps all hub DOFs (default).  ``"free"``
         leaves the hub unconstrained (free-rotating assembly, no shaft
         contact).  Centrifugal prestress is disabled when hub is free.
+    include_coriolis : if True, include gyroscopic (Coriolis) coupling via
+        Lancaster linearization of the QEP.  Produces mode-shape-dependent
+        FW/BW splitting in the rotating frame for k > 0.
 
     Returns
     -------
@@ -90,15 +94,16 @@ def solve(
     if verbose >= PROGRESS:
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
+        coriolis_str = " [Coriolis]" if include_coriolis else ""
         print(
-            f"Solving at {rpm:.0f} RPM  ({mesh.num_nodes()} nodes, "
+            f"Solving at {rpm:.0f} RPM{coriolis_str}  ({mesh.num_nodes()} nodes, "
             f"{mesh.num_elements()} elements, {mesh.num_sectors} sectors, "
             f"{nd_str}, {num_modes} modes/ND)"
         )
 
     t0 = time.perf_counter()
     solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
-    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads)
+    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis)
     elapsed = time.perf_counter() - t0
 
     if verbose >= PROGRESS:
@@ -122,6 +127,7 @@ def rpm_sweep(
     harmonic_indices: list[int] | None = None,
     max_threads: int = 0,
     hub_constraint: str = "fixed",
+    include_coriolis: bool = False,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -138,6 +144,8 @@ def rpm_sweep(
     hub_constraint : ``"fixed"`` clamps all hub DOFs (default).  ``"free"``
         leaves the hub unconstrained (free-rotating assembly, no shaft
         contact).  Centrifugal prestress is disabled when hub is free.
+    include_coriolis : if True, include gyroscopic (Coriolis) coupling via
+        Lancaster linearization of the QEP.
 
     Returns
     -------
@@ -155,7 +163,8 @@ def rpm_sweep(
     if verbose >= PROGRESS:
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
-        print(f"RPM sweep: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
+        coriolis_str = " [Coriolis]" if include_coriolis else ""
+        print(f"RPM sweep{coriolis_str}: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
         print(
             f"  Mesh: {mesh.num_nodes()} nodes, {mesh.num_elements()} elements, "
             f"{mesh.num_sectors} sectors"
@@ -169,7 +178,8 @@ def rpm_sweep(
 
     for i, rpm in enumerate(rpm_arr):
         t0 = time.perf_counter()
-        results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads)
+        results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
+                                       include_coriolis)
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 
@@ -277,9 +287,23 @@ def campbell_data(
 
             k = r.harmonic_index
             f_rot = np.asarray(r.frequencies)
+            whirl_rot = np.asarray(r.whirl_direction)
             nm = len(f_rot)
 
-            if omega > 0 and 0 < k < max_k:
+            # Check if Coriolis splitting is already present
+            has_coriolis = np.any(whirl_rot != 0)
+
+            if has_coriolis and omega > 0 and k > 0:
+                # Coriolis modes: each mode already has FW/BW designation.
+                # Convert to stationary frame per-mode.
+                k_omega_hz = k * omega / (2.0 * np.pi)
+                stat_f = np.abs(f_rot + whirl_rot * k_omega_hz)
+                order = np.argsort(stat_f)
+                n_out = min(n_modes, nm)
+                frequencies[i, h_idx, :n_out] = stat_f[order][:n_out]
+                whirl[i, h_idx, :n_out] = whirl_rot[order][:n_out]
+            elif omega > 0 and 0 < k < max_k:
+                # Kinematic splitting: duplicate each mode into FW + BW
                 k_omega_hz = k * omega / (2.0 * np.pi)
                 fw = f_rot + k_omega_hz
                 bw = np.abs(f_rot - k_omega_hz)

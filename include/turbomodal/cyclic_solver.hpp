@@ -42,12 +42,14 @@ public:
     std::vector<ModalResult> solve_at_rpm(
         double rpm, int num_modes_per_harmonic,
         const std::vector<int>& harmonic_indices = {},
-        int max_threads = 0);
+        int max_threads = 0,
+        bool include_coriolis = false);
 
     std::vector<std::vector<ModalResult>> solve_rpm_sweep(
         const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
         const std::vector<int>& harmonic_indices = {},
-        int max_threads = 0);
+        int max_threads = 0,
+        bool include_coriolis = false);
 
     void export_campbell_csv(const std::string& filename,
                              const std::vector<std::vector<ModalResult>>& results);

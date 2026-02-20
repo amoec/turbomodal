@@ -855,12 +855,21 @@ def plot_campbell(
             continue
         n_modes = len(first_r.frequencies)
 
+        # Check if Coriolis splitting is present (whirl_direction != 0)
+        has_coriolis = False
+        for row in results:
+            r = _find_harmonic(row, nd)
+            if r is not None and np.any(np.asarray(r.whirl_direction) != 0):
+                has_coriolis = True
+                break
+
         # Determine if this harmonic needs FW/BW splitting
-        needs_split = (0 < nd < max_k)
+        needs_split = (nd > 0) if has_coriolis else (0 < nd < max_k)
 
         for track_id in range(n_modes):
             track_rpms = []
             track_rot_freqs = []
+            track_whirl = []
 
             for i in range(n_rpm):
                 if i >= len(perm):
@@ -869,25 +878,49 @@ def plot_campbell(
                 if mode_idx < 0:
                     track_rpms.append(rpms[i])
                     track_rot_freqs.append(np.nan)
+                    track_whirl.append(0)
                     continue
 
                 r = _find_harmonic(results[i], nd)
                 if r is None or mode_idx >= len(r.frequencies):
                     track_rpms.append(rpms[i])
                     track_rot_freqs.append(np.nan)
+                    track_whirl.append(0)
                     continue
 
                 track_rpms.append(rpms[i])
                 track_rot_freqs.append(r.frequencies[mode_idx])
+                whirl_arr = np.asarray(r.whirl_direction)
+                track_whirl.append(
+                    int(whirl_arr[mode_idx]) if mode_idx < len(whirl_arr) else 0
+                )
 
             track_rpms = np.array(track_rpms)
             track_rot_freqs = np.array(track_rot_freqs)
+            track_whirl = np.array(track_whirl)
             valid = ~np.isnan(track_rot_freqs)
             if not np.any(valid):
                 continue
 
-            if needs_split:
-                # Compute stationary-frame FW and BW from rotating-frame
+            if has_coriolis and needs_split:
+                # Coriolis modes: each tracked mode is already FW or BW.
+                # Convert to stationary frame and plot single line per mode.
+                k_omega = nd * track_rpms / 60.0
+                stat_freqs = np.abs(track_rot_freqs + track_whirl * k_omega)
+
+                # Determine dominant whirl for this track
+                valid_whirl = track_whirl[valid]
+                is_fw = np.sum(valid_whirl == 1) >= np.sum(valid_whirl == -1)
+                ls = "-" if is_fw else "--"
+                lw = 1.2 if is_fw else 1.0
+                ms = 3 if is_fw else 2
+
+                label = f"ND={nd}" if track_id == 0 else None
+                ax.plot(track_rpms[valid], stat_freqs[valid], ls,
+                        color=color, linewidth=lw, label=label,
+                        marker=".", markersize=ms)
+            elif needs_split:
+                # Kinematic splitting: compute stationary-frame FW and BW
                 k_omega = nd * track_rpms / 60.0
                 fw_freqs = track_rot_freqs + k_omega
                 bw_freqs = np.abs(track_rot_freqs - k_omega)
@@ -900,7 +933,7 @@ def plot_campbell(
                         color=color, linewidth=1.0,
                         marker=".", markersize=2)
             else:
-                # k=0 or k=N/2: standing waves, plot single line
+                # k=0: standing waves, plot single line
                 label = f"ND={nd}" if track_id == 0 else None
                 ax.plot(track_rpms[valid], track_rot_freqs[valid], "-",
                         color=color, linewidth=1.2, label=label,
@@ -1040,14 +1073,25 @@ def plot_zzenf(
     N = num_sectors
     half_N = N // 2
 
+    has_coriolis = any(
+        np.any(np.asarray(r.whirl_direction) != 0) for r in results_at_rpm
+    )
+
     for result in results_at_rpm:
         nd = result.harmonic_index
         # Fold: for nd > N/2, fold back as N - nd
         nd_folded = nd if nd <= half_N else N - nd
+        whirl_arr = np.asarray(result.whirl_direction)
 
         for m_idx in range(len(result.frequencies)):
             freq = result.frequencies[m_idx]
-            ax.plot(nd_folded, freq, "o", color="tab:blue", markersize=6)
+            w = int(whirl_arr[m_idx]) if m_idx < len(whirl_arr) else 0
+            if has_coriolis and w == 1:
+                ax.plot(nd_folded, freq, "^", color="tab:red", markersize=5)
+            elif has_coriolis and w == -1:
+                ax.plot(nd_folded, freq, "v", color="tab:blue", markersize=5)
+            else:
+                ax.plot(nd_folded, freq, "o", color="tab:blue", markersize=6)
 
     ax.set_xlabel("Nodal Diameter")
     ax.set_ylabel("Frequency (Hz)")
@@ -1060,10 +1104,20 @@ def plot_zzenf(
 
     # Legend
     from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
-               markersize=8, label="Rotating frame"),
-    ]
+    if has_coriolis:
+        legend_elements = [
+            Line2D([0], [0], marker="^", color="tab:red", linestyle="None",
+                   markersize=8, label="FW (rotating frame)"),
+            Line2D([0], [0], marker="v", color="tab:blue", linestyle="None",
+                   markersize=8, label="BW (rotating frame)"),
+            Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
+                   markersize=8, label="Standing (k=0)"),
+        ]
+    else:
+        legend_elements = [
+            Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
+                   markersize=8, label="Rotating frame"),
+        ]
     ax.legend(handles=legend_elements, loc="upper right")
     fig.tight_layout()
     return fig

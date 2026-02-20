@@ -230,12 +230,14 @@ PYBIND11_MODULE(_core, m) {
              py::arg("rpm"), py::arg("num_modes_per_harmonic"),
              py::arg("harmonic_indices") = std::vector<int>{},
              py::arg("max_threads") = 0,
+             py::arg("include_coriolis") = false,
              "Solve modal analysis at a given RPM",
              py::call_guard<py::gil_scoped_release>())
         .def("solve_rpm_sweep", &CyclicSymmetrySolver::solve_rpm_sweep,
              py::arg("rpm_values"), py::arg("num_modes_per_harmonic"),
              py::arg("harmonic_indices") = std::vector<int>{},
              py::arg("max_threads") = 0,
+             py::arg("include_coriolis") = false,
              "Solve over a range of RPM values",
              py::call_guard<py::gil_scoped_release>())
         .def_static("compute_stationary_frame",
