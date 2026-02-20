@@ -678,7 +678,8 @@ TEST(Cyclic, CoriolisDMatrixHermitian) {
         std::vector<TripletC> gc;
         for (int col = 0; col < G.outerSize(); ++col)
             for (SpMatd::InnerIterator it(G, col); it; ++it)
-                gc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+                gc.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()),
+                                std::complex<double>(it.value(), 0.0));
         G_complex.setFromTriplets(gc.begin(), gc.end());
     }
 
