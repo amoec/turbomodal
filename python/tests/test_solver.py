@@ -47,7 +47,12 @@ def test_solve_zero_rpm_standing_waves(wedge_mesh, steel_material):
 
 
 def test_solve_nonzero_rpm_whirl_split(wedge_mesh, steel_material):
-    results = solve(wedge_mesh, steel_material, rpm=3000.0, num_modes=3)
+    # With include_coriolis=True, the QEP solver assigns per-mode FW/BW labels
+    # based on the gyroscopic matrix. Without Coriolis, whirl_direction stays
+    # zero on the ModalResult (kinematic splitting is applied downstream by
+    # campbell_data).
+    results = solve(wedge_mesh, steel_material, rpm=3000.0, num_modes=3,
+                    include_coriolis=True)
     found_fw = False
     found_bw = False
     for r in results:
@@ -60,6 +65,24 @@ def test_solve_nonzero_rpm_whirl_split(wedge_mesh, steel_material):
     if any(r.harmonic_index > 0 for r in results):
         assert found_fw, "Expected FW modes at non-zero RPM"
         assert found_bw, "Expected BW modes at non-zero RPM"
+
+
+def test_solve_nonzero_rpm_no_coriolis(wedge_mesh, steel_material):
+    # Without Coriolis, whirl_direction should be zero (standing) for all modes.
+    # Kinematic FW/BW splitting is deferred to campbell_data.
+    results = solve(wedge_mesh, steel_material, rpm=3000.0, num_modes=3,
+                    include_coriolis=False)
+    assert len(results) > 0
+    for r in results:
+        assert len(r.frequencies) > 0
+        for m in range(len(r.whirl_direction)):
+            assert r.whirl_direction[m] == 0, (
+                f"ND={r.harmonic_index} mode {m}: expected whirl=0 without "
+                f"Coriolis, got {r.whirl_direction[m]}"
+            )
+        # Frequencies should be positive (rotating frame)
+        for m in range(len(r.frequencies)):
+            assert r.frequencies[m] > 0
 
 
 def test_solve_verbose_levels(wedge_mesh, steel_material):
