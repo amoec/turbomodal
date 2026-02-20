@@ -1,4 +1,5 @@
 #include "turbomodal/modal_solver.hpp"
+#include "turbomodal/hermitian_lanczos.hpp"
 #include "turbomodal/sym_shift_invert_ldlt.hpp"
 #include <Spectra/SymGEigsShiftSolver.h>
 #include <Spectra/MatOp/SparseSymMatProd.h>
@@ -92,49 +93,12 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_real(
     return {result, status};
 }
 
-// Helper: build 2n×2n real symmetric system from n×n complex Hermitian.
-// For Hermitian A = A_r + i*A_i, the doubled form is:
-//   [[A_r, -A_i], [A_i, A_r]]
-// which is real symmetric (since A_r = A_r^T and A_i = -A_i^T).
-static SpMatd hermitian_to_doubled_real(const SpMatcd& A) {
-    int n = static_cast<int>(A.rows());
-    std::vector<Triplet> trips;
-    trips.reserve(4 * A.nonZeros());
-
-    for (int col = 0; col < A.outerSize(); ++col) {
-        for (SpMatcd::InnerIterator it(A, col); it; ++it) {
-            int r = static_cast<int>(it.row());
-            int c = static_cast<int>(it.col());
-            double re = it.value().real();
-            double im = it.value().imag();
-
-            // Top-left block: A_r
-            if (std::abs(re) > 1e-18) {
-                trips.emplace_back(r, c, re);
-                // Bottom-right block: A_r
-                trips.emplace_back(r + n, c + n, re);
-            }
-            // Top-right block: -A_i
-            if (std::abs(im) > 1e-18) {
-                trips.emplace_back(r, c + n, -im);
-                // Bottom-left block: A_i
-                trips.emplace_back(r + n, c, im);
-            }
-        }
-    }
-
-    SpMatd D(2 * n, 2 * n);
-    D.setFromTriplets(trips.begin(), trips.end());
-    return D;
-}
-
 std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
     const SpMatcd& K_complex, const SpMatcd& M_complex,
     const SolverConfig& config) {
 
-    // Solve complex Hermitian K*x = λ*M*x via 2n×2n real doubling + Spectra.
-    // Each complex eigenvalue appears as a duplicate pair in the doubled
-    // system; we deduplicate by keeping every other eigenvalue.
+    // Solve complex Hermitian K*x = λ*M*x using native Hermitian Lanczos.
+    // Operates directly on n×n complex system (no 2n×2n doubling).
 
     ModalResult result;
     SolverStatus status;
@@ -151,90 +115,34 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
         return {result, status};
     }
 
-    // Build 2n×2n real symmetric system
-    SpMatd K_doubled = hermitian_to_doubled_real(K_complex);
-    SpMatd M_doubled = hermitian_to_doubled_real(M_complex);
+    HermitianLanczosEigenSolver::Config lanczos_cfg;
+    lanczos_cfg.nev = nev;
+    lanczos_cfg.ncv = config.ncv;
+    lanczos_cfg.shift = config.shift;
+    lanczos_cfg.tolerance = config.tolerance;
+    lanczos_cfg.max_iterations = 10;
 
-    // Request 2*nev eigenvalues (each complex eigenvalue appears twice)
-    int nev2 = std::min(2 * nev, 2 * n - 1);
-    int ncv2 = config.ncv;
-    if (ncv2 <= 0) {
-        ncv2 = std::min(std::max(2 * nev2 + 1, 20), 2 * n);
-    }
-    ncv2 = std::min(ncv2, 2 * n);
+    auto lanczos_result = m_hermitian_lanczos.solve(K_complex, M_complex, lanczos_cfg);
 
-    using OpType = SymShiftInvertLDLT<double>;
-    using BOpType = Spectra::SparseSymMatProd<double>;
-
-    OpType op(K_doubled, M_doubled);
-    BOpType Bop(M_doubled);
-
-    Spectra::SymGEigsShiftSolver<OpType, BOpType, Spectra::GEigsMode::ShiftInvert>
-        solver(op, Bop, nev2, ncv2, config.shift);
-
-    solver.init();
-    int nconv = solver.compute(Spectra::SortRule::LargestMagn,
-                               config.max_iterations, config.tolerance);
-
-    if (solver.info() != Spectra::CompInfo::Successful && nconv == 0) {
-        status.message = "Numerical issue in doubled-real solver";
-        return {result, status};
-    }
-
-    Eigen::VectorXd eigenvalues = solver.eigenvalues();
-    Eigen::MatrixXd eigenvectors = solver.eigenvectors();
-
-    // Sort by ascending eigenvalue
-    std::vector<int> idx(eigenvalues.size());
-    std::iota(idx.begin(), idx.end(), 0);
-    std::sort(idx.begin(), idx.end(), [&](int a, int b) {
-        return eigenvalues(a) < eigenvalues(b);
-    });
-
-    // Deduplicate: each eigenvalue appears twice.  Keep every other one
-    // (the pair with slightly lower index after sorting).
-    std::vector<int> unique_idx;
-    unique_idx.reserve(nev);
-    for (int i = 0; i < static_cast<int>(idx.size()) && static_cast<int>(unique_idx.size()) < nev; i++) {
-        bool dup = false;
-        for (int j : unique_idx) {
-            if (std::abs(eigenvalues(idx[i]) - eigenvalues(j)) <
-                1e-8 * std::max(1.0, std::abs(eigenvalues(j)))) {
-                dup = true;
-                break;
-            }
-        }
-        if (!dup) unique_idx.push_back(idx[i]);
-    }
-
-    int num_modes = static_cast<int>(unique_idx.size());
+    int num_modes = lanczos_result.nconv;
     result.frequencies.resize(num_modes);
     result.mode_shapes.resize(n, num_modes);
 
     for (int i = 0; i < num_modes; i++) {
-        double lambda = eigenvalues(unique_idx[i]);
+        double lambda = lanczos_result.eigenvalues(i);
         if (lambda > 0.0) {
             result.frequencies(i) = std::sqrt(lambda) / (2.0 * PI);
         } else {
             result.frequencies(i) = 0.0;
         }
-
-        // Reconstruct complex eigenvector: x = x_r + i*x_i
-        // from doubled vector [x_r; x_i]
-        Eigen::VectorXd v = eigenvectors.col(unique_idx[i]);
-        result.mode_shapes.col(i) =
-            v.head(n).cast<std::complex<double>>() +
-            std::complex<double>(0.0, 1.0) * v.tail(n).cast<std::complex<double>>();
+        result.mode_shapes.col(i) = lanczos_result.eigenvectors.col(i);
     }
 
     status.num_converged = num_modes;
-    status.converged = (num_modes >= nev) ||
-                       (solver.info() == Spectra::CompInfo::Successful);
-    status.message = status.converged ? "Converged" :
-        "Not all eigenvalues converged (" +
-        std::to_string(num_modes) + "/" + std::to_string(nev) + ")";
-
+    status.converged = lanczos_result.converged;
+    status.message = lanczos_result.message;
     result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
+
     return {result, status};
 }
 

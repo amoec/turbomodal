@@ -1,8 +1,10 @@
 #include "turbomodal/assembler.hpp"
 #include "turbomodal/element.hpp"
+#include "turbomodal/hermitian_lanczos.hpp"
 #include "turbomodal/material.hpp"
 #include "turbomodal/mesh.hpp"
 #include "turbomodal/modal_solver.hpp"
+#include <Eigen/Eigenvalues>
 #include <cmath>
 #include <gtest/gtest.h>
 
@@ -509,8 +511,8 @@ static SpMatcd cdense_to_sparse(const Eigen::MatrixXcd &D) {
   return S;
 }
 
-TEST(Solver, ComplexHermitianDoubling) {
-  // Build a complex Hermitian system and solve via 2n real doubling.
+TEST(Solver, ComplexHermitianSmallSystem) {
+  // Build a complex Hermitian system and solve via Hermitian Lanczos.
   // K = tridiagonal with complex off-diagonals, M = identity.
   const int n = 50;
   const int nev = 5;
@@ -532,7 +534,6 @@ TEST(Solver, ComplexHermitianDoubling) {
   SpMatcd K = cdense_to_sparse(K_dense);
   SpMatcd M = cdense_to_sparse(M_dense);
 
-  // Solve with 2n real doubling via Spectra
   ModalSolver solver;
   SolverConfig config;
   config.nev = nev;
@@ -551,5 +552,463 @@ TEST(Solver, ComplexHermitianDoubling) {
   for (int i = 1; i < nev; i++) {
     EXPECT_GE(result.frequencies(i), result.frequencies(i - 1))
         << "Frequencies should be sorted ascending";
+  }
+}
+
+// ---- Lanczos vs Dense Comparison ----
+
+TEST(Solver, HermitianLanczosVsDense) {
+  // Build a complex Hermitian system above the dense fallback threshold
+  // (n > 200), solve with both Lanczos and dense, assert eigenvalues match.
+  const int n = 300;
+  const int nev = 10;
+
+  // Build a banded complex Hermitian positive-definite matrix
+  Eigen::MatrixXcd K_dense = Eigen::MatrixXcd::Zero(n, n);
+  std::complex<double> off(-1.0, 0.3);
+  for (int i = 0; i < n; i++) {
+    K_dense(i, i) = std::complex<double>(4.0 + 0.005 * i, 0.0);
+    if (i < n - 1) {
+      K_dense(i, i + 1) = off;
+      K_dense(i + 1, i) = std::conj(off);
+    }
+    if (i < n - 2) {
+      std::complex<double> off2(0.3, -0.1);
+      K_dense(i, i + 2) = off2;
+      K_dense(i + 2, i) = std::conj(off2);
+    }
+  }
+
+  Eigen::MatrixXcd M_dense = Eigen::MatrixXcd::Identity(n, n);
+
+  SpMatcd K = cdense_to_sparse(K_dense);
+  SpMatcd M = cdense_to_sparse(M_dense);
+
+  // Solve with dense (reference)
+  auto dense_result = HermitianLanczosEigenSolver::solve_dense(K, M, nev);
+  ASSERT_TRUE(dense_result.converged) << "Dense solver failed: " << dense_result.message;
+  ASSERT_EQ(dense_result.nconv, nev);
+
+  // Solve with Lanczos (forces Lanczos path since n > 200)
+  HermitianLanczosEigenSolver lanczos;
+  HermitianLanczosEigenSolver::Config cfg;
+  cfg.nev = nev;
+  cfg.shift = 0.0;
+  cfg.tolerance = 1e-8;
+  cfg.max_iterations = 20;
+  auto lanczos_result = lanczos.solve(K, M, cfg);
+  ASSERT_TRUE(lanczos_result.converged) << "Lanczos did not converge: " << lanczos_result.message;
+  ASSERT_EQ(lanczos_result.nconv, nev);
+
+  // Compare eigenvalues (dense returns λ directly, Lanczos returns λ via shift-invert)
+  for (int i = 0; i < nev; i++) {
+    EXPECT_NEAR(dense_result.eigenvalues(i), lanczos_result.eigenvalues(i),
+                1e-4 * std::abs(dense_result.eigenvalues(i)))
+        << "Eigenvalue mismatch at mode " << i
+        << ": dense=" << dense_result.eigenvalues(i)
+        << " lanczos=" << lanczos_result.eigenvalues(i);
+  }
+}
+
+// ---- Test 1: Large Tridiagonal — All Intermediate Modes ----
+
+TEST(Solver, LargeTridiagonalAllModesAccurate) {
+  // n=50 tridiagonal: verify EVERY eigenvalue matches analytical,
+  // not just first and last.  This catches intermediate-mode bugs.
+  const int n = 50;
+  Eigen::MatrixXd K_dense = Eigen::MatrixXd::Zero(n, n);
+  for (int i = 0; i < n; i++) {
+    K_dense(i, i) = 2.0;
+    if (i > 0)
+      K_dense(i, i - 1) = -1.0;
+    if (i < n - 1)
+      K_dense(i, i + 1) = -1.0;
+  }
+  Eigen::MatrixXd M_dense = Eigen::MatrixXd::Identity(n, n);
+
+  SpMatd K = dense_to_sparse(K_dense);
+  SpMatd M = dense_to_sparse(M_dense);
+
+  SolverConfig config;
+  config.nev = n - 1; // Request all possible eigenvalues
+  config.ncv = n;     // Full subspace
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K, M, config);
+
+  ASSERT_TRUE(status.converged) << status.message;
+  ASSERT_EQ(result.frequencies.size(), n - 1);
+
+  // Analytical: lambda_k = 2 - 2*cos(k*pi/(n+1)), k = 1..n
+  for (int i = 0; i < n - 1; i++) {
+    double lambda = 2.0 - 2.0 * std::cos((i + 1) * PI / (n + 1));
+    double f_expected = std::sqrt(lambda) / (2.0 * PI);
+    EXPECT_NEAR(result.frequencies(i), f_expected, 1e-6)
+        << "Mode " << i << " (of " << (n - 1) << "): got "
+        << result.frequencies(i) << " expected " << f_expected;
+  }
+}
+
+// ---- Test 2: Eigenvalue Residual on Real Mesh ----
+
+TEST(Solver, EigenvalueResidualReal) {
+  // Verify K*phi = lambda*M*phi for each converged eigenpair on the
+  // wedge sector mesh.  This is the most fundamental correctness check.
+  Mesh mesh;
+  mesh.load_from_gmsh(test_data_path("wedge_sector.msh"));
+  Material mat(200e9, 0.3, 7850);
+
+  GlobalAssembler assembler;
+  assembler.assemble(mesh, mat);
+
+  const NodeSet *hub = mesh.find_node_set("hub_constraint");
+  ASSERT_NE(hub, nullptr);
+
+  std::vector<int> constrained;
+  for (int node_id : hub->node_ids) {
+    constrained.push_back(3 * node_id);
+    constrained.push_back(3 * node_id + 1);
+    constrained.push_back(3 * node_id + 2);
+  }
+  std::sort(constrained.begin(), constrained.end());
+
+  auto [K_red, M_red, free_map] =
+      ModalSolver::eliminate_dofs(assembler.K(), assembler.M(), constrained);
+
+  SolverConfig config;
+  config.nev = 10;
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K_red, M_red, config);
+  ASSERT_TRUE(status.converged) << status.message;
+
+  int num_modes = static_cast<int>(result.frequencies.size());
+  ASSERT_GE(num_modes, 5);
+
+  for (int i = 0; i < num_modes; i++) {
+    double omega_sq = std::pow(2.0 * PI * result.frequencies(i), 2);
+    // Mode shapes are stored as complex but should be real here
+    Eigen::VectorXd phi = result.mode_shapes.col(i).real();
+
+    // Residual: r = K*phi - omega^2 * M*phi
+    Eigen::VectorXd K_phi = K_red * phi;
+    Eigen::VectorXd M_phi = M_red * phi;
+    Eigen::VectorXd residual = K_phi - omega_sq * M_phi;
+
+    double rel_residual = residual.norm() / (K_phi.norm() + 1e-30);
+    EXPECT_LT(rel_residual, 1e-6)
+        << "Mode " << i << " (f=" << result.frequencies(i)
+        << " Hz): relative residual = " << rel_residual;
+  }
+}
+
+// ---- Test 3: Rayleigh Quotient Consistency ----
+
+TEST(Solver, RayleighQuotientConsistency) {
+  // For each mode the Rayleigh quotient phi^T*K*phi / phi^T*M*phi
+  // must equal (2*pi*f)^2 — the returned eigenvalue.
+  Mesh mesh;
+  mesh.load_from_gmsh(test_data_path("wedge_sector.msh"));
+  Material mat(200e9, 0.3, 7850);
+
+  GlobalAssembler assembler;
+  assembler.assemble(mesh, mat);
+
+  const NodeSet *hub = mesh.find_node_set("hub_constraint");
+  ASSERT_NE(hub, nullptr);
+
+  std::vector<int> constrained;
+  for (int node_id : hub->node_ids) {
+    constrained.push_back(3 * node_id);
+    constrained.push_back(3 * node_id + 1);
+    constrained.push_back(3 * node_id + 2);
+  }
+  std::sort(constrained.begin(), constrained.end());
+
+  auto [K_red, M_red, free_map] =
+      ModalSolver::eliminate_dofs(assembler.K(), assembler.M(), constrained);
+
+  SolverConfig config;
+  config.nev = 10;
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K_red, M_red, config);
+  ASSERT_TRUE(status.converged) << status.message;
+
+  int num_modes = static_cast<int>(result.frequencies.size());
+  for (int i = 0; i < num_modes; i++) {
+    Eigen::VectorXd phi = result.mode_shapes.col(i).real();
+    double KE = phi.dot(K_red * phi);
+    double ME = phi.dot(M_red * phi);
+    double rq = KE / ME;
+    double omega_sq = std::pow(2.0 * PI * result.frequencies(i), 2);
+
+    double rel_err = std::abs(rq - omega_sq) / (omega_sq + 1e-30);
+    EXPECT_LT(rel_err, 1e-6)
+        << "Mode " << i << " (f=" << result.frequencies(i)
+        << " Hz): RQ=" << rq << " omega^2=" << omega_sq
+        << " rel_err=" << rel_err;
+  }
+}
+
+// ---- Test 4: Generalized Eigenvalue with Non-Identity Mass ----
+
+TEST(Solver, GeneralizedEigNonIdentityMass) {
+  // Verify solve_real handles K*x = lambda*M*x with non-trivial M.
+  // Compare all eigenvalues against dense reference solver.
+  const int n = 20;
+
+  // Build tridiagonal K
+  Eigen::MatrixXd K_dense = Eigen::MatrixXd::Zero(n, n);
+  for (int i = 0; i < n; i++) {
+    K_dense(i, i) = 4.0 + 0.2 * i;
+    if (i > 0)
+      K_dense(i, i - 1) = -1.0;
+    if (i < n - 1)
+      K_dense(i, i + 1) = -1.0;
+  }
+
+  // Build non-uniform SPD tridiagonal M
+  Eigen::MatrixXd M_dense = Eigen::MatrixXd::Zero(n, n);
+  for (int i = 0; i < n; i++) {
+    M_dense(i, i) = 2.0 + 0.1 * i;
+    if (i > 0) {
+      M_dense(i, i - 1) = -0.3;
+      M_dense(i - 1, i) = -0.3;
+    }
+  }
+
+  // Dense reference solution
+  Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(K_dense,
+                                                                 M_dense);
+  ASSERT_EQ(ges.info(), Eigen::Success) << "Dense generalized eigensolver failed";
+  Eigen::VectorXd ref_evals = ges.eigenvalues();
+
+  // Sparse solve via Spectra
+  SpMatd K = dense_to_sparse(K_dense);
+  SpMatd M = dense_to_sparse(M_dense);
+
+  SolverConfig config;
+  config.nev = n - 1;
+  config.ncv = n;
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K, M, config);
+  ASSERT_TRUE(status.converged) << status.message;
+
+  int num_modes = static_cast<int>(result.frequencies.size());
+  ASSERT_GE(num_modes, n - 1);
+
+  for (int i = 0; i < num_modes; i++) {
+    double lambda = std::pow(2.0 * PI * result.frequencies(i), 2);
+    double ref = ref_evals(i);
+    double rel_err = std::abs(lambda - ref) / (std::abs(ref) + 1e-30);
+    EXPECT_LT(rel_err, 1e-6)
+        << "Mode " << i << ": lambda=" << lambda << " ref=" << ref
+        << " rel_err=" << rel_err;
+  }
+}
+
+// ---- Test 5: Complex Hermitian Eigenvalue Residual ----
+
+TEST(Solver, ComplexHermitianResidual) {
+  // Verify K*phi = lambda*M*phi for the complex Hermitian solver.
+  const int n = 50;
+  const int nev = 5;
+
+  Eigen::MatrixXcd K_dense = Eigen::MatrixXcd::Zero(n, n);
+  std::complex<double> off(-1.0, 0.2);
+  for (int i = 0; i < n; i++) {
+    K_dense(i, i) = std::complex<double>(3.0 + 0.01 * i, 0.0);
+    if (i < n - 1) {
+      K_dense(i, i + 1) = off;
+      K_dense(i + 1, i) = std::conj(off);
+    }
+  }
+  Eigen::MatrixXcd M_dense = Eigen::MatrixXcd::Identity(n, n);
+
+  SpMatcd K = cdense_to_sparse(K_dense);
+  SpMatcd M = cdense_to_sparse(M_dense);
+
+  ModalSolver solver;
+  SolverConfig config;
+  config.nev = nev;
+  auto [result, status] = solver.solve_complex_hermitian(K, M, config);
+  ASSERT_TRUE(status.converged) << status.message;
+
+  int num_modes = static_cast<int>(result.frequencies.size());
+  ASSERT_GE(num_modes, nev);
+
+  for (int i = 0; i < num_modes; i++) {
+    double omega_sq = std::pow(2.0 * PI * result.frequencies(i), 2);
+    Eigen::VectorXcd phi = result.mode_shapes.col(i);
+
+    // Residual: r = K*phi - omega^2 * M*phi
+    Eigen::VectorXcd K_phi = K * phi;
+    Eigen::VectorXcd M_phi = M * phi;
+    Eigen::VectorXcd residual = K_phi - omega_sq * M_phi;
+
+    double rel_residual = residual.norm() / (K_phi.norm() + 1e-30);
+    EXPECT_LT(rel_residual, 1e-5)
+        << "Mode " << i << " (f=" << result.frequencies(i)
+        << " Hz): relative residual = " << rel_residual;
+  }
+}
+
+// ---- Test 6: Lanczos vs Dense — Varied Spectral Distributions ----
+
+TEST(Solver, LanczosVsDenseVariedSpectra) {
+  // Test the Hermitian Lanczos on systems with different eigenvalue spacing.
+  const int n = 300;
+  const int nev = 10;
+  std::complex<double> off(-1.0, 0.3);
+
+  struct TestCase {
+    std::string name;
+    double diag_base;
+    double diag_slope;
+  };
+  TestCase cases[] = {
+      {"well-separated", 4.0, 0.1},
+      {"clustered", 4.0, 0.001},
+      {"wide-spread", 1.0, 10.0 / n},
+  };
+
+  for (const auto &tc : cases) {
+    Eigen::MatrixXcd K_dense = Eigen::MatrixXcd::Zero(n, n);
+    for (int i = 0; i < n; i++) {
+      K_dense(i, i) =
+          std::complex<double>(tc.diag_base + tc.diag_slope * i, 0.0);
+      if (i < n - 1) {
+        K_dense(i, i + 1) = off;
+        K_dense(i + 1, i) = std::conj(off);
+      }
+    }
+    Eigen::MatrixXcd M_dense = Eigen::MatrixXcd::Identity(n, n);
+
+    SpMatcd K = cdense_to_sparse(K_dense);
+    SpMatcd M = cdense_to_sparse(M_dense);
+
+    // Dense reference
+    auto dense_result = HermitianLanczosEigenSolver::solve_dense(K, M, nev);
+    ASSERT_TRUE(dense_result.converged)
+        << tc.name << ": dense solver failed: " << dense_result.message;
+
+    // Lanczos
+    HermitianLanczosEigenSolver lanczos;
+    HermitianLanczosEigenSolver::Config cfg;
+    cfg.nev = nev;
+    cfg.shift = 0.0;
+    cfg.tolerance = 1e-8;
+    cfg.max_iterations = 30;
+    auto lanczos_result = lanczos.solve(K, M, cfg);
+    ASSERT_TRUE(lanczos_result.converged)
+        << tc.name << ": Lanczos did not converge: " << lanczos_result.message;
+    ASSERT_EQ(lanczos_result.nconv, nev) << tc.name;
+
+    for (int i = 0; i < nev; i++) {
+      double rel_err =
+          std::abs(dense_result.eigenvalues(i) - lanczos_result.eigenvalues(i)) /
+          (std::abs(dense_result.eigenvalues(i)) + 1e-30);
+      EXPECT_LT(rel_err, 1e-4)
+          << tc.name << " mode " << i
+          << ": dense=" << dense_result.eigenvalues(i)
+          << " lanczos=" << lanczos_result.eigenvalues(i);
+    }
+  }
+}
+
+// ---- Test 7: M-Orthogonality on Real Mesh ----
+
+TEST(Solver, WedgeSectorMOrthogonality) {
+  // Verify mode shapes are M-orthogonal on the real mesh (not just identity-M).
+  Mesh mesh;
+  mesh.load_from_gmsh(test_data_path("wedge_sector.msh"));
+  Material mat(200e9, 0.3, 7850);
+
+  GlobalAssembler assembler;
+  assembler.assemble(mesh, mat);
+
+  const NodeSet *hub = mesh.find_node_set("hub_constraint");
+  ASSERT_NE(hub, nullptr);
+
+  std::vector<int> constrained;
+  for (int node_id : hub->node_ids) {
+    constrained.push_back(3 * node_id);
+    constrained.push_back(3 * node_id + 1);
+    constrained.push_back(3 * node_id + 2);
+  }
+  std::sort(constrained.begin(), constrained.end());
+
+  auto [K_red, M_red, free_map] =
+      ModalSolver::eliminate_dofs(assembler.K(), assembler.M(), constrained);
+
+  SolverConfig config;
+  config.nev = 10;
+
+  ModalSolver solver;
+  auto [result, status] = solver.solve_real(K_red, M_red, config);
+  ASSERT_TRUE(status.converged) << status.message;
+
+  int nm = static_cast<int>(result.mode_shapes.cols());
+  ASSERT_GE(nm, 5);
+
+  // Build Gram matrix G(i,j) = phi_i^T * M * phi_j
+  for (int i = 0; i < nm; i++) {
+    Eigen::VectorXd phi_i = result.mode_shapes.col(i).real();
+    Eigen::VectorXd M_phi_i = M_red * phi_i;
+    double diag = phi_i.dot(M_phi_i);
+    EXPECT_GT(diag, 0.0) << "Mode " << i << " has non-positive M-norm";
+
+    for (int j = i + 1; j < nm; j++) {
+      Eigen::VectorXd phi_j = result.mode_shapes.col(j).real();
+      double cross = std::abs(phi_j.dot(M_phi_i));
+      double bound = 1e-6 * std::sqrt(diag * phi_j.dot(M_red * phi_j));
+      EXPECT_LT(cross, bound)
+          << "Modes " << i << " and " << j << " not M-orthogonal: "
+          << cross << " > " << bound;
+    }
+  }
+}
+
+// ---- Test 8: Solver Determinism ----
+
+TEST(Solver, SolverDeterministic) {
+  // Two identical solves must produce identical results.
+  Mesh mesh;
+  mesh.load_from_gmsh(test_data_path("wedge_sector.msh"));
+  Material mat(200e9, 0.3, 7850);
+
+  GlobalAssembler assembler;
+  assembler.assemble(mesh, mat);
+
+  const NodeSet *hub = mesh.find_node_set("hub_constraint");
+  ASSERT_NE(hub, nullptr);
+
+  std::vector<int> constrained;
+  for (int node_id : hub->node_ids) {
+    constrained.push_back(3 * node_id);
+    constrained.push_back(3 * node_id + 1);
+    constrained.push_back(3 * node_id + 2);
+  }
+  std::sort(constrained.begin(), constrained.end());
+
+  auto [K_red, M_red, free_map] =
+      ModalSolver::eliminate_dofs(assembler.K(), assembler.M(), constrained);
+
+  SolverConfig config;
+  config.nev = 10;
+
+  ModalSolver solver1, solver2;
+  auto [r1, s1] = solver1.solve_real(K_red, M_red, config);
+  auto [r2, s2] = solver2.solve_real(K_red, M_red, config);
+
+  ASSERT_TRUE(s1.converged) << s1.message;
+  ASSERT_TRUE(s2.converged) << s2.message;
+  ASSERT_EQ(r1.frequencies.size(), r2.frequencies.size());
+
+  for (int i = 0; i < r1.frequencies.size(); i++) {
+    EXPECT_NEAR(r1.frequencies(i), r2.frequencies(i), 1e-15)
+        << "Mode " << i << " frequencies differ between runs";
   }
 }
