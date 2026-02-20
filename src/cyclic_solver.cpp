@@ -8,6 +8,7 @@
 #include <optional>
 #include <Eigen/SparseLU>
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <cmath>
 
@@ -232,7 +233,45 @@ StationaryFrameResult CyclicSymmetrySolver::compute_stationary_frame(
     double omega = rotating_result.rpm * 2.0 * PI / 60.0;
     int num_modes = static_cast<int>(rotating_result.frequencies.size());
 
-    if (omega > 0.0 && k > 0 && k < max_k) {
+    // Check if Coriolis splitting is already present (whirl_direction != 0)
+    bool has_coriolis = false;
+    for (int m = 0; m < num_modes; m++) {
+        if (rotating_result.whirl_direction(m) != 0) {
+            has_coriolis = true;
+            break;
+        }
+    }
+
+    if (has_coriolis && omega > 0.0 && k > 0) {
+        // Coriolis modes: each mode already has FW/BW designation.
+        // Convert to stationary frame: FW adds k*Omega/(2pi), BW subtracts.
+        double k_omega_hz = k * omega / (2.0 * PI);
+        sf.frequencies.resize(num_modes);
+        sf.whirl_direction.resize(num_modes);
+
+        for (int m = 0; m < num_modes; m++) {
+            int whirl = rotating_result.whirl_direction(m);
+            sf.frequencies(m) = std::abs(
+                rotating_result.frequencies(m) + whirl * k_omega_hz);
+            sf.whirl_direction(m) = whirl;
+        }
+
+        // Sort by ascending frequency
+        std::vector<int> sort_idx(num_modes);
+        std::iota(sort_idx.begin(), sort_idx.end(), 0);
+        std::sort(sort_idx.begin(), sort_idx.end(), [&](int a, int b) {
+            return sf.frequencies(a) < sf.frequencies(b);
+        });
+        Eigen::VectorXd sorted_f(num_modes);
+        Eigen::VectorXi sorted_w(num_modes);
+        for (int i = 0; i < num_modes; i++) {
+            sorted_f(i) = sf.frequencies(sort_idx[i]);
+            sorted_w(i) = sf.whirl_direction(sort_idx[i]);
+        }
+        sf.frequencies = sorted_f;
+        sf.whirl_direction = sorted_w;
+    } else if (omega > 0.0 && k > 0 && k < max_k) {
+        // Kinematic splitting: each rotating-frame mode produces FW + BW pair
         double k_omega_hz = k * omega / (2.0 * PI);
 
         Eigen::VectorXd all_freqs(2 * num_modes);
@@ -382,7 +421,8 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
 std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     double rpm, int num_modes_per_harmonic,
     const std::vector<int>& harmonic_indices,
-    int max_threads) {
+    int max_threads,
+    bool include_coriolis) {
 
     double omega = rpm * 2.0 * PI / 60.0;
 
@@ -549,6 +589,28 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     SpMatcd Kpf_H = Kpf.adjoint();
     SpMatcd Mpf_H = Mpf.adjoint();
 
+    // Gyroscopic matrix projection (same pipeline as K/M)
+    SpMatcd Gcf, Gpf, Gpf_H;
+    bool coriolis_active = include_coriolis && omega > 0.0;
+    if (coriolis_active) {
+        SpMatd G_global = assembler_.G();
+        SpMatcd G_complex(ndof_full, ndof_full);
+        {
+            std::vector<TripletC> gc;
+            gc.reserve(G_global.nonZeros());
+            for (int col = 0; col < G_global.outerSize(); ++col)
+                for (SpMatd::InnerIterator it(G_global, col); it; ++it)
+                    gc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+            G_complex.setFromTriplets(gc.begin(), gc.end());
+        }
+        auto [G_same, G_nr] = partition(G_complex);
+        SpMatcd G_const_proj = (T0_H * G_same * T0).pruned(1e-15);
+        SpMatcd G_phase_proj = (T0_H * G_nr * T0).pruned(1e-15);
+        Gcf = extract_free(G_const_proj);
+        Gpf = extract_free(G_phase_proj);
+        Gpf_H = Gpf.adjoint();
+    }
+
     // BEM added mass precomputation (once per geometry, cached)
     if (fluid_.type == FluidConfig::Type::POTENTIAL_FLOW_BEM &&
         fluid_.fluid_density > 0.0 && !bem_precomputed_) {
@@ -598,44 +660,64 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 M_free += M_added_free_cache_[k];
             }
 
-            SolverConfig config;
-            config.nev = std::min(num_modes_per_harmonic, n_free - 1);
-            if (config.nev <= 0) return std::nullopt;
-            config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
-            config.shift = 1.0;
-
             ModalResult result;
             SolverStatus status;
+            bool used_qep = false;
 
-            bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
+            // Coriolis QEP branch: for k > 0 with Coriolis enabled, solve the
+            // Lancaster-linearized QEP (K + omega*D - omega^2*M)*phi = 0.
+            if (coriolis_active && k > 0) {
+                SpMatcd G_free = Gcf + P * Gpf + std::conj(P) * Gpf_H;
+                // D = i * 2 * omega * G_k. Since G_k is skew-Hermitian, D is Hermitian.
+                std::complex<double> coriolis_factor(0.0, 2.0 * omega);
+                SpMatcd D_free = coriolis_factor * G_free;
 
-            if (is_real_case) {
-                SpMatd K_real(n_free, n_free), M_real(n_free, n_free);
-                {
-                    std::vector<Triplet> kr, mr;
-                    for (int col = 0; col < K_free.outerSize(); ++col) {
-                        for (SpMatcd::InnerIterator it(K_free, col); it; ++it)
-                            if (std::abs(it.value().real()) > 1e-15)
-                                kr.emplace_back(it.row(), it.col(), it.value().real());
-                    }
-                    for (int col = 0; col < M_free.outerSize(); ++col) {
-                        for (SpMatcd::InnerIterator it(M_free, col); it; ++it)
-                            if (std::abs(it.value().real()) > 1e-15)
-                                mr.emplace_back(it.row(), it.col(), it.value().real());
-                    }
-                    K_real.setFromTriplets(kr.begin(), kr.end());
-                    M_real.setFromTriplets(mr.begin(), mr.end());
-                }
-                std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
+                SolverConfig qep_config;
+                qep_config.nev = num_modes_per_harmonic;
+                qep_config.shift = 1.0;  // maps to sqrt(1.0)=1.0 rad/s in Lancaster
+                qep_config.tolerance = 1e-8;
+
+                std::tie(result, status) = modal_solver.solve_lancaster_qep(
+                    K_free, M_free, D_free, num_modes_per_harmonic, qep_config);
+                used_qep = true;
             } else {
-                std::tie(result, status) = modal_solver.solve_complex_hermitian(
-                    K_free, M_free, config);
+                // Standard n x n Hermitian GEP: K*x = lambda*M*x
+                SolverConfig config;
+                config.nev = std::min(num_modes_per_harmonic, n_free - 1);
+                if (config.nev <= 0) return std::nullopt;
+                config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
+                config.shift = 1.0;
+
+                bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
+
+                if (is_real_case) {
+                    SpMatd K_real(n_free, n_free), M_real(n_free, n_free);
+                    {
+                        std::vector<Triplet> kr, mr;
+                        for (int col = 0; col < K_free.outerSize(); ++col) {
+                            for (SpMatcd::InnerIterator it(K_free, col); it; ++it)
+                                if (std::abs(it.value().real()) > 1e-15)
+                                    kr.emplace_back(it.row(), it.col(), it.value().real());
+                        }
+                        for (int col = 0; col < M_free.outerSize(); ++col) {
+                            for (SpMatcd::InnerIterator it(M_free, col); it; ++it)
+                                if (std::abs(it.value().real()) > 1e-15)
+                                    mr.emplace_back(it.row(), it.col(), it.value().real());
+                        }
+                        K_real.setFromTriplets(kr.begin(), kr.end());
+                        M_real.setFromTriplets(mr.begin(), mr.end());
+                    }
+                    std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
+                } else {
+                    std::tie(result, status) = modal_solver.solve_complex_hermitian(
+                        K_free, M_free, config);
+                }
             }
 
             if (!status.converged && status.num_converged == 0) return std::nullopt;
 
-            // Eigenvalue residual diagnostics: r_i = ||K*x_i - λ_i*M*x_i|| / ||K*x_i||
-            {
+            // Eigenvalue residual diagnostics (skip for QEP — different eigenvalue semantics)
+            if (!used_qep) {
                 int n_modes = static_cast<int>(result.mode_shapes.cols());
                 double max_res = 0.0;
                 for (int m = 0; m < n_modes; m++) {
@@ -648,14 +730,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     max_res = std::max(max_res, res);
                 }
                 if (max_res > 1e-4) {
-                    // Check M Hermiticity
                     SpMatcd M_diff = M_free - SpMatcd(M_free.adjoint());
                     double herm_err = 0.0;
                     for (int col = 0; col < M_diff.outerSize(); ++col)
                         for (SpMatcd::InnerIterator it(M_diff, col); it; ++it)
                             herm_err = std::max(herm_err, std::abs(it.value()));
 
-                    // Check BEM added mass contribution
                     double bem_norm = 0.0;
                     if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()))
                         bem_norm = M_added_free_cache_[k].norm();
@@ -680,11 +760,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 result.frequencies *= freq_ratio;
             }
 
-            // Frequencies are kept in the rotating frame for all harmonics.
-            // FW/BW stationary-frame splitting is computed on demand (e.g.
-            // in export_campbell_csv / compute_stationary_frame).
-            int num_modes = static_cast<int>(result.frequencies.size());
-            result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
+            // For standard solver: set whirl to zero (rotating frame, no Coriolis).
+            // For QEP solver: whirl_direction is already set by solve_lancaster_qep.
+            if (!used_qep) {
+                int num_modes = static_cast<int>(result.frequencies.size());
+                result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
+            }
 
             // Mode shape expansion: T(k) = S_k * T0
             {
@@ -710,6 +791,9 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             result.harmonic_index = k;
             result.rpm = rpm;
             return result;
+        } catch (const std::bad_alloc&) {
+            std::cerr << "[CyclicSolver] k=" << k << " out of memory, will retry" << std::endl;
+            return std::nullopt;
         } catch (const std::exception& e) {
             std::cerr << "[CyclicSolver] k=" << k << " FAILED: " << e.what() << std::endl;
             return std::nullopt;
@@ -727,7 +811,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     size_t per_harmonic = estimate_per_harmonic_bytes(n_free);
     size_t total_mem = total_system_memory();
     if (total_mem > 0 && per_harmonic > 0) {
-        size_t budget = static_cast<size_t>(total_mem * 0.7);
+        size_t budget = static_cast<size_t>(total_mem * 0.5);
         int mem_limit = std::max(1, static_cast<int>(budget / per_harmonic));
         if (mem_limit < max_concurrent) {
             std::cerr << "[CyclicSolver] Memory cap: " << mem_limit
@@ -741,6 +825,9 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
     std::atomic<int> next_idx{0};
     std::vector<std::optional<ModalResult>> results_vec(n_harmonics);
+    // Track OOM failures for sequential retry
+    std::vector<int> oom_indices;
+    std::mutex oom_mutex;
 
     std::vector<std::thread> workers;
     workers.reserve(max_concurrent);
@@ -750,11 +837,36 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             while (true) {
                 int idx = next_idx.fetch_add(1, std::memory_order_relaxed);
                 if (idx >= n_harmonics) break;
-                results_vec[idx] = solve_harmonic(harmonics_to_solve[idx], thread_solver);
+                int k = harmonics_to_solve[idx];
+                try {
+                    results_vec[idx] = solve_harmonic(k, thread_solver);
+                } catch (...) {
+                    // solve_harmonic has its own try/catch; this is a safety net.
+                    results_vec[idx] = std::nullopt;
+                }
+                // Check if this was an OOM failure (solve_harmonic printed the message)
+                if (!results_vec[idx].has_value()) {
+                    // We can't distinguish OOM from other failures here, but
+                    // the catch block inside solve_harmonic logs "will retry"
+                    // for bad_alloc. We'll retry all failures sequentially
+                    // as a conservative strategy.
+                    std::lock_guard<std::mutex> lock(oom_mutex);
+                    oom_indices.push_back(idx);
+                }
             }
         });
     }
     for (auto& t : workers) t.join();
+
+    // Retry failed harmonics sequentially (1 thread = minimal peak memory)
+    if (!oom_indices.empty()) {
+        std::cerr << "[CyclicSolver] Retrying " << oom_indices.size()
+                  << " failed harmonics sequentially" << std::endl;
+        ModalSolver retry_solver;
+        for (int idx : oom_indices) {
+            results_vec[idx] = solve_harmonic(harmonics_to_solve[idx], retry_solver);
+        }
+    }
 
     std::vector<ModalResult> results;
     for (auto& opt : results_vec) {
@@ -774,12 +886,14 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_rpm_sweep(
     const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
     const std::vector<int>& harmonic_indices,
-    int max_threads) {
+    int max_threads,
+    bool include_coriolis) {
     std::vector<std::vector<ModalResult>> all_results;
     all_results.reserve(rpm_values.size());
     for (int i = 0; i < rpm_values.size(); i++) {
         all_results.push_back(solve_at_rpm(rpm_values(i), num_modes_per_harmonic,
-                                            harmonic_indices, max_threads));
+                                            harmonic_indices, max_threads,
+                                            include_coriolis));
     }
     return all_results;
 }

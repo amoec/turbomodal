@@ -61,6 +61,20 @@ public:
         const SpMatcd& K, const SpMatcd& M,
         const SolverConfig& config = SolverConfig());
 
+    // Solve the Lancaster-linearized QEP: (K + omega*D - omega^2*M)*phi = 0
+    // where K, M are Hermitian positive definite and D = i*2*Omega*G_k is Hermitian.
+    //
+    // Lancaster linearization produces a 2n x 2n Hermitian GEP:
+    //   L1*z = omega*L2*z,  L1=[[D,K],[K,0]], L2=[[M,0],[0,K]]
+    //
+    // Eigenvalues are omega (rad/s), NOT omega^2.
+    // Positive omega = FW, negative omega = BW in rotating frame.
+    // Mode shapes are first n components of the 2n eigenvector.
+    std::pair<ModalResult, SolverStatus> solve_lancaster_qep(
+        const SpMatcd& K, const SpMatcd& M, const SpMatcd& D,
+        int num_modes,
+        const SolverConfig& config = SolverConfig());
+
     // Eliminate constrained DOFs from K and M matrices
     // constrained_dofs: sorted vector of DOF indices to remove
     // Returns reduced K, M and the mapping from reduced to full DOF indices
@@ -78,6 +92,10 @@ private:
     // Persistent Hermitian Lanczos solver — caches symbolic factorization
     // across calls with the same sparsity pattern (i.e., across harmonics).
     HermitianLanczosEigenSolver m_hermitian_lanczos;
+
+    // Separate Lanczos instance for the 2n×2n Lancaster system (different
+    // sparsity pattern from the n×n standard problem).
+    HermitianLanczosEigenSolver m_lancaster_lanczos;
 };
 
 }  // namespace turbomodal

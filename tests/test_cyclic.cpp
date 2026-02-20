@@ -516,3 +516,201 @@ TEST(Cyclic, ComputeStationaryFrameZeroRpmNoSplit) {
     EXPECT_NEAR(sf.frequencies(0), 500.0, 1e-10);
     EXPECT_NEAR(sf.frequencies(1), 1000.0, 1e-10);
 }
+
+// ============== Coriolis / Lancaster QEP tests ==============
+
+TEST(Cyclic, CoriolisOffMatchesBaseline) {
+    // include_coriolis=false should give whirl_direction=0 for all modes
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(5000.0, 5, {}, 0, false);
+    ASSERT_GT(results.size(), 0u);
+
+    for (const auto& r : results) {
+        for (int m = 0; m < r.whirl_direction.size(); m++) {
+            EXPECT_EQ(r.whirl_direction(m), 0)
+                << "k=" << r.harmonic_index << " mode=" << m;
+        }
+    }
+}
+
+TEST(Cyclic, CoriolisK0FallsBackToStandard) {
+    // k=0 should always use standard solver: whirl=0 even with Coriolis
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(5000.0, 5, {0}, 0, true);
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].harmonic_index, 0);
+    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+        EXPECT_EQ(results[0].whirl_direction(m), 0);
+    }
+}
+
+TEST(Cyclic, CoriolisZeroRPMSameAsNoCoriolis) {
+    // At RPM=0, Coriolis should have no effect
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results_no  = solver.solve_at_rpm(0.0, 5, {3}, 0, false);
+    auto results_yes = solver.solve_at_rpm(0.0, 5, {3}, 0, true);
+    ASSERT_EQ(results_no.size(), 1u);
+    ASSERT_EQ(results_yes.size(), 1u);
+
+    int nm = std::min(results_no[0].frequencies.size(),
+                      results_yes[0].frequencies.size());
+    for (int m = 0; m < nm; m++) {
+        EXPECT_NEAR(results_no[0].frequencies(m),
+                    results_yes[0].frequencies(m), 1e-6)
+            << "mode=" << m;
+    }
+}
+
+TEST(Cyclic, CoriolisProducesFWBWSplitting) {
+    // At high RPM with Coriolis, k>0 modes should have FW and BW
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(10000.0, 10, {3}, 0, true);
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].harmonic_index, 3);
+
+    int n_fw = 0, n_bw = 0, n_stand = 0;
+    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+        int w = results[0].whirl_direction(m);
+        if (w == 1) n_fw++;
+        else if (w == -1) n_bw++;
+        else n_stand++;
+    }
+
+    EXPECT_TRUE(n_fw > 0) << "k=3 should have FW modes";
+    EXPECT_TRUE(n_bw > 0) << "k=3 should have BW modes";
+}
+
+TEST(Cyclic, CoriolisFWGreaterThanBW) {
+    // For same mode family: FW rotating-frame frequency > BW
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    auto results = solver.solve_at_rpm(10000.0, 10, {3}, 0, true);
+    ASSERT_EQ(results.size(), 1u);
+
+    // Collect first FW and first BW frequencies
+    double first_fw = -1, first_bw = -1;
+    for (int m = 0; m < results[0].whirl_direction.size(); m++) {
+        if (results[0].whirl_direction(m) == 1 && first_fw < 0)
+            first_fw = results[0].frequencies(m);
+        if (results[0].whirl_direction(m) == -1 && first_bw < 0)
+            first_bw = results[0].frequencies(m);
+    }
+    if (first_fw >= 0 && first_bw >= 0) {
+        EXPECT_GT(first_fw, first_bw)
+            << "FW=" << first_fw << " should be > BW=" << first_bw;
+    }
+}
+
+TEST(Cyclic, CoriolisStationaryFrameConversion) {
+    // Verify compute_stationary_frame handles Coriolis modes (whirl != 0)
+    ModalResult rot;
+    rot.harmonic_index = 3;
+    rot.rpm = 6000.0;
+    rot.frequencies.resize(4);
+    // BW mode (lower freq), FW mode (higher freq), BW, FW
+    rot.frequencies << 450.0, 550.0, 900.0, 1100.0;
+    rot.whirl_direction.resize(4);
+    rot.whirl_direction << -1, 1, -1, 1;
+    rot.mode_shapes = Eigen::MatrixXcd::Zero(6, 4);
+
+    auto sf = CyclicSymmetrySolver::compute_stationary_frame(rot, 24);
+
+    // k=3, RPM=6000 => omega=200*pi rad/s => k*omega/(2pi) = 3*100 = 300 Hz
+    double k_omega_hz = 300.0;
+    // BW(450): |450 + (-1)*300| = 150 Hz
+    // FW(550): |550 + 1*300| = 850 Hz
+    // BW(900): |900 + (-1)*300| = 600 Hz
+    // FW(1100): |1100 + 1*300| = 1400 Hz
+
+    ASSERT_EQ(sf.frequencies.size(), 4);
+    // Sorted: 150, 600, 850, 1400
+    EXPECT_NEAR(sf.frequencies(0), 150.0, 1e-6);
+    EXPECT_NEAR(sf.frequencies(1), 600.0, 1e-6);
+    EXPECT_NEAR(sf.frequencies(2), 850.0, 1e-6);
+    EXPECT_NEAR(sf.frequencies(3), 1400.0, 1e-6);
+    // Check whirl preserved after sorting
+    EXPECT_EQ(sf.whirl_direction(0), -1);  // 150 Hz was BW
+    EXPECT_EQ(sf.whirl_direction(1), -1);  // 600 Hz was BW
+    EXPECT_EQ(sf.whirl_direction(2), 1);   // 850 Hz was FW
+    EXPECT_EQ(sf.whirl_direction(3), 1);   // 1400 Hz was FW
+}
+
+TEST(Cyclic, CoriolisDMatrixHermitian) {
+    // Verify that D = i * 2 * omega * G_k is Hermitian after cyclic projection
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    GlobalAssembler assembler;
+    assembler.assemble(mesh, mat);
+    assembler.assemble_rotating_effects(mesh, mat, 100.0);
+
+    SpMatd G = assembler.G();
+    // Verify G is skew-symmetric: G + G^T = 0
+    SpMatd G_sym = G + SpMatd(G.transpose());
+    double g_err = 0.0;
+    for (int col = 0; col < G_sym.outerSize(); ++col)
+        for (SpMatd::InnerIterator it(G_sym, col); it; ++it)
+            g_err = std::max(g_err, std::abs(it.value()));
+    EXPECT_LT(g_err, 1e-10 * G.norm()) << "G should be skew-symmetric";
+
+    // Project through cyclic transformation for k=3
+    CyclicSymmetrySolver solver(mesh, mat);
+    SpMatcd T3 = solver.get_transformation(3);
+    SpMatcd T3_H = T3.adjoint();
+
+    // Convert G to complex
+    int ndof = mesh.num_dof();
+    SpMatcd G_complex(ndof, ndof);
+    {
+        std::vector<TripletC> gc;
+        for (int col = 0; col < G.outerSize(); ++col)
+            for (SpMatd::InnerIterator it(G, col); it; ++it)
+                gc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+        G_complex.setFromTriplets(gc.begin(), gc.end());
+    }
+
+    SpMatcd G_k = (T3_H * G_complex * T3).pruned(1e-15);
+    // G_k should be skew-Hermitian: G_k + G_k^H = 0
+    SpMatcd G_k_check = G_k + SpMatcd(G_k.adjoint());
+    double gk_err = 0.0;
+    for (int col = 0; col < G_k_check.outerSize(); ++col)
+        for (SpMatcd::InnerIterator it(G_k_check, col); it; ++it)
+            gk_err = std::max(gk_err, std::abs(it.value()));
+    EXPECT_LT(gk_err, 1e-10 * G_k.norm()) << "G_k should be skew-Hermitian";
+
+    // D = i * 2 * omega * G_k should be Hermitian
+    double omega = 100.0;
+    std::complex<double> factor(0.0, 2.0 * omega);
+    SpMatcd D_k = factor * G_k;
+    SpMatcd D_check = D_k - SpMatcd(D_k.adjoint());
+    double d_err = 0.0;
+    for (int col = 0; col < D_check.outerSize(); ++col)
+        for (SpMatcd::InnerIterator it(D_check, col); it; ++it)
+            d_err = std::max(d_err, std::abs(it.value()));
+    EXPECT_LT(d_err, 1e-10 * D_k.norm()) << "D = i*2*omega*G_k should be Hermitian";
+}
+
+TEST(Cyclic, AllHarmonicsReturnResults) {
+    // Verify that all requested harmonics produce results (no silently dropped)
+    Mesh mesh = load_wedge_mesh();
+    Material mat(200e9, 0.3, 7850);
+    CyclicSymmetrySolver solver(mesh, mat);
+
+    int max_k = mesh.num_sectors / 2;
+    auto results = solver.solve_at_rpm(3000.0, 5, {}, 1);  // single thread
+    EXPECT_EQ(static_cast<int>(results.size()), max_k + 1)
+        << "All " << (max_k + 1) << " harmonics should produce results";
+}
