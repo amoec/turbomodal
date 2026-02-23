@@ -24,6 +24,8 @@ endif()
 if(MSVC)
   add_compile_options(/utf-8 /W3 /EHsc)
   add_definitions(-D_CRT_SECURE_NO_WARNINGS -DNOMINMAX)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
 option(BUILD_PYTHON "Build Python bindings" ON)

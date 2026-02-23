@@ -529,6 +529,13 @@ def plot_full_annulus(
 
     plotter = pv.Plotter(off_screen=off_screen)
 
+    n_elem = elements.shape[0]
+    # Pre-allocate arrays for all sectors to avoid O(n_sectors^2) vstack
+    all_nodes = np.empty((n_sectors * n_nodes, 3), dtype=np.float64)
+    all_cells = np.empty((n_sectors * n_elem, 11), dtype=np.int64)
+    all_celltypes = np.full(n_sectors * n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
+    all_scalars = np.empty(n_sectors * n_nodes, dtype=np.float64)
+
     for s in range(n_sectors):
         theta = s * sector_angle
 
@@ -546,30 +553,18 @@ def plot_full_annulus(
 
         deformed = rotated_nodes + scale * u_real
 
-        # Build PyVista grid for this sector
-        n_elem = elements.shape[0]
-        offset = s * n_nodes  # node index offset for this sector
+        # Build PyVista cells for this sector
+        node_offset = s * n_nodes
+        elem_offset = s * n_elem
 
-        cells = np.empty((n_elem, 11), dtype=np.int64)
+        cells = all_cells[elem_offset:elem_offset + n_elem]
         cells[:, 0] = 10
-        cells[:, 1:] = elements + offset
+        cells[:, 1:] = elements + node_offset
 
-        celltypes = np.full(n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
-
-        # Accumulate all sector nodes
-        if s == 0:
-            all_nodes = deformed.copy()
-            all_cells = cells.copy()
-            all_celltypes = celltypes.copy()
-            all_scalars = np.sqrt(np.sum(u_real ** 2, axis=1))
-        else:
-            all_nodes = np.vstack([all_nodes, deformed])
-            all_cells = np.vstack([all_cells, cells])
-            all_celltypes = np.concatenate([all_celltypes, celltypes])
-            all_scalars = np.concatenate([
-                all_scalars,
-                np.sqrt(np.sum(u_real ** 2, axis=1)),
-            ])
+        all_nodes[node_offset:node_offset + n_nodes] = deformed
+        all_scalars[node_offset:node_offset + n_nodes] = np.sqrt(
+            np.sum(u_real ** 2, axis=1)
+        )
 
     grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
     grid.point_data["displacement"] = all_scalars

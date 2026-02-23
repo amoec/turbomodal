@@ -222,3 +222,14 @@ TEST(PotentialFlow, MeridionalMeshFromPoints) {
         EXPECT_NEAR(nn, 1.0, 1e-12) << "Normal should be unit length";
     }
 }
+
+// ---- Negative test: coincident points on hub axis return zero ----
+
+TEST(PotentialFlow, CoincidentHubAxisPoints_ReturnsZero) {
+    // Both points at r=0, rp=0 on the axis → a2=0, should return 0.0
+    double G = AxiBEMSolver::green_function(0, 0.0, 0.0, 0.0, 0.0);
+    EXPECT_DOUBLE_EQ(G, 0.0) << "Green's function should return 0 for rp=0";
+    // Same with n=1
+    G = AxiBEMSolver::green_function(1, 0.0, 0.0, 0.0, 0.0);
+    EXPECT_DOUBLE_EQ(G, 0.0);
+}

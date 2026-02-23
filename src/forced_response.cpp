@@ -239,7 +239,6 @@ Eigen::VectorXcd ForcedResponseSolver::build_eo_excitation(
     }
 
     // UNIFORM_PRESSURE: apply force proportional to exp(i*EO*theta) at each node
-    double sector_angle = 2.0 * PI / mesh_.num_sectors;
     for (int i = 0; i < mesh_.num_nodes(); i++) {
         double x = mesh_.nodes(i, 0);
         double y = mesh_.nodes(i, 1);

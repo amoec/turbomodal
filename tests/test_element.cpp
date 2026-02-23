@@ -744,3 +744,14 @@ TEST(TET10, AbsDetJFallbackProducesValidMatrices) {
             << "M diagonal at " << i << " is not positive: " << M(i, i);
     }
 }
+
+// ---- Negative test: degenerate element throws on B_matrix ----
+
+TEST(TET10, DegenerateElement_ThrowsOnBMatrix) {
+    // All nodes collapsed to a single point → singular Jacobian
+    TET10Element elem;
+    for (int i = 0; i < 10; i++) {
+        elem.node_coords.row(i) = Eigen::Vector3d(1.0, 2.0, 3.0);
+    }
+    EXPECT_THROW(elem.B_matrix(0.25, 0.25, 0.25), std::runtime_error);
+}

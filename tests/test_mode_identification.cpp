@@ -208,3 +208,15 @@ TEST_F(ModeIdIntegration, IdentifyModes_WhirlFromResult) {
         }
     }
 }
+
+// ---- Negative test: undersized mode_shape throws ----
+
+TEST(ModeIdentification, UndersizedModeShape_Throws) {
+    Mesh mesh = make_test_mesh_mi();
+    int n_nodes = mesh.num_nodes();
+    // mode_shape with enough entries to pass the <3 guard but fewer than 3*n_nodes
+    ASSERT_GT(3 * n_nodes, 3) << "Test mesh must have >1 node";
+    Eigen::VectorXcd too_small = Eigen::VectorXcd::Zero(3);
+    EXPECT_THROW(identify_nodal_circles(too_small, mesh), std::invalid_argument);
+    EXPECT_THROW(classify_mode_family(too_small, mesh), std::invalid_argument);
+}
