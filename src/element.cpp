@@ -31,6 +31,54 @@ const std::array<Eigen::Vector3d, 5> TET10Element::mass_gauss_points = {
 const std::array<double, 5> TET10Element::mass_gauss_weights = {
     {-2.0 / 15.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0}};
 
+// Keast Rule 6: 14-point degree-4 quadrature, ALL positive weights.
+// Reference: Keast, CMAME 55(3), 1986, pp. 339-348.
+//
+// Three symmetry groups in barycentric coords (L1,L2,L3,L4):
+//   Group 1 (6 pts): edge-midpoint type (A,A,B,B), A=0.5, B=0.0
+//     w = 6 * 0.00317460317460317450 = 0.01904761904761905
+//   Group 2 (4 pts): vertex type (A,B,B,B), A=0.698419704324386603, B=0.100526765225204467
+//     w = 6 * 0.01476497079049678 = 0.08858982474298068
+//   Group 3 (4 pts): face type (A,B,B,B), A=0.0568813795204234229, B=0.314372873493192195
+//     w = 6 * 0.02213979111426512 = 0.13283874668559073
+//
+// Natural coordinates: (xi, eta, zeta) = (L2, L3, L4), L1 = 1-xi-eta-zeta.
+// Sum of all weights = 6*0.019048 + 4*0.088590 + 4*0.132839 = 1/6 (ref tet volume).
+const std::array<Eigen::Vector3d, 14> TET10Element::mass_gauss_points_14 = {{
+    // Group 1: 6 edge-midpoint permutations of (A=0.5, A=0.5, B=0, B=0)
+    // Barycentric (L1,L2,L3,L4) → natural (xi=L2, eta=L3, zeta=L4)
+    {0.5, 0.5, 0.0},  // (0, 0.5, 0.5, 0)
+    {0.5, 0.0, 0.5},  // (0, 0.5, 0, 0.5)
+    {0.5, 0.0, 0.0},  // (0.5, 0.5, 0, 0)
+    {0.0, 0.5, 0.5},  // (0, 0, 0.5, 0.5)
+    {0.0, 0.5, 0.0},  // (0.5, 0, 0.5, 0)
+    {0.0, 0.0, 0.5},  // (0.5, 0, 0, 0.5)
+    // Group 2: 4 vertex-type permutations of (A=0.6984197, B, B, B)
+    // where B = 0.100526765225204467
+    {0.100526765225204467, 0.100526765225204467, 0.100526765225204467},  // L1=A
+    {0.698419704324386603, 0.100526765225204467, 0.100526765225204467},  // L2=A
+    {0.100526765225204467, 0.698419704324386603, 0.100526765225204467},  // L3=A
+    {0.100526765225204467, 0.100526765225204467, 0.698419704324386603},  // L4=A
+    // Group 3: 4 face-type permutations of (A=0.0568814, B, B, B)
+    // where B = 0.314372873493192195
+    {0.314372873493192195, 0.314372873493192195, 0.314372873493192195},  // L1=A
+    {0.0568813795204234229, 0.314372873493192195, 0.314372873493192195}, // L2=A
+    {0.314372873493192195, 0.0568813795204234229, 0.314372873493192195}, // L3=A
+    {0.314372873493192195, 0.314372873493192195, 0.0568813795204234229}  // L4=A
+}};
+
+// Weights scaled by 1/6 (reference tet volume) to match codebase convention
+// where quadrature weights already include the simplex volume factor.
+const std::array<double, 14> TET10Element::mass_gauss_weights_14 = {{
+    // Group 1: 6 edge-midpoint points  (0.01904761904761905 / 6)
+    0.00317460317460317503, 0.00317460317460317503, 0.00317460317460317503,
+    0.00317460317460317503, 0.00317460317460317503, 0.00317460317460317503,
+    // Group 2: 4 vertex-type points  (0.08858982474298068 / 6)
+    0.01476497079049678, 0.01476497079049678, 0.01476497079049678, 0.01476497079049678,
+    // Group 3: 4 face-type points  (0.13283874668559073 / 6)
+    0.02213979111426512, 0.02213979111426512, 0.02213979111426512, 0.02213979111426512
+}};
+
 // TET10 node ordering (standard Gmsh convention):
 //   Corners: 0,1,2,3  (vertices of tetrahedron)
 //   Mid-edge: 4(0-1), 5(1-2), 6(0-2), 7(0-3), 8(1-3), 9(2-3)
@@ -250,14 +298,14 @@ Matrix30d TET10Element::stiffness(const Material &mat) const {
 Matrix30d TET10Element::mass(const Material &mat) const {
   Matrix30d Me = Matrix30d::Zero();
 
-  // 4-point Gauss quadrature (degree 2) for mass matrix.
-  // Under-integrates the degree-4 integrand N^T*N but guarantees
-  // a positive-definite mass matrix (all weights positive).
-  for (int gp = 0; gp < 4; gp++) {
-    double xi = gauss_points[gp](0);
-    double eta = gauss_points[gp](1);
-    double zeta = gauss_points[gp](2);
-    double w = gauss_weights[gp];
+  // Keast Rule 6: 14-point degree-4 quadrature with all positive weights.
+  // Integrates the degree-4 N^T*N integrand exactly while guaranteeing a
+  // positive-definite element mass matrix.
+  for (int gp = 0; gp < 14; gp++) {
+    double xi = mass_gauss_points_14[gp](0);
+    double eta = mass_gauss_points_14[gp](1);
+    double zeta = mass_gauss_points_14[gp](2);
+    double w = mass_gauss_weights_14[gp];
 
     Vector10d N = shape_functions(xi, eta, zeta);
     Eigen::Matrix3d J = jacobian(xi, eta, zeta);

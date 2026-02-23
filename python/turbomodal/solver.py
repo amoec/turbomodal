@@ -16,36 +16,12 @@ from turbomodal._core import (
     ModalResult,
     SolverConfig,
 )
+from turbomodal._utils import progress_bar as _progress_bar
 
 # Verbosity levels
 SILENT = 0
 PROGRESS = 1
 DETAILED = 2
-
-
-def _progress_bar(
-    current: int,
-    total: int,
-    width: int = 40,
-    prefix: str = "",
-    suffix: str = "",
-    elapsed: float = 0.0,
-) -> str:
-    """Render a text progress bar."""
-    frac = current / max(total, 1)
-    filled = int(width * frac)
-    bar = "=" * filled + ">" * (1 if filled < width else 0) + "." * (width - filled - 1)
-    pct = f"{100 * frac:5.1f}%"
-
-    eta_str = ""
-    if current > 0 and elapsed > 0:
-        eta = elapsed / current * (total - current)
-        if eta >= 60:
-            eta_str = f"  ETA {eta / 60:.1f}m"
-        else:
-            eta_str = f"  ETA {eta:.0f}s"
-
-    return f"\r{prefix}[{bar}] {pct}  ({current}/{total}){suffix}{eta_str}"
 
 
 def solve(
@@ -60,6 +36,7 @@ def solve(
     max_threads: int = 0,
     hub_constraint: str = "fixed",
     include_coriolis: bool = False,
+    min_frequency: float = 0.0,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -80,6 +57,10 @@ def solve(
     include_coriolis : if True, include gyroscopic (Coriolis) coupling via
         Lancaster linearization of the QEP.  Produces mode-shape-dependent
         FW/BW splitting in the rotating frame for k > 0.
+    min_frequency : minimum frequency threshold in Hz.  Modes below this are
+        discarded as rigid body modes.  Set > 0 when using
+        ``hub_constraint="free"`` to filter out zero-frequency rigid body
+        modes that arise from the unconstrained system.
 
     Returns
     -------
@@ -103,7 +84,20 @@ def solve(
 
     t0 = time.perf_counter()
     solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
-    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis)
+
+    progress_cb = None
+    if verbose >= PROGRESS:
+        def _on_progress(done: int, total: int) -> None:
+            elapsed = time.perf_counter() - t0
+            bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+            sys.stdout.write(bar)
+            sys.stdout.flush()
+            if done == total:
+                sys.stdout.write("\n")
+        progress_cb = _on_progress
+
+    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis,
+                                   min_frequency, progress_cb)
     elapsed = time.perf_counter() - t0
 
     if verbose >= PROGRESS:
@@ -128,6 +122,7 @@ def rpm_sweep(
     max_threads: int = 0,
     hub_constraint: str = "fixed",
     include_coriolis: bool = False,
+    min_frequency: float = 0.0,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -146,6 +141,9 @@ def rpm_sweep(
         contact).  Centrifugal prestress is disabled when hub is free.
     include_coriolis : if True, include gyroscopic (Coriolis) coupling via
         Lancaster linearization of the QEP.
+    min_frequency : minimum frequency threshold in Hz.  Modes below this are
+        discarded as rigid body modes.  Set > 0 when using
+        ``hub_constraint="free"``.
 
     Returns
     -------
@@ -179,7 +177,7 @@ def rpm_sweep(
     for i, rpm in enumerate(rpm_arr):
         t0 = time.perf_counter()
         results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
-                                       include_coriolis)
+                                       include_coriolis, min_frequency)
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 

@@ -191,9 +191,27 @@ PYBIND11_MODULE(_core, m) {
              py::arg("radius"),
              "Compute wave propagation velocity (m/s) for each mode. v = 2*pi*f*R/ND")
         .def("__repr__", [](const ModalResult& r) {
-            return "<ModalResult ND=" + std::to_string(r.harmonic_index) +
+            std::string s = "<ModalResult ND=" + std::to_string(r.harmonic_index) +
                    " rpm=" + std::to_string(r.rpm) +
-                   " n_modes=" + std::to_string(r.frequencies.size()) + ">";
+                   " n_modes=" + std::to_string(r.frequencies.size());
+            if (r.frequencies.size() > 0) {
+                s += " freqs=[";
+                int n = std::min(static_cast<int>(r.frequencies.size()), 6);
+                for (int i = 0; i < n; i++) {
+                    if (i > 0) s += ", ";
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%.1f", r.frequencies(i));
+                    s += buf;
+                    // Show FW/BW if whirl_direction is set
+                    if (r.whirl_direction.size() > i && r.whirl_direction(i) != 0) {
+                        s += (r.whirl_direction(i) > 0) ? " FW" : " BW";
+                    }
+                }
+                if (static_cast<int>(r.frequencies.size()) > n) s += ", ...";
+                s += "] Hz";
+            }
+            s += ">";
+            return s;
         });
 
     // --- StationaryFrameResult ---
@@ -226,18 +244,34 @@ PYBIND11_MODULE(_core, m) {
              py::arg("fluid") = FluidConfig(),
              py::arg("apply_hub_constraint") = true,
              py::keep_alive<1, 2>())  // solver keeps mesh alive
-        .def("solve_at_rpm", &CyclicSymmetrySolver::solve_at_rpm,
+        .def("solve_at_rpm",
+             [](CyclicSymmetrySolver& self, double rpm, int num_modes,
+                const std::vector<int>& hi, int max_threads, bool coriolis,
+                double min_freq, py::object progress_cb) {
+                 ProgressCallback cpp_cb = nullptr;
+                 if (!progress_cb.is_none()) {
+                     cpp_cb = [progress_cb](int done, int total) {
+                         py::gil_scoped_acquire gil;
+                         progress_cb(done, total);
+                     };
+                 }
+                 py::gil_scoped_release release;
+                 return self.solve_at_rpm(rpm, num_modes, hi, max_threads,
+                                          coriolis, min_freq, cpp_cb);
+             },
              py::arg("rpm"), py::arg("num_modes_per_harmonic"),
              py::arg("harmonic_indices") = std::vector<int>{},
              py::arg("max_threads") = 0,
              py::arg("include_coriolis") = false,
-             "Solve modal analysis at a given RPM",
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("min_frequency") = 0.0,
+             py::arg("progress_cb") = py::none(),
+             "Solve modal analysis at a given RPM")
         .def("solve_rpm_sweep", &CyclicSymmetrySolver::solve_rpm_sweep,
              py::arg("rpm_values"), py::arg("num_modes_per_harmonic"),
              py::arg("harmonic_indices") = std::vector<int>{},
              py::arg("max_threads") = 0,
              py::arg("include_coriolis") = false,
+             py::arg("min_frequency") = 0.0,
              "Solve over a range of RPM values",
              py::call_guard<py::gil_scoped_release>())
         .def_static("compute_stationary_frame",

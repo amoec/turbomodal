@@ -1121,73 +1121,7 @@ def _optimize_mesh(order: int) -> None:
         gmsh.model.mesh.optimize("HighOrderElastic")
 
 
-def _rotation_matrix_4x4(axis: int, angle: float) -> list[float]:
-    """Build a flat row-major 4x4 affine rotation matrix for gmsh.
-
-    Parameters
-    ----------
-    axis : 0=X, 1=Y, 2=Z
-    angle : rotation angle in radians
-    """
-    c = np.cos(angle)
-    s = np.sin(angle)
-    if axis == 0:  # rotation about X
-        return [
-            1,
-            0,
-            0,
-            0,
-            0,
-            c,
-            -s,
-            0,
-            0,
-            s,
-            c,
-            0,
-            0,
-            0,
-            0,
-            1,
-        ]
-    if axis == 1:  # rotation about Y
-        return [
-            c,
-            0,
-            s,
-            0,
-            0,
-            1,
-            0,
-            0,
-            -s,
-            0,
-            c,
-            0,
-            0,
-            0,
-            0,
-            1,
-        ]
-    # axis == 2: rotation about Z
-    return [
-        c,
-        -s,
-        0,
-        0,
-        s,
-        c,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        1,
-    ]
+from turbomodal._utils import rotation_matrix_4x4_flat as _rotation_matrix_4x4
 
 
 def _auto_detect_cyclic_boundaries(
