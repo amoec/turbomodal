@@ -27,9 +27,6 @@ TEST(ModeIdentification, GroundTruthLabel_Defaults) {
     GroundTruthLabel gt;
     EXPECT_DOUBLE_EQ(gt.rpm, 0.0);
     EXPECT_DOUBLE_EQ(gt.temperature, 293.15);
-    EXPECT_DOUBLE_EQ(gt.pressure_ratio, 1.0);
-    EXPECT_DOUBLE_EQ(gt.inlet_distortion, 0.0);
-    EXPECT_DOUBLE_EQ(gt.tip_clearance, 0.0);
     EXPECT_EQ(gt.nodal_diameter, 0);
     EXPECT_EQ(gt.nodal_circle, 0);
     EXPECT_EQ(gt.whirl_direction, 0);

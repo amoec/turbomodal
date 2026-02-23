@@ -20,9 +20,6 @@ struct GroundTruthLabel {
     // Operating condition
     double rpm = 0.0;
     double temperature = 293.15;     // K
-    double pressure_ratio = 1.0;
-    double inlet_distortion = 0.0;   // fraction 0-1
-    double tip_clearance = 0.0;      // mm
 
     // Mode identification
     int nodal_diameter = 0;
