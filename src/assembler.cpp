@@ -276,10 +276,12 @@ void GlobalAssembler::add_element_matrix(
     const Eigen::MatrixXd& Ke,
     const Eigen::VectorXi& dof_map) {
     int n = static_cast<int>(dof_map.size());
+    double norm = Ke.template lpNorm<Eigen::Infinity>();
+    double tol = 1e-15 * norm;
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++) {
             double val = Ke(i, j);
-            if (val != 0.0) {
+            if (std::abs(val) > tol) {
                 triplets.emplace_back(dof_map(i), dof_map(j), val);
             }
         }

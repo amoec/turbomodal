@@ -6,11 +6,14 @@ pre-meshed files (NASTRAN, Abaqus, VTK, gmsh MSH) via meshio.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger("turbomodal.io")
 
 from turbomodal._core import Mesh, NodeSet
 
@@ -124,7 +127,7 @@ def _detect_rotation_axis(num_sectors: int) -> int:
                 ]
             )
         except Exception:
-            pass
+            logger.debug("getBoundingBox failed for surface %d", tag)
 
     if not points:
         return 2  # fallback to Z
@@ -178,7 +181,7 @@ def _parse_step_units(filepath: Path) -> str:
 
     try:
         text = filepath.read_text(errors="ignore")
-    except Exception:
+    except OSError:
         return "unknown"
 
     # Match: LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(<prefix>, .METRE.)
@@ -239,7 +242,7 @@ def _parse_iges_units(filepath: Path) -> str:
 
     try:
         text = filepath.read_text(errors="ignore")
-    except Exception:
+    except OSError:
         return "unknown"
 
     # Collect Global Section lines (column 73 == 'G')
@@ -511,7 +514,7 @@ def _build_cad_info(
                 for v2 in (sb[c2], sb[c2 + 3]):
                     radii.append(np.sqrt(v1**2 + v2**2))
         except Exception:
-            pass
+            logger.debug("getBoundingBox failed for surface %d", tag)
 
     if radii:
         inner_radius = float(min(radii))
@@ -759,7 +762,7 @@ def load_cad(
                             "tag": tag, "center": center, "radius": r,
                         })
                     except Exception:
-                        pass
+                        logger.warning("getBoundingBox failed for left boundary surface %d", tag)
                 for tag in detected_right:
                     try:
                         sb = gmsh.model.getBoundingBox(2, tag)
@@ -773,7 +776,7 @@ def load_cad(
                             "tag": tag, "center": center, "radius": r,
                         })
                     except Exception:
-                        pass
+                        logger.warning("getBoundingBox failed for right boundary surface %d", tag)
 
                 # Clear mesh and remesh with correct periodic surfaces
                 gmsh.model.mesh.clear()
@@ -1165,6 +1168,7 @@ def _auto_detect_cyclic_boundaries(
         try:
             sb = gmsh.model.getBoundingBox(dim, tag)
         except Exception:
+            logger.debug("getBoundingBox failed for surface %d; skipping", tag)
             continue
         # Bounding-box centre as a reliable surface position estimate
         center = np.array(
@@ -1181,6 +1185,7 @@ def _auto_detect_cyclic_boundaries(
             v_mid = (bounds_min[1] + bounds_max[1]) / 2
             normal = gmsh.model.getNormal(tag, [u_mid, v_mid])
         except Exception:
+            logger.debug("getNormal failed for surface %d; skipping", tag)
             continue  # skip — cannot determine surface orientation
         # theta and radius in the perpendicular plane
         theta = np.arctan2(center[c2], center[c1])
@@ -1263,6 +1268,7 @@ def _auto_detect_cyclic_boundaries(
                         pt = gmsh.model.getValue(1, abs(tag_b), [t_param])
                         thetas_edge.append(np.arctan2(pt[c2], pt[c1]))
                 except Exception:
+                    logger.debug("edge parametrization failed for edge %d", abs(tag_b))
                     continue  # skip this edge, use others
             if len(thetas_edge) >= 4:
                 ref = sd["theta"]
@@ -1276,6 +1282,7 @@ def _auto_detect_cyclic_boundaries(
                 if spread > sector_angle * 0.10:
                     continue  # surface spans too much theta
         except Exception:
+            logger.debug("edge sampling failed for surface %d; accepting conservatively", tag)
             pass  # conservative: accept if edge sampling fails
 
         boundary_candidates.append(sd)

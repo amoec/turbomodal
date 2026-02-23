@@ -111,6 +111,7 @@ double AxiBEMSolver::green_function(int n, double r, double z,
     if (n == 0 && n_quad == 0) {
         // Analytical via elliptic integrals
         double a2 = (r + rp) * (r + rp) + dz * dz;
+        if (a2 < 1e-30) return 0.0;  // coincident points on hub axis
         double a = std::sqrt(a2);
         double m = 4.0 * r * rp / a2;
         if (m >= 1.0) m = 1.0 - 1e-15;
@@ -207,24 +208,7 @@ double AxiBEMSolver::green_self(int n, double r, double z,
     int nq = n_quad > 0 ? n_quad : std::max(2 * n + 8, 24);
     QuadRule circ = gauss_legendre(nq);
 
-    // Integrate G_n(r,z; r,z) * panel_length ... but the self-influence means
-    // integrating over the panel itself. Use a panel quadrature:
-    int np = 8;  // points along the panel
-    QuadRule panel_quad = gauss_legendre(np);
-
-    double sum = 0.0;
-    for (int ip = 0; ip < np; ip++) {
-        // Map panel quadrature from [-1,1] to [-L/2, L/2]
-        double s = 0.5 * L * panel_quad.points[ip] / PI;  // wrong mapping, fix below
-        // Actually, gauss_legendre maps to [0, 2*pi]. We need [-L/2, L/2].
-        // Let's just use a simple Gauss rule on [-1,1]:
-        // We already have the nodes from the [-1,1] computation before mapping.
-        // Hmm, our gauss_legendre function maps to [0, 2pi]. Let me compute differently.
-        // Instead, use the raw Gauss point: x in [-1,1], map to s = L/2 * x, weight = L/2 * w_raw
-        break;
-    }
-
-    // Simpler: use trapezoidal rule with singularity subtraction.
+    // Singularity subtraction approach for self-influence.
     // For n>=1 on the self-panel, the circumferential integral is convergent.
     // G_n(r,z; r+ds*tr, z+ds*tz) where (tr, tz) is the panel tangent, ds is small.
     // Just compute G_n at the panel midpoint as if it were a regular point.

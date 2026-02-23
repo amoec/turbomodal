@@ -14,6 +14,7 @@ import sys
 import numpy as np
 
 from turbomodal._utils import progress_bar as _progress_bar
+from turbomodal.noise import apply_noise, NoiseConfig
 
 
 @dataclass
@@ -61,8 +62,6 @@ def generate_signals_for_condition(
         'clean_signals': (n_sensors, n_samples) float64 (before noise)
         'modal_contributions': list of per-mode signal arrays
     """
-    from turbomodal.noise import apply_noise, NoiseConfig
-
     n_sensors = len(sensor_array.config.sensors)
     duration = config.duration
     if config.num_revolutions > 0 and rpm > 0:

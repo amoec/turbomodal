@@ -1,6 +1,7 @@
 #include "turbomodal/mode_identification.hpp"
 #include <algorithm>
 #include <numeric>
+#include <stdexcept>
 
 namespace turbomodal {
 
@@ -10,6 +11,12 @@ int identify_nodal_circles(
 {
     int n_nodes = mesh.num_nodes();
     if (n_nodes == 0 || mode_shape.size() < 3) return 0;
+    if (mode_shape.size() < 3 * n_nodes) {
+        throw std::invalid_argument(
+            "identify_nodal_circles: mode_shape size (" +
+            std::to_string(mode_shape.size()) + ") < 3 * n_nodes (" +
+            std::to_string(3 * n_nodes) + ")");
+    }
 
     // Compute radial distance and z-displacement for each node
     // Use nodes near the middle circumferential angle of the sector
@@ -83,6 +90,12 @@ std::string classify_mode_family(
 {
     int n_nodes = mesh.num_nodes();
     if (n_nodes == 0) return "B";
+    if (mode_shape.size() < 3 * n_nodes) {
+        throw std::invalid_argument(
+            "classify_mode_family: mode_shape size (" +
+            std::to_string(mode_shape.size()) + ") < 3 * n_nodes (" +
+            std::to_string(3 * n_nodes) + ")");
+    }
 
     // Compute RMS of each displacement component across all nodes
     double rms_radial = 0.0;

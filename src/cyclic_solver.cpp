@@ -664,7 +664,16 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
                 M_added_free_cache_[k].nonZeros() > 0) {
-                M_free += M_added_free_cache_[k];
+                const auto& Ma = M_added_free_cache_[k];
+                if (Ma.rows() != M_free.rows() || Ma.cols() != M_free.cols()) {
+                    throw std::runtime_error(
+                        "BEM added mass dimension mismatch at harmonic " +
+                        std::to_string(k) + ": (" + std::to_string(Ma.rows()) +
+                        "x" + std::to_string(Ma.cols()) + ") vs (" +
+                        std::to_string(M_free.rows()) + "x" +
+                        std::to_string(M_free.cols()) + ")");
+                }
+                M_free += Ma;
             }
 
             ModalResult result;
@@ -759,6 +768,18 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     result.frequencies = new_f;
                     result.mode_shapes = new_s;
                     result.whirl_direction = new_w;
+                }
+            }
+
+            // Truncate to requested number of modes (extra were requested above
+            // to compensate for filtered-out rigid body modes).
+            {
+                int n_have = static_cast<int>(result.frequencies.size());
+                int n_want = num_modes_per_harmonic;
+                if (n_have > n_want) {
+                    result.frequencies.conservativeResize(n_want);
+                    result.mode_shapes.conservativeResize(Eigen::NoChange, n_want);
+                    result.whirl_direction.conservativeResize(n_want);
                 }
             }
 

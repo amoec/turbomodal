@@ -239,10 +239,14 @@ class VirtualSensorArray:
         -------
         Sparse CSR matrix with shape ``(n_sensors, 3 * n_nodes)``.
         """
+        from scipy.spatial import cKDTree
+
         nodes = np.asarray(self._mesh.nodes)  # (n_nodes, 3)
         n_nodes = self._mesh.num_nodes()
         n_dof = 3 * n_nodes
         n_sensors = self.n_sensors
+
+        tree = cKDTree(nodes)
 
         rows: list[int] = []
         cols: list[int] = []
@@ -253,13 +257,14 @@ class VirtualSensorArray:
             direction = np.asarray(sensor.direction, dtype=np.float64)
             dir_norm = np.linalg.norm(direction)
             if dir_norm < 1e-30:
-                continue
+                raise ValueError(
+                    f"Sensor {s_idx}: zero-norm direction vector {sensor.direction}"
+                )
             direction = direction / dir_norm
 
-            # Find nearest node
-            diff = nodes - pos[np.newaxis, :]          # (n_nodes, 3)
-            dist_sq = np.sum(diff ** 2, axis=1)        # (n_nodes,)
-            nearest = int(np.argmin(dist_sq))
+            # Find nearest node via KD-tree (O(log N) per query)
+            _, nearest = tree.query(pos)
+            nearest = int(nearest)
 
             # Project displacement at *nearest* onto sensor direction.
             # DOFs for node *nearest* are at indices [3*nearest, 3*nearest+1, 3*nearest+2].

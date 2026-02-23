@@ -195,6 +195,14 @@ def _train_pytorch_model(
         mode_val_raw = _encode_mode_labels(
             y_val["nodal_diameter"], y_val["nodal_circle"]
         )
+        unseen = {int(v) for v in mode_val_raw if int(v) not in mode_label_encoder}
+        if unseen:
+            import warnings
+            warnings.warn(
+                f"Validation set contains {len(unseen)} unseen mode label(s) "
+                f"mapped to class 0: {sorted(unseen)[:5]}",
+                stacklevel=2,
+            )
         mode_val = np.array(
             [mode_label_encoder.get(int(v), 0) for v in mode_val_raw],
             dtype=np.int64,

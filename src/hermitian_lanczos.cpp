@@ -282,7 +282,6 @@ HermitianLanczosEigenSolver::solve(
     }
 
     int max_restarts = cfg.max_iterations;
-    bool converged = false;
 
     for (int restart = 0; restart <= max_restarts; restart++) {
         // Determine start index: after restart, we already have nev vectors

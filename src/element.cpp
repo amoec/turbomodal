@@ -1,5 +1,6 @@
 #include "turbomodal/element.hpp"
 #include <iostream>
+#include <stdexcept>
 
 namespace turbomodal {
 
@@ -225,6 +226,12 @@ Matrix6x30d TET10Element::B_matrix(double xi, double eta, double zeta) const {
   // Compute shape function derivatives in physical coordinates
   Matrix10x3d dNdxi = shape_derivatives(xi, eta, zeta);
   Eigen::Matrix3d J = dNdxi.transpose() * node_coords;
+  double detJ = J.determinant();
+  if (std::abs(detJ) < 1e-30) {
+    throw std::runtime_error(
+        "TET10::B_matrix: singular Jacobian (detJ=" + std::to_string(detJ) +
+        ") — degenerate element");
+  }
   Eigen::Matrix3d Jinv = J.inverse();
 
   // Physical derivatives: dN/dx = dN/dξ * J^{-T}

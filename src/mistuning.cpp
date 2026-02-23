@@ -1,4 +1,5 @@
 #include "turbomodal/mistuning.hpp"
+#include <iostream>
 #include <random>
 #include <Eigen/Eigenvalues>
 
@@ -19,7 +20,6 @@ MistuningResult FMMSolver::solve(
     // For N blades: harmonic indices go 0, 1, ..., N/2
     // Each harmonic index k has two modes (cos, sin) except k=0 and k=N/2
     // Total: N modes
-    int max_k = N / 2;
     int n_tuned = static_cast<int>(tuned_frequencies.size());
 
     // Build omega^2 for all N harmonic modes
@@ -71,7 +71,18 @@ MistuningResult FMMSolver::solve(
     // Solve the N x N eigenvalue problem: (Omega_tuned + delta_Omega) v = lambda v
     Eigen::MatrixXcd H = Omega_tuned + delta_Omega;
 
-    // Force Hermitian
+    // Verify Hermiticity before forcing symmetry
+    double asym = (H - H.adjoint()).norm();
+    double h_norm = H.norm();
+    double rel_asym = (h_norm > 0) ? asym / h_norm : asym;
+    if (rel_asym > 1e-4) {
+        throw std::runtime_error(
+            "FMM Hamiltonian is not Hermitian (relative asymmetry=" +
+            std::to_string(rel_asym) + ")");
+    } else if (rel_asym > 1e-10) {
+        std::cerr << "[FMM] Warning: Hamiltonian has relative asymmetry "
+                  << rel_asym << " (>1e-10); forcing Hermitian\n";
+    }
     H = (H + H.adjoint()) / 2.0;
 
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> eig(H);
