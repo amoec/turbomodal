@@ -669,14 +669,29 @@ def predict_mode_id(
     signals: np.ndarray,
     sample_rate: float,
     rpm: float = 0.0,
+    temperature: float = 293.15,
+    condition: "OperatingCondition | None" = None,
 ) -> dict[str, np.ndarray]:
     """Run mode identification on raw sensor signals.
 
     Extracts features via ``extract_features`` then calls ``model.predict``.
+
+    Parameters
+    ----------
+    model : trained ModeIDModel
+    signals : (n_sensors, n_samples) or (n_samples,) time-domain signals
+    sample_rate : sampling rate in Hz
+    rpm : rotational speed in RPM
+    temperature : bulk temperature in Kelvin
+    condition : OperatingCondition (convenience; overrides rpm and temperature)
     """
     from turbomodal.ml.features import extract_features, FeatureConfig
 
-    feat_config = FeatureConfig(rpm=rpm)
+    if condition is not None:
+        rpm = condition.rpm
+        temperature = condition.temperature
+
+    feat_config = FeatureConfig(rpm=rpm, temperature=temperature)
     features = extract_features(signals, sample_rate, feat_config)
 
     if features.ndim == 1:

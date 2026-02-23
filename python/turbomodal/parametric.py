@@ -30,8 +30,7 @@ class ParametricRange:
 
     Parameters
     ----------
-    name : parameter name; must be one of "rpm", "temperature",
-        "pressure_ratio", "inlet_distortion", "tip_clearance"
+    name : parameter name; must be one of "rpm", "temperature"
     low : lower bound of the range
     high : upper bound of the range
     log_scale : if True, sample uniformly in log-space (useful for
@@ -48,9 +47,6 @@ class ParametricRange:
 _PARAM_NAMES = frozenset({
     "rpm",
     "temperature",
-    "pressure_ratio",
-    "inlet_distortion",
-    "tip_clearance",
 })
 
 

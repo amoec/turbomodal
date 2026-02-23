@@ -11,9 +11,6 @@ from turbomodal.dataset import DatasetConfig, OperatingCondition
 def test_operating_condition_defaults():
     cond = OperatingCondition(condition_id=0, rpm=3000.0)
     assert cond.temperature == 293.15
-    assert cond.pressure_ratio == 1.0
-    assert cond.inlet_distortion == 0.0
-    assert cond.tip_clearance == 0.0
     assert cond.mistuning_pattern is None
 
 

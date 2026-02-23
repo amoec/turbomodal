@@ -18,9 +18,6 @@ class OperatingCondition:
     condition_id: int
     rpm: float
     temperature: float = 293.15
-    pressure_ratio: float = 1.0
-    inlet_distortion: float = 0.0
-    tip_clearance: float = 0.0
     mistuning_pattern: Optional[np.ndarray] = None
 ```
 
@@ -31,9 +28,6 @@ class OperatingCondition:
 | `condition_id` | `int` | required | Unique integer identifier |
 | `rpm` | `float` | required | Rotation speed in RPM |
 | `temperature` | `float` | `293.15` | Bulk temperature in Kelvin (20 C) |
-| `pressure_ratio` | `float` | `1.0` | Compressor/turbine pressure ratio |
-| `inlet_distortion` | `float` | `0.0` | Non-dimensional inlet distortion amplitude |
-| `tip_clearance` | `float` | `0.0` | Tip clearance in metres |
 | `mistuning_pattern` | `ndarray \| None` | `None` | Per-blade frequency deviation array (length N) |
 
 ### DatasetConfig
@@ -72,8 +66,7 @@ The exported HDF5 file has the following group structure:
 /mesh/num_sectors        scalar int    (stored as attribute)
 
 /conditions              structured array with fields:
-                         condition_id, rpm, temperature,
-                         pressure_ratio, inlet_distortion, tip_clearance
+                         condition_id, rpm, temperature
 
 /modes/eigenvalues/{cond_id}       (n_harmonics, n_modes) float64
 /modes/harmonic_index/{cond_id}    (n_harmonics,) int32
@@ -190,7 +183,7 @@ class ParametricRange:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | `str` | required | Parameter name: `"rpm"`, `"temperature"`, `"pressure_ratio"`, `"inlet_distortion"`, or `"tip_clearance"` |
+| `name` | `str` | required | Parameter name: `"rpm"` or `"temperature"` |
 | `low` | `float` | required | Lower bound |
 | `high` | `float` | required | Upper bound |
 | `log_scale` | `bool` | `False` | If True, sample uniformly in log-space |

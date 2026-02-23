@@ -21,7 +21,7 @@ def test_parametric_range_fields():
 
 
 def test_parametric_range_log_scale():
-    pr = ParametricRange(name="pressure_ratio", low=0.1, high=10.0, log_scale=True)
+    pr = ParametricRange(name="temperature", low=100.0, high=1000.0, log_scale=True)
     assert pr.log_scale is True
 
 
@@ -73,14 +73,14 @@ def test_generate_conditions_log_scale():
     cfg = ParametricSweepConfig(
         ranges=[
             ParametricRange("rpm", 1000.0, 5000.0),
-            ParametricRange("pressure_ratio", 0.1, 100.0, log_scale=True),
+            ParametricRange("temperature", 100.0, 1000.0, log_scale=True),
         ],
         num_samples=100,
     )
     conditions = generate_conditions(cfg)
     for cond in conditions:
-        assert cond.pressure_ratio > 0
-        assert 0.1 <= cond.pressure_ratio <= 100.0
+        assert cond.temperature > 0
+        assert 100.0 <= cond.temperature <= 1000.0
 
 
 def test_generate_conditions_multiple_params():

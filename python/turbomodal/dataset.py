@@ -18,23 +18,25 @@ import numpy as np
 class OperatingCondition:
     """A single operating condition for parametric modal analysis.
 
+    All fields are physics-coupled: they propagate to the solver,
+    signal generation, and ML feature extraction pipeline.
+
     Parameters
     ----------
     condition_id : unique integer identifier for this condition
-    rpm : rotation speed in revolutions per minute
-    temperature : bulk temperature in Kelvin (default 293.15 K = 20 C)
-    pressure_ratio : compressor/turbine pressure ratio (default 1.0)
-    inlet_distortion : non-dimensional inlet distortion amplitude (0 = clean)
-    tip_clearance : tip clearance in metres (0 = nominal)
-    mistuning_pattern : optional per-blade frequency deviation array (length N)
+    rpm : rotation speed in revolutions per minute.  Affects centrifugal
+        stiffening, spin softening, Coriolis coupling, and stationary-frame
+        frequency conversion in signal generation.
+    temperature : bulk temperature in Kelvin (default 293.15 K = 20 C).
+        Adjusts material Young's modulus via ``Material.at_temperature()``.
+    mistuning_pattern : optional per-blade frequency deviation array (length N).
+        When present, drives the Fundamental Mistuning Model (FMM) solver
+        in ``run_parametric_sweep``.
     """
 
     condition_id: int
     rpm: float
     temperature: float = 293.15
-    pressure_ratio: float = 1.0
-    inlet_distortion: float = 0.0
-    tip_clearance: float = 0.0
     mistuning_pattern: Optional[np.ndarray] = None
 
 
@@ -88,8 +90,7 @@ def export_modal_results(
         /mesh/num_sectors    scalar int
 
         /conditions          structured array with fields:
-                             condition_id, rpm, temperature,
-                             pressure_ratio, inlet_distortion, tip_clearance
+                             condition_id, rpm, temperature
 
         /modes/eigenvalues/{cond_id}       (n_harmonics, n_modes) float64
         /modes/harmonic_index/{cond_id}    (n_harmonics,) int32
@@ -130,9 +131,6 @@ def export_modal_results(
             ("condition_id", np.int32),
             ("rpm", np.float64),
             ("temperature", np.float64),
-            ("pressure_ratio", np.float64),
-            ("inlet_distortion", np.float64),
-            ("tip_clearance", np.float64),
         ])
         cond_arr = np.empty(len(conditions), dtype=cond_dtype)
         for i, c in enumerate(conditions):
@@ -140,9 +138,6 @@ def export_modal_results(
                 c.condition_id,
                 c.rpm,
                 c.temperature,
-                c.pressure_ratio,
-                c.inlet_distortion,
-                c.tip_clearance,
             )
         f.create_dataset("conditions", data=cond_arr, **comp_kwargs)
 
@@ -286,9 +281,6 @@ def load_modal_results(
                     condition_id=int(row["condition_id"]),
                     rpm=float(row["rpm"]),
                     temperature=float(row["temperature"]),
-                    pressure_ratio=float(row["pressure_ratio"]),
-                    inlet_distortion=float(row["inlet_distortion"]),
-                    tip_clearance=float(row["tip_clearance"]),
                 )
             )
 

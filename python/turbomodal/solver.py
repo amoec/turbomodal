@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
@@ -17,6 +17,9 @@ from turbomodal._core import (
     SolverConfig,
 )
 from turbomodal._utils import progress_bar as _progress_bar
+
+if TYPE_CHECKING:
+    from turbomodal.dataset import OperatingCondition
 
 # Verbosity levels
 SILENT = 0
@@ -37,6 +40,8 @@ def solve(
     hub_constraint: str = "fixed",
     include_coriolis: bool = False,
     min_frequency: float = 0.0,
+    temperature: float | None = None,
+    condition: OperatingCondition | None = None,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -61,11 +66,26 @@ def solve(
         discarded as rigid body modes.  Set > 0 when using
         ``hub_constraint="free"`` to filter out zero-frequency rigid body
         modes that arise from the unconstrained system.
+    temperature : bulk temperature in Kelvin.  When provided, the material
+        stiffness is adjusted via ``material.at_temperature(temperature)``
+        before solving.  Ignored if the material has ``E_slope == 0``.
+    condition : an ``OperatingCondition`` instance.  When provided, *rpm*
+        and *temperature* are taken from the condition (explicit keyword
+        arguments still override).
 
     Returns
     -------
     List of ModalResult, one per harmonic index (0 to N/2)
     """
+    # Resolve operating condition overrides
+    if condition is not None:
+        rpm = condition.rpm
+        if temperature is None:
+            temperature = condition.temperature
+
+    if temperature is not None:
+        material = material.at_temperature(temperature)
+
     if fluid is None:
         fluid = FluidConfig()
 
@@ -76,8 +96,9 @@ def solve(
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
         coriolis_str = " [Coriolis]" if include_coriolis else ""
+        temp_str = f"  T={temperature:.1f}K" if temperature is not None else ""
         print(
-            f"Solving at {rpm:.0f} RPM{coriolis_str}  ({mesh.num_nodes()} nodes, "
+            f"Solving at {rpm:.0f} RPM{coriolis_str}{temp_str}  ({mesh.num_nodes()} nodes, "
             f"{mesh.num_elements()} elements, {mesh.num_sectors} sectors, "
             f"{nd_str}, {num_modes} modes/ND)"
         )
@@ -123,6 +144,7 @@ def rpm_sweep(
     hub_constraint: str = "fixed",
     include_coriolis: bool = False,
     min_frequency: float = 0.0,
+    temperature: float | None = None,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -144,11 +166,17 @@ def rpm_sweep(
     min_frequency : minimum frequency threshold in Hz.  Modes below this are
         discarded as rigid body modes.  Set > 0 when using
         ``hub_constraint="free"``.
+    temperature : bulk temperature in Kelvin.  When provided, the material
+        stiffness is adjusted via ``material.at_temperature(temperature)``
+        before solving.
 
     Returns
     -------
     List of lists: results[rpm_idx][harmonic_idx] = ModalResult
     """
+    if temperature is not None:
+        material = material.at_temperature(temperature)
+
     if fluid is None:
         fluid = FluidConfig()
 
@@ -162,7 +190,8 @@ def rpm_sweep(
         max_k = mesh.num_sectors // 2
         nd_str = f"ND {hi}" if hi else f"ND 0..{max_k}"
         coriolis_str = " [Coriolis]" if include_coriolis else ""
-        print(f"RPM sweep{coriolis_str}: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
+        temp_str = f"  T={temperature:.1f}K" if temperature is not None else ""
+        print(f"RPM sweep{coriolis_str}{temp_str}: {n_rpm} points [{rpm_arr[0]:.0f} .. {rpm_arr[-1]:.0f}] RPM")
         print(
             f"  Mesh: {mesh.num_nodes()} nodes, {mesh.num_elements()} elements, "
             f"{mesh.num_sectors} sectors"

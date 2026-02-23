@@ -34,6 +34,27 @@ def _mesh_to_pyvista(mesh: Mesh):
 from turbomodal._utils import rotation_matrix_3x3 as _rotation_matrix
 
 
+def format_condition_label(condition) -> str:
+    """Format an OperatingCondition as a compact plot annotation string.
+
+    Only non-default fields are included. Returns an empty string when
+    all fields are at their defaults.
+
+    Parameters
+    ----------
+    condition : OperatingCondition
+
+    Returns
+    -------
+    str
+        e.g. ``"T=500K"`` or ``""`` when everything is default.
+    """
+    parts: list[str] = []
+    if condition.temperature != 293.15:
+        parts.append(f"T={condition.temperature:.0f}K")
+    return ", ".join(parts)
+
+
 def _replicate_sectors(
     nodes: np.ndarray,
     cells_per_sector: np.ndarray,
@@ -771,6 +792,7 @@ def plot_campbell(
     confidence_bands: dict | None = None,
     crossing_markers: bool = False,
     num_sectors: int = 0,
+    condition_label: str = "",
 ):
     """Plot Campbell diagram from RPM sweep results.
 
@@ -999,7 +1021,10 @@ def plot_campbell(
 
     ax.set_xlabel("RPM", fontsize=11)
     ax.set_ylabel("Frequency (Hz)", fontsize=11)
-    ax.set_title("Campbell Diagram", fontsize=13)
+    title = "Campbell Diagram"
+    if condition_label:
+        title += f"  ({condition_label})"
+    ax.set_title(title, fontsize=13)
     ax.set_xlim(rpms[0], rpms[-1])
     if max_freq:
         ax.set_ylim(0, max_freq)
@@ -1038,6 +1063,7 @@ def plot_zzenf(
     figsize: tuple[float, float] = (10, 8),
     confidence_bands: dict | None = None,
     crossing_markers: bool = False,
+    condition_label: str = "",
 ):
     """Plot ZZENF (zig-zag) interference diagram.
 
@@ -1082,7 +1108,10 @@ def plot_zzenf(
     ax.set_xlabel("Nodal Diameter")
     ax.set_ylabel("Frequency (Hz)")
     rpm = results_at_rpm[0].rpm if results_at_rpm else 0
-    ax.set_title(f"ZZENF Diagram @ {rpm:.0f} RPM")
+    title = f"ZZENF Diagram @ {rpm:.0f} RPM"
+    if condition_label:
+        title += f"  ({condition_label})"
+    ax.set_title(title)
     ax.set_xticks(range(half_N + 1))
     if max_freq:
         ax.set_ylim(0, max_freq)

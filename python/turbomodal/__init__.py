@@ -41,6 +41,7 @@ from turbomodal.viz import (
     animate_mode,
     plot_campbell,
     plot_zzenf,
+    format_condition_label,
 )
 
 # Subsystem B: Signal generation pipeline
@@ -124,6 +125,7 @@ __all__ = [
     "animate_mode",
     "plot_campbell",
     "plot_zzenf",
+    "format_condition_label",
     # Sensors & noise
     "SensorType",
     "SensorLocation",

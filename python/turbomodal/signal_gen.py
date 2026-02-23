@@ -42,6 +42,7 @@ def generate_signals_for_condition(
     config: SignalGenerationConfig,
     noise_config=None,
     forced_response_result=None,
+    condition=None,
 ) -> dict:
     """Generate synthetic sensor signals for a single operating condition.
 
@@ -53,6 +54,7 @@ def generate_signals_for_condition(
     config : signal generation configuration
     noise_config : NoiseConfig (optional, for adding noise)
     forced_response_result : ForcedResponseResult (optional, for amplitudes)
+    condition : OperatingCondition (optional, included in output for tracing)
 
     Returns
     -------
@@ -60,7 +62,7 @@ def generate_signals_for_condition(
         'signals': (n_sensors, n_samples) float64
         'time': (n_samples,) float64
         'clean_signals': (n_sensors, n_samples) float64 (before noise)
-        'modal_contributions': list of per-mode signal arrays
+        'condition': OperatingCondition (if provided)
     """
     n_sensors = len(sensor_array.config.sensors)
     duration = config.duration
@@ -152,11 +154,14 @@ def generate_signals_for_condition(
     if noise_config is not None:
         signals = apply_noise(signals, noise_config, config.sample_rate, rng)
 
-    return {
+    result = {
         "signals": signals,
         "time": t,
         "clean_signals": clean_signals,
     }
+    if condition is not None:
+        result["condition"] = condition
+    return result
 
 
 def generate_dataset_signals(
@@ -209,11 +214,12 @@ def generate_dataset_signals(
 
     for i in range(n_cond):
         fr = forced_response_results[i] if forced_response_results else None
-        rpm = conditions[i].rpm if i < len(conditions) else 0.0
+        cond = conditions[i] if i < len(conditions) else None
+        rpm = cond.rpm if cond is not None else 0.0
 
         result = generate_signals_for_condition(
             sensor_array, modal_results_per_condition[i],
-            rpm, config, noise_config, fr
+            rpm, config, noise_config, fr, condition=cond,
         )
 
         all_signals[i] = result["signals"]

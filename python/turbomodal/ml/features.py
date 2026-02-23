@@ -658,11 +658,20 @@ def build_feature_matrix(
             modal_result_proxies,
             cond.rpm,
             signal_config,
+            condition=cond,
         )
         signals = sig_result["signals"]  # (n_sensors, n_samples)
 
+        # Build a per-condition FeatureConfig with rpm and temperature
+        import dataclasses
+        cond_feature_config = dataclasses.replace(
+            feature_config,
+            rpm=cond.rpm,
+            temperature=cond.temperature,
+        )
+
         # Extract features (one feature vector for the whole condition)
-        feat = extract_features(signals, signal_config.sample_rate, feature_config)
+        feat = extract_features(signals, signal_config.sample_rate, cond_feature_config)
 
         # Create one sample per (harmonic, mode) pair, all sharing the
         # same feature vector (the condition-level features).
