@@ -16,6 +16,7 @@ from typing import Any, Optional
 import numpy as np
 
 from turbomodal._core import CyclicSymmetrySolver, FluidConfig, FMMSolver, Material
+from turbomodal._utils import progress_bar as _progress_bar
 from turbomodal.dataset import DatasetConfig, OperatingCondition, export_modal_results
 
 
@@ -148,29 +149,6 @@ def generate_conditions(config: ParametricSweepConfig) -> list[OperatingConditio
 # Progress bar
 # ---------------------------------------------------------------------------
 
-def _progress_bar(
-    current: int,
-    total: int,
-    width: int = 40,
-    elapsed: float = 0.0,
-) -> str:
-    """Render a compact text progress bar."""
-    frac = current / max(total, 1)
-    filled = int(width * frac)
-    bar = "=" * filled + ">" * (1 if filled < width else 0) + "." * (width - filled - 1)
-    pct = f"{100 * frac:5.1f}%"
-
-    eta_str = ""
-    if current > 0 and elapsed > 0:
-        eta = elapsed / current * (total - current)
-        if eta >= 60:
-            eta_str = f"  ETA {eta / 60:.1f}m"
-        else:
-            eta_str = f"  ETA {eta:.0f}s"
-
-    return f"\r  [{bar}] {pct}  ({current}/{total}){eta_str}"
-
-
 # ---------------------------------------------------------------------------
 # Sweep runner
 # ---------------------------------------------------------------------------
@@ -281,7 +259,7 @@ def run_parametric_sweep(
         elapsed = time.perf_counter() - t_start
 
         if verbose == 1:
-            bar = _progress_bar(idx + 1, n_cond, elapsed=elapsed)
+            bar = _progress_bar(idx + 1, n_cond, prefix="  ", elapsed=elapsed)
             sys.stdout.write(bar)
             sys.stdout.flush()
             if idx == n_cond - 1:

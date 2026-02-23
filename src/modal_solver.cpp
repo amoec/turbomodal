@@ -217,16 +217,15 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_lancaster_qep(
     SpMatcd L2 = build_lancaster_L2(M, K, n);
 
     // Lancaster eigenvalues ω span both positive (FW) and negative (BW).
-    // For small systems (n2 <= 200), the dense fallback returns eigenvalues in
-    // ascending algebraic order, which would miss all positive (FW) eigenvalues.
-    // Request all eigenvalues for the dense path so our FW/BW selection sees
-    // the full spectrum.  For large systems, Lanczos shift-invert naturally
-    // finds eigenvalues near the shift from both sides.
+    // Lancaster eigenvalues come in ±ω pairs (FW/BW).  We need num_modes of
+    // each sign, so request at least 2*num_modes from Lanczos.  For small
+    // systems, request everything since dense solve is fast.
     int nev_request;
     if (n2 <= 200) {
         nev_request = n2 - 1;  // all eigenvalues (dense is fast for small n)
     } else {
-        nev_request = std::min(4 * num_modes, n2 - 1);
+        // Need 2*num_modes (FW+BW), plus margin for convergence
+        nev_request = std::min(6 * num_modes, n2 - 1);
     }
     if (nev_request <= 0) {
         status.message = "System too small for requested number of eigenvalues";
@@ -243,7 +242,7 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_lancaster_qep(
     // shift (which targets ω²) for consistent behavior.
     lanczos_cfg.shift = (config.shift > 0) ? std::sqrt(config.shift) : 0.1;
     lanczos_cfg.tolerance = config.tolerance;
-    lanczos_cfg.max_iterations = 10;
+    lanczos_cfg.max_iterations = 20;  // QEP needs more restarts than standard GEP
 
     auto lanczos_result = m_lancaster_lanczos.solve(L1, L2, lanczos_cfg);
 

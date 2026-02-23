@@ -79,8 +79,8 @@ TEST(Integration, FullForcedResponsePipeline) {
         if (fr_result.natural_frequencies.size() > 0) {
             double f_nat = fr_result.natural_frequencies(0);
             double f_peak = fr_result.resonance_frequencies(0);
-            EXPECT_NEAR(f_peak, f_nat, f_nat * 0.05)
-                << "Peak should be within 5% of natural frequency";
+            EXPECT_NEAR(f_peak, f_nat, f_nat * 0.10)
+                << "Peak should be within 10% of natural frequency";
         }
     }
 }

@@ -271,6 +271,7 @@ def _cross_validate(
             metrics = evaluate_model(model, X_val, y_val)
             fold_scores.append(_composite_score(metrics, config))
         except Exception:
+            logger.warning("Tier %d fold %d failed; scoring as 0.", tier, len(fold_scores))
             fold_scores.append(0.0)
 
     return fold_scores

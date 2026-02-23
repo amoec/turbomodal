@@ -725,7 +725,7 @@ def generate_explanation_card(
         sv = compute_shap_values(model, X_single, feature_names)
         shap_vals = sv[0] if sv.ndim > 1 else sv
     except Exception:
-        pass
+        logger.debug("SHAP computation failed for sample %d; skipping.", sample_idx)
 
     # Confidence interval from uncertainty
     confidence_interval = None

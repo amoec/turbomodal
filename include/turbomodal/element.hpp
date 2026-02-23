@@ -28,9 +28,17 @@ public:
     static const std::array<Eigen::Vector3d, 4> gauss_points;
     static const std::array<double, 4> gauss_weights;
 
-    // 5-point Stroud quadrature (degree 3) — for mass-type integrals (N^T*N, degree 4)
+    // 5-point Stroud quadrature (degree 3) — DEPRECATED: has negative centroid
+    // weight (-2/15) that can produce indefinite element mass matrices.
+    // Kept for reference only; use mass_gauss_points_14 for mass-type integrals.
     static const std::array<Eigen::Vector3d, 5> mass_gauss_points;
     static const std::array<double, 5> mass_gauss_weights;
+
+    // Keast Rule 6: 14-point quadrature (degree 4) — for mass-type integrals
+    // (N^T*N, degree 4).  All weights positive, guarantees positive-definite
+    // element mass matrices.
+    static const std::array<Eigen::Vector3d, 14> mass_gauss_points_14;
+    static const std::array<double, 14> mass_gauss_weights_14;
 };
 
 }  // namespace turbomodal

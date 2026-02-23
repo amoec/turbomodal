@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import sys
+
 import numpy as np
+
+from turbomodal._utils import progress_bar as _progress_bar
 
 
 @dataclass
@@ -70,14 +74,18 @@ def generate_signals_for_condition(
     signals = np.zeros((n_sensors, n_samples))
     rng = np.random.default_rng(config.seed)
 
+    # Rotation rate in Hz for stationary-frame frequency conversion
+    omega_hz = rpm / 60.0
+
     mode_count = 0
     for result in modal_results:
         n_modes = len(result.frequencies)
-        for m in range(n_modes):
-            freq = result.frequencies[m]
+        k = result.harmonic_index
+        whirl_arr = np.asarray(result.whirl_direction) if hasattr(result, 'whirl_direction') else np.zeros(n_modes, dtype=np.int32)
 
-            if config.max_frequency > 0 and freq > config.max_frequency:
-                continue
+        for m in range(n_modes):
+            f_rot = result.frequencies[m]
+
             if config.max_modes_per_harmonic > 0 and m >= config.max_modes_per_harmonic:
                 break
 
@@ -96,17 +104,46 @@ def generate_signals_for_condition(
             else:
                 amp = config.amplitude_scale
 
-            # Random phase
-            phase = rng.uniform(0, 2 * np.pi)
+            # Convert rotating-frame frequency to stationary-frame.
+            # For stator-mounted sensors observing a spinning disk:
+            #   FW: f_stat = f_rot + k * Ω    (whirl_direction = +1)
+            #   BW: f_stat = |f_rot - k * Ω|  (whirl_direction = -1)
+            # When Coriolis is off (whirl=0) and k > 0, both FW and BW
+            # components are generated from the degenerate mode pair.
+            k_omega = k * omega_hz
+            w = int(whirl_arr[m]) if m < len(whirl_arr) else 0
 
-            # Add this mode's contribution to all sensors
-            omega = 2 * np.pi * freq
-            for s in range(n_sensors):
-                sensor_amp = np.abs(sensor_response[s])
-                sensor_phase = np.angle(sensor_response[s])
-                signals[s, :] += amp * sensor_amp * np.cos(
-                    omega * t + phase + sensor_phase
-                )
+            if w != 0 or k == 0:
+                # Single component: either Coriolis-split or k=0 standing
+                freq = abs(f_rot + w * k_omega) if w != 0 else f_rot
+                if config.max_frequency > 0 and freq > config.max_frequency:
+                    mode_count += 1
+                    continue
+                phase = rng.uniform(0, 2 * np.pi)
+                omega_t = 2 * np.pi * freq
+                for s in range(n_sensors):
+                    sensor_amp = np.abs(sensor_response[s])
+                    sensor_phase = np.angle(sensor_response[s])
+                    signals[s, :] += amp * sensor_amp * np.cos(
+                        omega_t * t + phase + sensor_phase
+                    )
+            else:
+                # No Coriolis, k > 0: generate both FW and BW from the
+                # degenerate mode pair, each at half amplitude.
+                f_fw = f_rot + k_omega
+                f_bw = abs(f_rot - k_omega)
+                phase = rng.uniform(0, 2 * np.pi)
+                half_amp = amp * 0.5
+                for f_stat in (f_fw, f_bw):
+                    if config.max_frequency > 0 and f_stat > config.max_frequency:
+                        continue
+                    omega_t = 2 * np.pi * f_stat
+                    for s in range(n_sensors):
+                        sensor_amp = np.abs(sensor_response[s])
+                        sensor_phase = np.angle(sensor_response[s])
+                        signals[s, :] += half_amp * sensor_amp * np.cos(
+                            omega_t * t + phase + sensor_phase
+                        )
 
             mode_count += 1
 
@@ -155,7 +192,7 @@ def generate_dataset_signals(
         'sample_rate': float
         'time': (n_samples,) float64
     """
-    import sys
+    import time
 
     n_cond = len(modal_results_per_condition)
     n_sensors = len(sensor_array.config.sensors)
@@ -169,6 +206,7 @@ def generate_dataset_signals(
 
     all_signals = np.zeros((n_cond, n_sensors, n_samples))
     all_clean = np.zeros((n_cond, n_sensors, n_samples))
+    t_start = time.perf_counter()
 
     for i in range(n_cond):
         fr = forced_response_results[i] if forced_response_results else None
@@ -183,12 +221,12 @@ def generate_dataset_signals(
         all_clean[i] = result["clean_signals"]
 
         if verbose >= 1:
-            pct = 100 * (i + 1) / n_cond
-            sys.stdout.write(f"\r  Signal generation: {i+1}/{n_cond} ({pct:.0f}%)")
+            elapsed = time.perf_counter() - t_start
+            bar = _progress_bar(i + 1, n_cond, prefix="  Signal gen: ", elapsed=elapsed)
+            sys.stdout.write(bar)
             sys.stdout.flush()
-
-    if verbose >= 1:
-        sys.stdout.write("\n")
+            if i == n_cond - 1:
+                sys.stdout.write("\n")
 
     t = np.arange(n_samples) / config.sample_rate
 

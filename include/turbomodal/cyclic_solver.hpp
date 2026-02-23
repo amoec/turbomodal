@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "turbomodal/common.hpp"
 #include "turbomodal/mesh.hpp"
 #include "turbomodal/material.hpp"
@@ -8,6 +10,9 @@
 #include "turbomodal/added_mass.hpp"
 
 namespace turbomodal {
+
+// Callback: (completed, total) invoked from worker threads as each harmonic finishes.
+using ProgressCallback = std::function<void(int completed, int total)>;
 
 struct FluidConfig {
     enum class Type {
@@ -43,13 +48,16 @@ public:
         double rpm, int num_modes_per_harmonic,
         const std::vector<int>& harmonic_indices = {},
         int max_threads = 0,
-        bool include_coriolis = false);
+        bool include_coriolis = false,
+        double min_frequency = 0.0,
+        ProgressCallback progress_cb = nullptr);
 
     std::vector<std::vector<ModalResult>> solve_rpm_sweep(
         const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
         const std::vector<int>& harmonic_indices = {},
         int max_threads = 0,
-        bool include_coriolis = false);
+        bool include_coriolis = false,
+        double min_frequency = 0.0);
 
     void export_campbell_csv(const std::string& filename,
                              const std::vector<std::vector<ModalResult>>& results);

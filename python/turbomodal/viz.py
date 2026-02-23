@@ -31,16 +31,7 @@ def _mesh_to_pyvista(mesh: Mesh):
     return grid
 
 
-def _rotation_matrix(theta: float, rotation_axis: int) -> np.ndarray:
-    """Build a 3x3 rotation matrix for angle *theta* about the given axis."""
-    c = np.cos(theta)
-    s = np.sin(theta)
-    if rotation_axis == 0:  # X-axis: rotate in YZ
-        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
-    if rotation_axis == 1:  # Y-axis: rotate in XZ
-        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
-    # Z-axis: rotate in XY
-    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+from turbomodal._utils import rotation_matrix_3x3 as _rotation_matrix
 
 
 def _replicate_sectors(

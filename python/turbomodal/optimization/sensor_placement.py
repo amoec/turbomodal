@@ -283,8 +283,8 @@ def optimize_sensor_placement(
             nodes = np.asarray(mesh.nodes)
             if nodes.ndim == 2 and nodes.shape[1] >= 3:
                 candidates = nodes[:, :3].copy()
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            logger.debug("Could not extract node coordinates from mesh; using candidate grid.")
 
     if candidates is None:
         candidates = _generate_candidate_grid(config, n_dof)

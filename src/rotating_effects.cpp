@@ -145,19 +145,19 @@ Matrix30d RotatingEffects::spin_softening(
     // where Omega_mat = omega^2 * (I - a*a^T) projects onto the plane
     // perpendicular to the rotation axis a.
     //
-    // Integrand is N^T * Omega * N (degree 4): 4-point Gauss (degree 2)
-    // for positive weights; slight under-integration is acceptable.
+    // Integrand is N^T * Omega * N (degree 4): Keast Rule 6 (14-point,
+    // degree 4, all positive weights) for exact integration.
 
     Eigen::Vector3d a = axis.normalized();
     double omega2 = omega * omega;
     Eigen::Matrix3d Omega_mat = omega2 * (Eigen::Matrix3d::Identity() - a * a.transpose());
     Matrix30d Kw = Matrix30d::Zero();
 
-    for (int gp = 0; gp < 4; gp++) {
-        double xi   = TET10Element::gauss_points[gp](0);
-        double eta  = TET10Element::gauss_points[gp](1);
-        double zeta = TET10Element::gauss_points[gp](2);
-        double w    = TET10Element::gauss_weights[gp];
+    for (int gp = 0; gp < 14; gp++) {
+        double xi   = TET10Element::mass_gauss_points_14[gp](0);
+        double eta  = TET10Element::mass_gauss_points_14[gp](1);
+        double zeta = TET10Element::mass_gauss_points_14[gp](2);
+        double w    = TET10Element::mass_gauss_weights_14[gp];
 
         Vector10d N = elem.shape_functions(xi, eta, zeta);
         Eigen::Matrix3d J = elem.jacobian(xi, eta, zeta);
@@ -189,8 +189,8 @@ Matrix30d RotatingEffects::gyroscopic(
     // The full Coriolis term in the equation of motion is 2*omega*G,
     // but this function returns the base G matrix without the 2*omega factor.
     //
-    // Integrand is N^T * [a×] * N (degree 4): 4-point Gauss (degree 2)
-    // for positive weights; slight under-integration is acceptable.
+    // Integrand is N^T * [a×] * N (degree 4): Keast Rule 6 (14-point,
+    // degree 4, all positive weights) for exact integration.
 
     Eigen::Vector3d a = axis.normalized();
     Eigen::Matrix3d Omega_cross;
@@ -200,11 +200,11 @@ Matrix30d RotatingEffects::gyroscopic(
 
     Matrix30d Ge = Matrix30d::Zero();
 
-    for (int gp = 0; gp < 4; gp++) {
-        double xi   = TET10Element::gauss_points[gp](0);
-        double eta  = TET10Element::gauss_points[gp](1);
-        double zeta = TET10Element::gauss_points[gp](2);
-        double w    = TET10Element::gauss_weights[gp];
+    for (int gp = 0; gp < 14; gp++) {
+        double xi   = TET10Element::mass_gauss_points_14[gp](0);
+        double eta  = TET10Element::mass_gauss_points_14[gp](1);
+        double zeta = TET10Element::mass_gauss_points_14[gp](2);
+        double w    = TET10Element::mass_gauss_weights_14[gp];
 
         Vector10d N = elem.shape_functions(xi, eta, zeta);
         Eigen::Matrix3d J = elem.jacobian(xi, eta, zeta);
