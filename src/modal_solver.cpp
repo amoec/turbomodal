@@ -120,7 +120,7 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
     lanczos_cfg.ncv = config.ncv;
     lanczos_cfg.shift = config.shift;
     lanczos_cfg.tolerance = config.tolerance;
-    lanczos_cfg.max_iterations = 10;
+    lanczos_cfg.max_iterations = config.max_iterations;
 
     auto lanczos_result = m_hermitian_lanczos.solve(K_complex, M_complex, lanczos_cfg);
 

@@ -786,6 +786,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
             if (!status.converged && status.num_converged == 0) return std::nullopt;
 
+            if (!status.converged) {
+                std::cerr << "[CyclicSolver] WARNING: k=" << k
+                          << " eigenvalue solve did not fully converge: "
+                          << status.message << "\n";
+            }
+
             // Filter out rigid body / near-zero modes when min_frequency is set.
             // Free hub constraint produces RBMs (lambda ~ 0) that contaminate results.
             if (min_frequency > 0.0) {

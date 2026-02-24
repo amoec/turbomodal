@@ -383,6 +383,111 @@ showing which sensors contribute most to identifying each mode family.
 
 ---
 
+## Boundary Condition Editor
+
+### bc_editor
+
+Interactive 3D boundary condition editor. Opens a PyVista viewer where you
+position cutting planes to define boundary condition node groups. Surface nodes
+on the positive side of the plane **and within the selection radius** are
+highlighted in real-time.
+
+```python
+def bc_editor(
+    mesh: Mesh,
+) -> list[BoundaryCondition]
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mesh` | `Mesh` | required | Mesh object with cyclic boundaries identified |
+
+**Returns:** `list[BoundaryCondition]` — one entry per accepted BC, each with
+`node_ids` pre-populated from the visual selection.
+
+**Keyboard controls:**
+
+| Key | Action |
+|-----|--------|
+| `T` | Cycle BC type: FIXED → DISPLACEMENT → FRICTIONLESS |
+| `X` / `Y` / `Z` | Toggle constrained DOF component (DISPLACEMENT mode only) |
+| `1` / `2` / `3` | Snap plane normal to +X / +Y / +Z axis |
+| `4` / `5` / `6` | Rotate normal +90° around X / Y / Z |
+| `7` / `8` / `9` | Rotate normal −90° around X / Y / Z |
+| `F` | Flip normal (180°) |
+| `Enter` | Accept current BC, start a new one |
+| `Backspace` | Undo last accepted BC |
+| `Q` | Finish and return all accepted BCs |
+
+**Sliders (right side of viewer):**
+
+| Slider | Description |
+|--------|-------------|
+| Selection Radius | Limit selection to nodes within this radius of origin |
+| Origin X / Y / Z | Translate the cutting plane origin |
+
+The plane can also be dragged interactively with the mouse via the built-in
+PyVista plane widget. The HUD displays the current BC type, number of selected
+nodes, and total accepted BCs.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+mesh = tm.load_mesh("sector.msh", num_sectors=24)
+
+# Open interactive editor
+bcs = tm.bc_editor(mesh)
+
+# Each returned BC has node_ids pre-populated
+print(bcs[0].node_ids[:5])  # e.g. [42, 43, 44, 107, 108]
+
+# Pass directly to solver
+results = tm.solve(mesh, mat, rpm=10000, boundary_conditions=bcs)
+```
+
+### plot_boundary_conditions
+
+Visualize the selected node groups for a list of boundary conditions on the
+mesh. Each BC is shown as a colored point cloud with a legend entry.
+
+```python
+def plot_boundary_conditions(
+    mesh: Mesh,
+    bcs: list[BoundaryCondition],
+    off_screen: bool = False,
+) -> pyvista.Plotter
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mesh` | `Mesh` | required | Mesh object |
+| `bcs` | `list[BoundaryCondition]` | required | Boundary conditions to visualize |
+| `off_screen` | `bool` | `False` | Render off-screen (for testing or batch export) |
+
+**Returns:** `pyvista.Plotter` with the mesh shown as a translucent wireframe
+and each BC's selected nodes rendered as colored spheres. A legend maps colors
+to BC names, types, and node counts.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+mesh = tm.load_mesh("sector.msh", num_sectors=24)
+bcs = tm.bc_editor(mesh)
+
+# Review BCs before solving
+tm.plot_boundary_conditions(mesh, bcs)
+```
+
+---
+
 ## Internal Utilities
 
 ### MAC (Modal Assurance Criterion)

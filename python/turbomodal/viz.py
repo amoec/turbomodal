@@ -1355,6 +1355,13 @@ def bc_editor(mesh: Mesh):
             actor.prop.background_opacity = 0.6
         return actor
 
+    # Glyph radii for cross-platform sphere rendering (GPU-based
+    # render_points_as_spheres is unreliable on Windows OpenGL).
+    r_sel = bbox_diag * 0.004   # current selection
+    r_acc = bbox_diag * 0.0035  # accepted BCs
+    _sphere_sel = pv.Sphere(radius=r_sel)
+    _sphere_acc = pv.Sphere(radius=r_acc)
+
     def _refresh(plotter):
         """Redraw all dynamic actors and HUD text."""
         if not state["ready"]:
@@ -1362,28 +1369,24 @@ def bc_editor(mesh: Mesh):
         sel_mask = _select_nodes()
         n_selected = int(sel_mask.sum())
 
-        # Current selection — yellow spheres
+        # Current selection — yellow glyphs
         if n_selected > 0:
-            plotter.add_mesh(
-                pv.PolyData(surface_coords[sel_mask]), name="current_sel",
-                color="yellow", point_size=8,
-                render_points_as_spheres=True,
-            )
+            pts = pv.PolyData(surface_coords[sel_mask])
+            glyphs = pts.glyph(geom=_sphere_sel, scale=False, orient=False)
+            plotter.add_mesh(glyphs, name="current_sel", color="yellow")
         else:
             try:
                 plotter.remove_actor("current_sel")
             except Exception:
                 pass
 
-        # Accepted BC node groups — colored spheres
+        # Accepted BC node groups — colored glyphs
         for i, ids in enumerate(state["accepted_ids"]):
             color = _BC_COLORS[i % len(_BC_COLORS)]
             if len(ids) > 0:
-                plotter.add_mesh(
-                    pv.PolyData(all_coords[ids]), name=f"accepted_{i}",
-                    color=color, point_size=7,
-                    render_points_as_spheres=True,
-                )
+                pts = pv.PolyData(all_coords[ids])
+                glyphs = pts.glyph(geom=_sphere_acc, scale=False, orient=False)
+                plotter.add_mesh(glyphs, name=f"accepted_{i}", color=color)
 
         # Selection radius visualization — translucent disc
         radius = state["selection_radius"]
@@ -1511,7 +1514,7 @@ def bc_editor(mesh: Mesh):
         normal=state["normal"],
         origin=state["origin"],
         normal_rotation=True,
-        interaction_event="always",
+        interaction_event="end",
         pass_widget=True,
     )
 
@@ -1700,23 +1703,36 @@ def plot_boundary_conditions(mesh: Mesh, bcs, off_screen: bool = False):
     plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
                      edge_color="gray", line_width=0.5)
 
+    # Glyph sphere for cross-platform rendering (GPU-based
+    # render_points_as_spheres is unreliable on Windows OpenGL).
+    bounds = grid.bounds
+    diag = np.sqrt(
+        (bounds[1] - bounds[0]) ** 2
+        + (bounds[3] - bounds[2]) ** 2
+        + (bounds[5] - bounds[4]) ** 2
+    )
+    sphere_geom = pv.Sphere(radius=diag * 0.004)
+
     for i, bc in enumerate(bcs):
         color = _BC_COLORS[i % len(_BC_COLORS)]
-        selected = mesh.select_nodes_by_plane(
-            np.asarray(bc.plane_point, dtype=np.float64),
-            np.asarray(bc.plane_normal, dtype=np.float64),
-            bc.tolerance,
-        )
+        if bc.node_ids is not None:
+            selected = list(bc.node_ids)
+        else:
+            selected = mesh.select_nodes_by_plane(
+                np.asarray(bc.plane_point, dtype=np.float64),
+                np.asarray(bc.plane_normal, dtype=np.float64),
+                bc.tolerance,
+            )
         if selected:
             pts = nodes_arr[selected]
             cloud = pv.PolyData(pts)
+            glyphs = cloud.glyph(geom=sphere_geom, scale=False, orient=False)
             tp = bc.type.upper()
             if bc.type == "displacement":
                 labels = "xyz"
                 active = [labels[j] for j in range(3) if bc.constrained_components[j]]
                 tp += f" ({','.join(active)})"
-            plotter.add_mesh(cloud, color=color, point_size=8,
-                             render_points_as_spheres=True,
+            plotter.add_mesh(glyphs, color=color,
                              label=f"{bc.name}: {tp}, {len(selected)} nodes")
 
     plotter.add_legend()
