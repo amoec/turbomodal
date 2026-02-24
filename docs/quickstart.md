@@ -60,11 +60,78 @@ boundary surfaces (left/right cuts and hub).
 
 ---
 
-## Step 2: Solve Cyclic Symmetry FEA
+## Step 2: Define Boundary Conditions
+
+By default, `solve()` applies a fixed hub constraint. For custom boundary
+conditions (e.g. partial constraints, frictionless surfaces, displacement
+locks on specific DOFs), use the interactive BC editor or define them
+programmatically.
+
+### 2a: Interactive BC editor
+
+```python
+bcs = tm.bc_editor(mesh)
+```
+
+This opens a 3D viewer where you position a cutting plane to select surface
+nodes.  The editor provides:
+
+- **Real-time node highlighting** — yellow spheres show selected nodes as
+  you move the plane
+- **Selection radius** — a slider to limit selection to a bounded circular
+  region instead of the full half-space
+- **BC type cycling** — press `T` to cycle through FIXED, DISPLACEMENT,
+  and FRICTIONLESS
+- **DOF toggles** — in DISPLACEMENT mode, press `X`/`Y`/`Z` to toggle
+  which displacement components are constrained
+- **Plane orientation** — press `1`/`2`/`3` to snap the normal to an axis,
+  `4`-`9` for ±90° rotations, `F` to flip
+- **Multiple BCs** — press `Enter` to accept and start the next BC,
+  `Backspace` to undo
+
+Returns a list of `BoundaryCondition` objects ready for `solve()`.
+
+### 2b: Programmatic BCs
+
+```python
+import numpy as np
+
+bcs = [
+    tm.BoundaryCondition(
+        name="hub_fixed",
+        type="fixed",
+        plane_point=np.array([0.0, 0.0, -0.005]),
+        plane_normal=np.array([0.0, 0.0, -1.0]),
+    ),
+    tm.BoundaryCondition(
+        name="tip_axial",
+        type="displacement",
+        plane_point=np.array([0.0, 0.0, 0.01]),
+        plane_normal=np.array([0.0, 0.0, 1.0]),
+        constrained_components=(False, False, True),  # only uz locked
+    ),
+]
+```
+
+### 2c: Visualize BCs before solving
+
+```python
+tm.plot_boundary_conditions(mesh, bcs)
+```
+
+---
+
+## Step 3: Solve Cyclic Symmetry FEA
 
 ```python
 mat = tm.Material(E=200e9, nu=0.3, rho=7800)
+
+# Default hub constraint
 results = tm.solve(mesh, mat, rpm=3000, num_modes=10, verbose=1)
+
+# Or with custom boundary conditions from Step 2
+results = tm.solve(mesh, mat, rpm=3000, num_modes=10,
+                   boundary_conditions=bcs, verbose=1)
 
 for r in results:
     freqs = ", ".join(f"{f:.1f}" for f in r.frequencies[:3])
@@ -75,6 +142,11 @@ for r in results:
 ND 0 through N/2). Each provides `frequencies`, `mode_shapes` (complex,
 shape n_dof x n_modes), `whirl_direction` (+1 FW, -1 BW, 0 standing),
 and `harmonic_index`.
+
+When `boundary_conditions` is provided, it overrides the default hub
+constraint. Each BC selects surface nodes on the positive side of a
+cutting plane and applies the specified constraint type. If a BC was
+created with `bc_editor`, the pre-selected node IDs are used directly.
 
 For fluid coupling, pass a `FluidConfig`:
 
@@ -94,7 +166,7 @@ tm.plot_full_annulus(mesh, results[2], mode_index=0, scale=0.001).show()
 
 ---
 
-## Step 3: RPM Sweep and Campbell Diagram
+## Step 4: RPM Sweep and Campbell Diagram
 
 ```python
 import numpy as np
@@ -111,7 +183,7 @@ fig = tm.plot_zzenf(sweep_results[-1], num_sectors=36)
 
 ---
 
-## Step 4: Generate Sensor Signals
+## Step 5: Generate Sensor Signals
 
 ```python
 from turbomodal import _RemovedClass, _RemovedClass, _RemovedClass, _removed
@@ -159,7 +231,7 @@ sig_result = _removed(
 
 ---
 
-## Step 5: Build a Parametric Dataset
+## Step 6: Build a Parametric Dataset
 
 ```python
 from turbomodal import (
@@ -201,7 +273,7 @@ mesh_data, conditions, results_dict = load_modal_results("turbomodal_dataset.h5"
 
 ---
 
-## Step 6: Extract Features
+## Step 7: Extract Features
 
 ```python
 
@@ -243,7 +315,7 @@ physics_features = _removed_func(sig_result['signals'], sample_rate=500_000.0, c
 
 ---
 
-## Step 7: Train an ML Model
+## Step 8: Train an ML Model
 
 The complexity ladder trains tiers in order, stopping when performance
 targets are met or improvement diminishes:
@@ -281,7 +353,7 @@ print(f"Test metrics: {report['test_metrics']}")
 
 ---
 
-## Step 8: Evaluate and Predict
+## Step 9: Evaluate and Predict
 
 ```python
 
@@ -329,7 +401,7 @@ print(f"Anomaly: {card['anomaly_flag']}")
 
 ---
 
-## Step 9: Optimize Sensor Placement
+## Step 10: Optimize Sensor Placement
 
 ```python
     _RemovedClass, _removed_func, _removed_func,
@@ -369,7 +441,7 @@ print(f"Minimum sensors needed: {min_result.num_sensors}")
 
 ---
 
-## Step 10: Explain Predictions
+## Step 11: Explain Predictions
 
 ### SHAP_REMOVEDvalues
 

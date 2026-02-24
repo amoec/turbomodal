@@ -311,6 +311,66 @@ mesh = tm.load_mesh("sector.bdf", num_sectors=36)
 
 ## turbomodal.solver -- Solver Interface
 
+### BoundaryCondition
+
+Specification for a boundary condition applied via a cutting plane.
+
+```python
+@dataclass
+class BoundaryCondition:
+    name: str
+    type: str                    # "fixed", "displacement", "frictionless"
+    plane_point: np.ndarray      # (3,) point on the cutting plane
+    plane_normal: np.ndarray     # (3,) outward normal
+    constrained_components: tuple[bool, bool, bool] = (True, True, True)
+    tolerance: float = 1e-6
+    node_ids: list[int] | None = None
+    selection_radius: float | None = None
+```
+
+**Fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | `str` | required | Descriptive name for this constraint group |
+| `type` | `str` | required | `"fixed"`, `"displacement"`, or `"frictionless"` |
+| `plane_point` | `ndarray (3,)` | required | Point on the cutting plane |
+| `plane_normal` | `ndarray (3,)` | required | Outward normal -- surface nodes on the positive side are selected |
+| `constrained_components` | `tuple[bool,bool,bool]` | `(True,True,True)` | For `"displacement"` type, which DOF components are locked (x,y,z). Ignored for other types. |
+| `tolerance` | `float` | `1e-6` | Distance tolerance for plane selection |
+| `node_ids` | `list[int] \| None` | `None` | Pre-selected node IDs (from `bc_editor`). When provided, the solver uses these directly instead of calling `select_nodes_by_plane`. |
+| `selection_radius` | `float \| None` | `None` | Radius used during interactive selection (stored for reproducibility). No effect at solve time. |
+
+**BC types:**
+
+- **`"fixed"`** -- All 3 translational DOFs are constrained (ux=uy=uz=0).
+- **`"displacement"`** -- Only the DOFs indicated by `constrained_components`
+  are locked. E.g. `(False, False, True)` locks only uz.
+- **`"frictionless"`** -- The DOF component aligned with the local surface
+  normal is constrained (zero normal displacement, free tangential sliding).
+
+**Example:**
+
+```python
+import numpy as np
+import turbomodal as tm
+
+# Fixed hub
+bc_hub = tm.BoundaryCondition(
+    name="hub", type="fixed",
+    plane_point=np.array([0, 0, -0.005]),
+    plane_normal=np.array([0, 0, -1.0]),
+)
+
+# Axial-only displacement lock at the tip
+bc_tip = tm.BoundaryCondition(
+    name="tip_uz", type="displacement",
+    plane_point=np.array([0, 0, 0.01]),
+    plane_normal=np.array([0, 0, 1.0]),
+    constrained_components=(False, False, True),
+)
+```
+
 ### solve
 
 Solve cyclic symmetry modal analysis at a single RPM.
@@ -324,6 +384,9 @@ def solve(
     fluid: FluidConfig | None = None,
     config: SolverConfig | None = None,
     verbose: int = 0,
+    harmonic_indices: list[int] | None = None,
+    hub_constraint: str = "fixed",
+    boundary_conditions: list[BoundaryCondition] | None = None,
 ) -> list[ModalResult]
 ```
 
@@ -338,20 +401,29 @@ def solve(
 | `fluid` | `FluidConfig \| None` | `None` | Fluid coupling config (None = dry) |
 | `config` | `SolverConfig \| None` | `None` | Solver config (None = defaults) |
 | `verbose` | `int` | `0` | 0=silent, 1=progress, 2=detailed |
+| `harmonic_indices` | `list[int] \| None` | `None` | Specific harmonic indices to solve (None = all 0..N/2) |
+| `hub_constraint` | `str` | `"fixed"` | `"fixed"` or `"free"`. Ignored when `boundary_conditions` is provided. |
+| `boundary_conditions` | `list[BoundaryCondition] \| None` | `None` | Custom BCs. Overrides `hub_constraint` when provided. |
 
 **Returns:** `list[ModalResult]` -- One per harmonic index (0 to N/2).
+
+When `boundary_conditions` is provided, each BC selects surface nodes
+on the positive side of a cutting plane and applies the specified
+constraint type. If a BC was created with `bc_editor`, the pre-selected
+`node_ids` are used directly (no plane selection at solve time).
 
 **Example:**
 
 ```python
-mat = tm.Material()
-mat.E = 200e9
-mat.nu = 0.3
-mat.rho = 7800.0
+mat = tm.Material(E=200e9, nu=0.3, rho=7800.0)
 
+# Default hub constraint
 results = tm.solve(mesh, mat, rpm=10000, num_modes=10, verbose=1)
-for r in results:
-    print(f"ND={r.harmonic_index}: {r.frequencies[:3]} Hz")
+
+# Custom boundary conditions
+bcs = tm.bc_editor(mesh)  # or define programmatically
+results = tm.solve(mesh, mat, rpm=10000, num_modes=10,
+                   boundary_conditions=bcs, verbose=1)
 ```
 
 ### rpm_sweep
@@ -366,6 +438,7 @@ def rpm_sweep(
     num_modes: int = 20,
     fluid: FluidConfig | None = None,
     verbose: int = 0,
+    boundary_conditions: list[BoundaryCondition] | None = None,
 ) -> list[list[ModalResult]]
 ```
 
@@ -374,6 +447,7 @@ def rpm_sweep(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `rpm_values` | `ndarray \| Sequence[float]` | required | Array of RPM values |
+| `boundary_conditions` | `list[BoundaryCondition] \| None` | `None` | Custom BCs (same as `solve`) |
 | *(other parameters same as `solve`)* | | | |
 
 **Returns:** `list[list[ModalResult]]` -- `results[rpm_idx][harmonic_idx]`
