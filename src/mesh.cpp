@@ -359,6 +359,61 @@ const NodeSet* Mesh::find_node_set(const std::string& name) const {
     return nullptr;
 }
 
+std::vector<int> Mesh::select_nodes_by_plane(
+    const Eigen::Vector3d& plane_point,
+    const Eigen::Vector3d& plane_normal,
+    double tolerance) const {
+
+    Eigen::Vector3d n_hat = plane_normal.normalized();
+
+    // Collect all surface node IDs from boundary faces
+    auto boundary_faces = extract_boundary_faces();
+    std::set<int> surface_nodes;
+    for (const auto& face : boundary_faces) {
+        for (int i = 0; i < 6; i++) {
+            surface_nodes.insert(face.nodes[i]);
+        }
+    }
+
+    // Select surface nodes on the positive side of the plane
+    std::vector<int> selected;
+    for (int nid : surface_nodes) {
+        Eigen::Vector3d pos = nodes.row(nid).transpose();
+        double dist = (pos - plane_point).dot(n_hat);
+        if (dist >= -tolerance) {
+            selected.push_back(nid);
+        }
+    }
+    std::sort(selected.begin(), selected.end());
+    return selected;
+}
+
+Eigen::Vector3d Mesh::compute_surface_normal(const std::vector<int>& node_ids) const {
+    std::set<int> node_set(node_ids.begin(), node_ids.end());
+    auto boundary_faces = extract_boundary_faces();
+
+    Eigen::Vector3d weighted_normal = Eigen::Vector3d::Zero();
+    for (const auto& face : boundary_faces) {
+        // Check if any corner node of this face is in the set
+        bool has_node = false;
+        for (int i = 0; i < 3; i++) {
+            if (node_set.count(face.nodes[i]) > 0) {
+                has_node = true;
+                break;
+            }
+        }
+        if (has_node) {
+            weighted_normal += face.outward_normal * face.area;
+        }
+    }
+
+    double norm = weighted_normal.norm();
+    if (norm > 0.0) {
+        weighted_normal /= norm;
+    }
+    return weighted_normal;
+}
+
 // TET10 face definitions: 4 faces, each with 3 corners + 3 midsides
 // Face i is opposite to vertex i (standard convention)
 static const int tet10_face_corners[4][3] = {

@@ -99,11 +99,11 @@ void GlobalAssembler::assemble_stress_stiffening(
             u_e(3 * n + 2) = displacement(3 * node_id + 2);
         }
 
-        std::array<Vector6d, 4> prestress;
-        for (int gp = 0; gp < 4; gp++) {
-            double xi   = TET10Element::gauss_points[gp](0);
-            double eta  = TET10Element::gauss_points[gp](1);
-            double zeta = TET10Element::gauss_points[gp](2);
+        std::array<Vector6d, 14> prestress;
+        for (int gp = 0; gp < 14; gp++) {
+            double xi   = TET10Element::mass_gauss_points_14[gp](0);
+            double eta  = TET10Element::mass_gauss_points_14[gp](1);
+            double zeta = TET10Element::mass_gauss_points_14[gp](2);
             Matrix6x30d B = elem.B_matrix(xi, eta, zeta);
             Vector6d strain = B * u_e;
             prestress[gp] = D * strain;
@@ -135,11 +135,11 @@ void GlobalAssembler::assemble_stress_stiffening(
             u_e(3 * n + 2) = displacement(3 * node_id + 2);
         }
 
-        std::array<Vector6d, 4> prestress;
-        for (int gp = 0; gp < 4; gp++) {
-            double xi   = TET10Element::gauss_points[gp](0);
-            double eta  = TET10Element::gauss_points[gp](1);
-            double zeta = TET10Element::gauss_points[gp](2);
+        std::array<Vector6d, 14> prestress;
+        for (int gp = 0; gp < 14; gp++) {
+            double xi   = TET10Element::mass_gauss_points_14[gp](0);
+            double eta  = TET10Element::mass_gauss_points_14[gp](1);
+            double zeta = TET10Element::mass_gauss_points_14[gp](2);
             Matrix6x30d B = elem.B_matrix(xi, eta, zeta);
             Vector6d strain = B * u_e;
             prestress[gp] = D * strain;

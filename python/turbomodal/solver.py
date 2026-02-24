@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
 from turbomodal._core import (
+    BCType,
+    ConstraintGroup,
     CyclicSymmetrySolver,
     FluidConfig,
     Material,
@@ -20,6 +23,70 @@ from turbomodal._utils import progress_bar as _progress_bar
 
 if TYPE_CHECKING:
     
+
+@dataclass
+class BoundaryCondition:
+    """Specification for a boundary condition applied via a cutting plane.
+
+    Parameters
+    ----------
+    name : descriptive name for this constraint group
+    type : ``"fixed"``, ``"displacement"``, or ``"frictionless"``
+    plane_point : (3,) point on the cutting plane
+    plane_normal : (3,) outward normal — surface nodes on the positive side are selected
+    constrained_components : for ``"displacement"`` type, which DOF components
+        are locked (x, y, z).  Ignored for other types.
+    tolerance : distance tolerance for plane selection
+    node_ids : pre-selected node IDs (from interactive editor).  When provided,
+        ``_build_constraint_groups`` uses these directly instead of calling
+        ``select_nodes_by_plane``.
+    selection_radius : radius used during interactive selection (stored for
+        reproducibility / display).  Has no effect at solve time.
+    """
+
+    name: str
+    type: str  # "fixed", "displacement", "frictionless"
+    plane_point: np.ndarray
+    plane_normal: np.ndarray
+    constrained_components: tuple[bool, bool, bool] = (True, True, True)
+    tolerance: float = 1e-6
+    node_ids: list[int] | None = None
+    selection_radius: float | None = None
+
+
+def _build_constraint_groups(
+    mesh: Mesh, bcs: list[BoundaryCondition]
+) -> list[ConstraintGroup]:
+    """Convert BoundaryCondition specs to C++ ConstraintGroup objects."""
+    groups = []
+    type_map = {
+        "fixed": BCType.FIXED,
+        "displacement": BCType.DISPLACEMENT,
+        "frictionless": BCType.FRICTIONLESS,
+    }
+    for bc in bcs:
+        cg = ConstraintGroup()
+        cg.name = bc.name
+        bc_type = type_map.get(bc.type.lower())
+        if bc_type is None:
+            raise ValueError(
+                f"Unknown BC type '{bc.type}'. Must be 'fixed', 'displacement', or 'frictionless'."
+            )
+        cg.type = bc_type
+        if bc.node_ids is not None:
+            cg.node_ids = list(bc.node_ids)
+        else:
+            cg.node_ids = mesh.select_nodes_by_plane(
+                np.asarray(bc.plane_point, dtype=np.float64),
+                np.asarray(bc.plane_normal, dtype=np.float64),
+                bc.tolerance,
+            )
+        cg.constrained_components = list(bc.constrained_components)
+        if bc_type == BCType.FRICTIONLESS:
+            cg.surface_normal = mesh.compute_surface_normal(cg.node_ids)
+        groups.append(cg)
+    return groups
+
 # Verbosity levels
 SILENT = 0
 PROGRESS = 1
@@ -41,6 +108,7 @@ def solve(
     min_frequency: float = 0.0,
     temperature: float | None = None,
     condition: _RemovedClass | None = None,
+    boundary_conditions: list[BoundaryCondition] | None = None,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -71,6 +139,10 @@ def solve(
     condition : an ``_RemovedClass`` instance.  When provided, *rpm*
         and *temperature* are taken from the condition (explicit keyword
         arguments still override).
+    boundary_conditions : list of ``BoundaryCondition`` objects defining
+        constraint groups via cutting planes.  When provided, overrides
+        ``hub_constraint``.  Each BC selects surface nodes on the positive
+        side of a plane and applies the specified constraint type.
 
     Returns
     -------
@@ -88,7 +160,6 @@ def solve(
     if fluid is None:
         fluid = FluidConfig()
 
-    apply_hub = hub_constraint == "fixed"
     hi = harmonic_indices or []
 
     if verbose >= PROGRESS:
@@ -103,7 +174,12 @@ def solve(
         )
 
     t0 = time.perf_counter()
-    solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
+    if boundary_conditions is not None:
+        constraint_groups = _build_constraint_groups(mesh, boundary_conditions)
+        solver = CyclicSymmetrySolver(mesh, material, constraint_groups, fluid)
+    else:
+        apply_hub = hub_constraint == "fixed"
+        solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
 
     progress_cb = None
     if verbose >= PROGRESS:
@@ -144,6 +220,7 @@ def rpm_sweep(
     include_coriolis: bool = False,
     min_frequency: float = 0.0,
     temperature: float | None = None,
+    boundary_conditions: list[BoundaryCondition] | None = None,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -179,7 +256,6 @@ def rpm_sweep(
     if fluid is None:
         fluid = FluidConfig()
 
-    apply_hub = hub_constraint == "fixed"
     hi = harmonic_indices or []
 
     rpm_arr = np.asarray(rpm_values, dtype=np.float64)
@@ -198,7 +274,12 @@ def rpm_sweep(
         print(f"  Solving {nd_str}, {num_modes} modes/ND")
         print()
 
-    solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
+    if boundary_conditions is not None:
+        constraint_groups = _build_constraint_groups(mesh, boundary_conditions)
+        solver = CyclicSymmetrySolver(mesh, material, constraint_groups, fluid)
+    else:
+        apply_hub = hub_constraint == "fixed"
+        solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
     all_results = []
     t_start = time.perf_counter()
 

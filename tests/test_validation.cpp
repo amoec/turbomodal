@@ -2,6 +2,7 @@
 #include "turbomodal/cyclic_solver.hpp"
 #include "turbomodal/element.hpp"
 #include "turbomodal/forced_response.hpp"
+#include "turbomodal/hermitian_lanczos.hpp"
 #include "turbomodal/mistuning.hpp"
 #include <cmath>
 #include <iostream>
@@ -824,4 +825,198 @@ TEST(Validation, CoriolisFWBWSplitting) {
         if (k > 2) break;  // Only check first few NDs
     }
     std::cout << "\n";
+}
+
+TEST(Validation, HighRPMFreeHubDiagnostics) {
+    // Diagnostic: Compare Lanczos vs dense eigensolver for k>0 at high RPM
+    // with free hub to isolate source of ~44% frequency overestimate.
+    //
+    // Uses a blade-like sector mesh (~1200 nodes, ~600 TET10) that produces
+    // a cyclic-reduced system small enough for dense eigensolves.
+    //
+    // Tests:
+    //  1. Phase decomposition vs direct T^H*K*T (matrix construction check)
+    //  2. Lanczos vs dense eigensolver (eigensolver check)
+    //  3. K_eff positive-definiteness at high RPM (spin softening magnitude)
+    //  4. K_omega magnitude relative to K
+
+    Mesh mesh;
+    mesh.load_from_gmsh(test_data_path("blade_sector.msh"));
+    mesh.num_sectors = 24;
+    mesh.identify_cyclic_boundaries();
+    mesh.match_boundary_nodes();
+
+    // Titanium-like properties (typical for blisks)
+    Material mat(115e9, 0.33, 4430.0);
+
+    std::cout << "\n=== High RPM Free Hub Diagnostics (Blade Sector) ===\n";
+    std::cout << "  Mesh: " << mesh.num_nodes() << " nodes, "
+              << mesh.num_elements() << " elements, "
+              << mesh.num_sectors << " sectors\n";
+    std::cout << "  DOFs: " << mesh.num_dof() << "\n";
+
+    // Test at multiple RPMs to see the trend
+    double rpms[] = {0.0, 10000.0, 20000.0, 35000.0, 50000.0};
+
+    for (double rpm : rpms) {
+        double omega = rpm * 2.0 * PI / 60.0;
+
+        CyclicSymmetrySolver solver(mesh, mat, FluidConfig(), false);
+        auto results = solver.solve_at_rpm(rpm, 5, {}, 0, false, 1.0);
+
+        std::cout << "\n  --- RPM=" << rpm << " (omega=" << std::fixed
+                  << std::setprecision(1) << omega << " rad/s) ---\n";
+        std::cout << "  ND | NC0 (Hz) | NC1 (Hz) | NC2 (Hz)\n";
+        std::cout << "  ---|----------|----------|----------\n";
+
+        for (int nd = 0; nd <= std::min(4, (int)results.size()-1); nd++) {
+            const ModalResult* r = nullptr;
+            for (const auto& res : results)
+                if (res.harmonic_index == nd) { r = &res; break; }
+            if (!r) continue;
+
+            std::cout << "  " << std::setw(2) << nd << " |";
+            for (int nc = 0; nc < std::min(3, (int)r->frequencies.size()); nc++) {
+                std::cout << std::setw(9) << std::setprecision(1) << r->frequencies(nc) << " |";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // ---- Matrix-level diagnostics at 35000 RPM ----
+    double rpm_test = 35000.0;
+    double omega_test = rpm_test * 2.0 * PI / 60.0;
+
+    GlobalAssembler assembler;
+    assembler.assemble(mesh, mat);
+    SpMatd K = assembler.K();
+    SpMatd M = assembler.M();
+
+    assembler.assemble_rotating_effects(mesh, mat, omega_test);
+    SpMatd K_omega = assembler.K_omega();
+    SpMatd K_eff = K - K_omega;
+
+    // Norms
+    double K_norm = 0, Ko_norm = 0, M_norm = 0;
+    for (int col = 0; col < K.outerSize(); ++col)
+        for (SpMatd::InnerIterator it(K, col); it; ++it)
+            K_norm = std::max(K_norm, std::abs(it.value()));
+    for (int col = 0; col < K_omega.outerSize(); ++col)
+        for (SpMatd::InnerIterator it(K_omega, col); it; ++it)
+            Ko_norm = std::max(Ko_norm, std::abs(it.value()));
+    for (int col = 0; col < M.outerSize(); ++col)
+        for (SpMatd::InnerIterator it(M, col); it; ++it)
+            M_norm = std::max(M_norm, std::abs(it.value()));
+
+    std::cout << "\n  --- Matrix norms at RPM=" << rpm_test << " ---\n";
+    std::cout << "  ||K||_inf = " << std::scientific << K_norm << "\n";
+    std::cout << "  ||K_omega||_inf = " << Ko_norm << "\n";
+    std::cout << "  ||M||_inf = " << M_norm << "\n";
+    std::cout << "  K_omega / K ratio = " << std::fixed << std::setprecision(6)
+              << Ko_norm / K_norm << "\n";
+
+    // ---- Dense vs Lanczos comparison for k=2 ----
+    for (int k_test : {0, 2, 4}) {
+        std::cout << "\n  --- Dense vs Lanczos for k=" << k_test << " ---\n";
+
+        CyclicSymmetrySolver diag_solver(mesh, mat, FluidConfig(), false);
+        auto [K_k, M_k] = diag_solver.apply_cyclic_bc_public(k_test, K_eff, M);
+
+        int n = static_cast<int>(K_k.rows());
+        std::cout << "  Cyclic-reduced size: " << n << "x" << n << "\n";
+
+        if (n > 1500) {
+            std::cout << "  SKIPPED (too large for dense solve)\n";
+            continue;
+        }
+
+        // Dense solve (ground truth)
+        int nev_test = std::min(10, n - 1);
+        auto dense_result = HermitianLanczosEigenSolver::solve_dense(
+            K_k, M_k, nev_test);
+
+        // Count negative eigenvalues
+        int neg_count = 0;
+        for (int i = 0; i < dense_result.nconv; i++) {
+            if (dense_result.eigenvalues(i) < -1e-6) neg_count++;
+        }
+        std::cout << "  Negative eigenvalues (indefinite K_eff): " << neg_count << "\n";
+
+        // Lanczos solve
+        HermitianLanczosEigenSolver lanczos;
+        HermitianLanczosEigenSolver::Config cfg;
+        cfg.nev = nev_test;
+        cfg.ncv = std::min(std::max(4 * cfg.nev + 1, 40), n);
+        cfg.shift = 1.0;
+        cfg.tolerance = 1e-8;
+        cfg.max_iterations = 20;
+        auto lanczos_result = lanczos.solve(K_k, M_k, cfg);
+
+        // Compare
+        int n_compare = std::min(dense_result.nconv, lanczos_result.nconv);
+        n_compare = std::min(n_compare, 10);
+
+        // Skip negative eigenvalues in dense result for comparison
+        int dense_start = 0;
+        while (dense_start < dense_result.nconv &&
+               dense_result.eigenvalues(dense_start) < 1e-3) {
+            dense_start++;
+        }
+
+        std::cout << "  NC | f_dense (Hz) | f_lanczos (Hz) | error (%)\n";
+        std::cout << "  ---|--------------|----------------|----------\n";
+        int lanczos_idx = 0;
+        for (int di = dense_start; di < dense_result.nconv && lanczos_idx < lanczos_result.nconv; di++) {
+            double ld = dense_result.eigenvalues(di);
+            double fd = (ld > 0) ? std::sqrt(ld) / (2.0 * PI) : 0;
+            if (fd < 1.0) continue;  // skip near-zero modes
+
+            // Find matching Lanczos eigenvalue (skip near-zero)
+            while (lanczos_idx < lanczos_result.nconv) {
+                double fl_test = (lanczos_result.eigenvalues(lanczos_idx) > 0)
+                    ? std::sqrt(lanczos_result.eigenvalues(lanczos_idx)) / (2.0 * PI) : 0;
+                if (fl_test >= 1.0) break;
+                lanczos_idx++;
+            }
+            if (lanczos_idx >= lanczos_result.nconv) break;
+
+            double ll = lanczos_result.eigenvalues(lanczos_idx);
+            double fl = (ll > 0) ? std::sqrt(ll) / (2.0 * PI) : 0;
+            double err = (fd > 0) ? 100.0 * (fl - fd) / fd : 0;
+            std::cout << std::fixed;
+            std::cout << "  " << std::setw(2) << (di - dense_start) << " | "
+                      << std::setw(12) << std::setprecision(2) << fd << " | "
+                      << std::setw(14) << fl << " | "
+                      << std::setw(8) << std::setprecision(4) << err << "\n";
+            lanczos_idx++;
+
+            if (di - dense_start >= 9) break;
+        }
+
+        // Rayleigh quotient check on Lanczos eigenvectors
+        std::cout << "\n  Rayleigh quotient check (Lanczos modes):\n";
+        std::cout << "  NC | f_reported | f_rayleigh | match?\n";
+        std::cout << "  ---|------------|------------|-------\n";
+        for (int i = 0; i < std::min(5, lanczos_result.nconv); i++) {
+            double lambda_reported = lanczos_result.eigenvalues(i);
+            if (lambda_reported < 1e-3) continue;
+
+            Eigen::VectorXcd phi = lanczos_result.eigenvectors.col(i);
+            std::complex<double> Kphi_dot = phi.dot(K_k * phi);
+            std::complex<double> Mphi_dot = phi.dot(M_k * phi);
+            double lambda_rayleigh = Kphi_dot.real() / Mphi_dot.real();
+
+            double f_rep = std::sqrt(lambda_reported) / (2.0 * PI);
+            double f_ray = (lambda_rayleigh > 0) ? std::sqrt(lambda_rayleigh) / (2.0 * PI) : 0;
+            double match_err = (f_rep > 0) ? 100.0 * std::abs(f_ray - f_rep) / f_rep : 0;
+            std::cout << std::fixed;
+            std::cout << "  " << std::setw(2) << i << " | "
+                      << std::setw(10) << std::setprecision(2) << f_rep << " | "
+                      << std::setw(10) << f_ray << " | "
+                      << std::setw(6) << std::setprecision(4) << match_err << "%\n";
+        }
+    }
+
+    std::cout << "\n";
+    SUCCEED();
 }

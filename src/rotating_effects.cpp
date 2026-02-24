@@ -52,7 +52,7 @@ Vector30d RotatingEffects::centrifugal_load(
 
 Matrix30d RotatingEffects::stress_stiffening(
     const TET10Element& elem,
-    const std::array<Vector6d, 4>& prestress) {
+    const std::array<Vector6d, 14>& prestress) {
 
     // K_sigma = integral(B_NL^T * S * B_NL dV)
     //
@@ -77,11 +77,11 @@ Matrix30d RotatingEffects::stress_stiffening(
 
     Matrix30d Ks = Matrix30d::Zero();
 
-    for (int gp = 0; gp < 4; gp++) {
-        double xi   = TET10Element::gauss_points[gp](0);
-        double eta  = TET10Element::gauss_points[gp](1);
-        double zeta = TET10Element::gauss_points[gp](2);
-        double w    = TET10Element::gauss_weights[gp];
+    for (int gp = 0; gp < 14; gp++) {
+        double xi   = TET10Element::mass_gauss_points_14[gp](0);
+        double eta  = TET10Element::mass_gauss_points_14[gp](1);
+        double zeta = TET10Element::mass_gauss_points_14[gp](2);
+        double w    = TET10Element::mass_gauss_weights_14[gp];
 
         // Compute physical derivatives dN/dx
         Matrix10x3d dNdxi = elem.shape_derivatives(xi, eta, zeta);

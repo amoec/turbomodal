@@ -19,6 +19,18 @@ struct BoundaryFace {
     double area;
 };
 
+enum class BCType { FIXED, DISPLACEMENT, FRICTIONLESS };
+
+struct ConstraintGroup {
+    std::string name;
+    std::vector<int> node_ids;
+    BCType type = BCType::FIXED;
+    // For DISPLACEMENT: which DOF components are constrained (true = locked)
+    std::array<bool, 3> constrained_components = {true, true, true};
+    // For FRICTIONLESS: outward surface normal (nodes slide in tangent plane)
+    Eigen::Vector3d surface_normal = Eigen::Vector3d::Zero();
+};
+
 class Mesh {
 public:
     Eigen::MatrixXd nodes;           // N_nodes x 3 (x, y, z coordinates)
@@ -45,6 +57,17 @@ public:
 
     // Find a node set by name, returns nullptr if not found
     const NodeSet* find_node_set(const std::string& name) const;
+
+    // Select surface nodes on the positive side of a cutting plane.
+    // plane_point: a point on the plane. plane_normal: outward normal direction.
+    // Only surface nodes (on boundary faces) are considered.
+    std::vector<int> select_nodes_by_plane(
+        const Eigen::Vector3d& plane_point,
+        const Eigen::Vector3d& plane_normal,
+        double tolerance = 1e-6) const;
+
+    // Compute area-weighted average outward normal for faces touching given nodes.
+    Eigen::Vector3d compute_surface_normal(const std::vector<int>& node_ids) const;
 
     // Extract all boundary TRI6 faces from TET10 elements
     std::vector<BoundaryFace> extract_boundary_faces() const;
