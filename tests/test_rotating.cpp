@@ -200,8 +200,8 @@ TEST(Rotating, StressStiffeningSymmetric) {
     TET10Element elem = make_offset_element();
 
     // Create a uniform tensile prestress
-    std::array<Vector6d, 4> prestress;
-    for (int gp = 0; gp < 4; gp++) {
+    std::array<Vector6d, 14> prestress;
+    for (int gp = 0; gp < 14; gp++) {
         prestress[gp] << 1e6, 1e6, 0, 0, 0, 0;  // biaxial tension
     }
 
@@ -214,8 +214,8 @@ TEST(Rotating, StressStiffeningSymmetric) {
 TEST(Rotating, StressStiffeningNonzero) {
     TET10Element elem = make_offset_element();
 
-    std::array<Vector6d, 4> prestress;
-    for (int gp = 0; gp < 4; gp++) {
+    std::array<Vector6d, 14> prestress;
+    for (int gp = 0; gp < 14; gp++) {
         prestress[gp] << 1e6, 1e6, 1e6, 0, 0, 0;  // hydrostatic tension
     }
 
@@ -226,8 +226,8 @@ TEST(Rotating, StressStiffeningNonzero) {
 TEST(Rotating, StressStiffeningZeroForZeroPrestress) {
     TET10Element elem = make_offset_element();
 
-    std::array<Vector6d, 4> prestress;
-    for (int gp = 0; gp < 4; gp++) {
+    std::array<Vector6d, 14> prestress;
+    for (int gp = 0; gp < 14; gp++) {
         prestress[gp] = Vector6d::Zero();
     }
 
@@ -238,8 +238,8 @@ TEST(Rotating, StressStiffeningZeroForZeroPrestress) {
 TEST(Rotating, StressStiffeningPSDForTension) {
     TET10Element elem = make_offset_element();
 
-    std::array<Vector6d, 4> prestress;
-    for (int gp = 0; gp < 4; gp++) {
+    std::array<Vector6d, 14> prestress;
+    for (int gp = 0; gp < 14; gp++) {
         prestress[gp] << 1e8, 1e8, 1e8, 0, 0, 0;  // hydrostatic tension
     }
 

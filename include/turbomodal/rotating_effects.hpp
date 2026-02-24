@@ -14,7 +14,7 @@ public:
 
     static Matrix30d stress_stiffening(
         const TET10Element& elem,
-        const std::array<Vector6d, 4>& prestress);
+        const std::array<Vector6d, 14>& prestress);
 
     static Matrix30d spin_softening(
         const TET10Element& elem, const Material& mat, double omega,

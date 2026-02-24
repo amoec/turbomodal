@@ -3,6 +3,8 @@
 from turbomodal._core import (
     Material,
     NodeSet,
+    BCType,
+    ConstraintGroup,
     Mesh,
     GlobalAssembler,
     SolverConfig,
@@ -31,7 +33,7 @@ from turbomodal._core import (
 )
 
 from turbomodal.io import load_mesh, load_cad, inspect_cad, CadInfo
-from turbomodal.solver import solve, rpm_sweep, campbell_data
+from turbomodal.solver import solve, rpm_sweep, campbell_data, BoundaryCondition
 from turbomodal.viz import (
     plot_mesh,
     plot_mode,
@@ -42,6 +44,9 @@ from turbomodal.viz import (
     plot_campbell,
     plot_zzenf,
     format_condition_label,
+    interactive_plane_selector,
+    bc_editor,
+    plot_boundary_conditions,
 )
 
 # Subsystem B: Signal generation pipeline
@@ -82,6 +87,9 @@ __all__ = [
     # Core C++ classes
     "Material",
     "NodeSet",
+    "BCType",
+    "ConstraintGroup",
+    "BoundaryCondition",
     "Mesh",
     "GlobalAssembler",
     "SolverConfig",
@@ -126,6 +134,9 @@ __all__ = [
     "plot_campbell",
     "plot_zzenf",
     "format_condition_label",
+    "interactive_plane_selector",
+    "bc_editor",
+    "plot_boundary_conditions",
     # Sensors & noise
     "SensorType",
     "SensorLocation",

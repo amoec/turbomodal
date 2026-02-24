@@ -66,7 +66,68 @@ CyclicSymmetrySolver::CyclicSymmetrySolver(
     bool apply_hub_constraint)
     : mesh_(mesh), mat_(mat), fluid_(fluid),
       apply_hub_constraint_(apply_hub_constraint) {
+    // Map legacy boolean to constraint groups
+    if (apply_hub_constraint) {
+        const NodeSet* hub = mesh_.find_node_set("hub_constraint");
+        if (hub) {
+            ConstraintGroup cg;
+            cg.name = "hub_constraint";
+            cg.node_ids = hub->node_ids;
+            cg.type = BCType::FIXED;
+            constraints_.push_back(std::move(cg));
+            has_constraints_ = true;
+        }
+    }
     classify_dofs();
+}
+
+CyclicSymmetrySolver::CyclicSymmetrySolver(
+    const Mesh& mesh, const Material& mat,
+    const std::vector<ConstraintGroup>& constraints,
+    const FluidConfig& fluid)
+    : mesh_(mesh), mat_(mat), fluid_(fluid),
+      apply_hub_constraint_(false),
+      constraints_(constraints),
+      has_constraints_(!constraints.empty()) {
+    classify_dofs();
+}
+
+std::vector<int> CyclicSymmetrySolver::build_constrained_dofs() const {
+    std::set<int> dof_set;
+    for (const auto& cg : constraints_) {
+        for (int node_id : cg.node_ids) {
+            switch (cg.type) {
+                case BCType::FIXED:
+                    dof_set.insert(3 * node_id);
+                    dof_set.insert(3 * node_id + 1);
+                    dof_set.insert(3 * node_id + 2);
+                    break;
+                case BCType::DISPLACEMENT:
+                    for (int k = 0; k < 3; k++) {
+                        if (cg.constrained_components[k]) {
+                            dof_set.insert(3 * node_id + k);
+                        }
+                    }
+                    break;
+                case BCType::FRICTIONLESS: {
+                    // Constrain the DOF component most aligned with the surface normal.
+                    // This is exact for axis-aligned normals (common case).
+                    Eigen::Vector3d n = cg.surface_normal.normalized();
+                    int max_comp = 0;
+                    double max_val = std::abs(n(0));
+                    for (int k = 1; k < 3; k++) {
+                        if (std::abs(n(k)) > max_val) {
+                            max_val = std::abs(n(k));
+                            max_comp = k;
+                        }
+                    }
+                    dof_set.insert(3 * node_id + max_comp);
+                    break;
+                }
+            }
+        }
+    }
+    return std::vector<int>(dof_set.begin(), dof_set.end());
 }
 
 void CyclicSymmetrySolver::classify_dofs() {
@@ -345,31 +406,23 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     SpMatd K_cyc = (T_real.transpose() * K * T_real).pruned(1e-15);
     Eigen::VectorXd F_cyc = T_real.transpose() * F;
 
-    // Step 2: Find hub DOFs in the cyclic-reduced space
+    // Step 2: Find constrained DOFs in the cyclic-reduced space
     std::vector<int> reduced_to_full;
     reduced_to_full.reserve(interior_dofs_.size() + left_dofs_.size());
     for (int dof : interior_dofs_) reduced_to_full.push_back(dof);
     for (int dof : left_dofs_) reduced_to_full.push_back(dof);
 
-    const NodeSet* hub = apply_hub_constraint_
-        ? mesh_.find_node_set("hub_constraint") : nullptr;
-    std::set<int> hub_full_set;
-    if (hub) {
-        for (int node_id : hub->node_ids) {
-            hub_full_set.insert(3 * node_id);
-            hub_full_set.insert(3 * node_id + 1);
-            hub_full_set.insert(3 * node_id + 2);
-        }
-    }
+    std::vector<int> constrained_dofs = build_constrained_dofs();
+    std::set<int> constrained_full_set(constrained_dofs.begin(), constrained_dofs.end());
 
     std::set<int> hub_red_set;
     for (int r = 0; r < reduced_ndof; r++) {
-        if (hub_full_set.count(reduced_to_full[r]) > 0) {
+        if (constrained_full_set.count(reduced_to_full[r]) > 0) {
             hub_red_set.insert(r);
         }
     }
 
-    // Step 3: Eliminate hub DOFs from cyclic-reduced system
+    // Step 3: Eliminate constrained DOFs from cyclic-reduced system
     std::vector<int> free_cyc;
     std::vector<int> cyc_to_free(reduced_ndof, -1);
     for (int i = 0; i < reduced_ndof; i++) {
@@ -455,9 +508,9 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         K_eff = K_sector - K_omega;
 
         // 2b: Stress stiffening from centrifugal prestress.
-        //     Requires solving static K*u = F_centrifugal, which needs hub
-        //     constraints to make K non-singular.  Skipped for free hub.
-        if (apply_hub_constraint_) {
+        //     Requires solving static K*u = F_centrifugal, which needs
+        //     constraints to make K non-singular.  Skipped if unconstrained.
+        if (has_constraints_) {
             Eigen::VectorXd u_static = static_centrifugal(omega);
             assembler_.assemble_stress_stiffening(mesh_, mat_, u_static, omega);
             SpMatd K_sigma = assembler_.K_sigma();
@@ -465,18 +518,8 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         }
     }
 
-    // Step 3: Apply hub boundary conditions
-    const NodeSet* hub = apply_hub_constraint_
-        ? mesh_.find_node_set("hub_constraint") : nullptr;
-    std::vector<int> hub_constrained_dofs;
-    if (hub) {
-        for (int node_id : hub->node_ids) {
-            hub_constrained_dofs.push_back(3 * node_id);
-            hub_constrained_dofs.push_back(3 * node_id + 1);
-            hub_constrained_dofs.push_back(3 * node_id + 2);
-        }
-        std::sort(hub_constrained_dofs.begin(), hub_constrained_dofs.end());
-    }
+    // Step 3: Apply boundary conditions (constrained DOFs from all constraint groups)
+    std::vector<int> constrained_dofs = build_constrained_dofs();
 
     // Build the reduced-to-full DOF mapping (interior + left DOFs)
     std::vector<int> reduced_to_full;
@@ -488,18 +531,18 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         reduced_to_full.push_back(dof);
     }
 
-    // Find which reduced DOFs are hub-constrained
-    std::set<int> hub_set(hub_constrained_dofs.begin(), hub_constrained_dofs.end());
+    // Find which reduced DOFs are constrained
+    std::set<int> constrained_set(constrained_dofs.begin(), constrained_dofs.end());
     std::vector<int> hub_reduced_dofs;
     for (int r = 0; r < static_cast<int>(reduced_to_full.size()); r++) {
-        if (hub_set.count(reduced_to_full[r]) > 0) {
+        if (constrained_set.count(reduced_to_full[r]) > 0) {
             hub_reduced_dofs.push_back(r);
         }
     }
 
     int max_k = mesh_.num_sectors / 2;
 
-    // Build hub reduced DOF set once (shared across all k)
+    // Build constrained reduced DOF set once (shared across all k)
     std::set<int> hub_red_set(hub_reduced_dofs.begin(), hub_reduced_dofs.end());
 
     // Convert K and M to complex once
@@ -562,7 +605,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     SpMatcd M_const_proj = (T0_H * M_same * T0).pruned(1e-15);
     SpMatcd M_phase_proj = (T0_H * M_nr * T0).pruned(1e-15);
 
-    // Pre-eliminate hub DOFs from projected matrices
+    // Pre-eliminate constrained DOFs from projected matrices
     std::vector<int> free_reduced_map;
     std::vector<int> reduced_to_free_vec(n_reduced, -1);
     for (int i = 0; i < n_reduced; i++) {

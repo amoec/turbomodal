@@ -273,11 +273,18 @@ Matrix30d TET10Element::stiffness(const Material &mat) const {
   Matrix6d D = mat.constitutive_matrix();
   Matrix30d Ke = Matrix30d::Zero();
 
-  for (int gp = 0; gp < 4; gp++) {
-    double xi = gauss_points[gp](0);
-    double eta = gauss_points[gp](1);
-    double zeta = gauss_points[gp](2);
-    double w = gauss_weights[gp];
+  // Keast Rule 6: 14-point degree-4 quadrature with all positive weights.
+  // For curved TET10 elements (mid-edge nodes off straight-edge midpoints),
+  // the Jacobian varies linearly, making the B^T*D*B*|J| integrand a rational
+  // function of effective degree ~3.  The 14-point rule integrates this
+  // accurately; the old 4-point degree-2 rule over-estimated stiffness
+  // by ~9% even on mildly curved elements (flat disk sector), causing
+  // systematic frequency overestimates on complex blade geometries.
+  for (int gp = 0; gp < 14; gp++) {
+    double xi = mass_gauss_points_14[gp](0);
+    double eta = mass_gauss_points_14[gp](1);
+    double zeta = mass_gauss_points_14[gp](2);
+    double w = mass_gauss_weights_14[gp];
 
     Matrix6x30d B = B_matrix(xi, eta, zeta);
     Eigen::Matrix3d J = jacobian(xi, eta, zeta);

@@ -1190,3 +1190,536 @@ def plot_sensor_contribution(
     fig.colorbar(im, ax=ax, label="Mean |SHAP value|")
     fig.tight_layout()
     return fig
+
+
+def interactive_plane_selector(mesh: Mesh):
+    """Alias for :func:`bc_editor` (backward compatibility).
+
+    See :func:`bc_editor` for the full interactive boundary condition editor.
+    Returns a single :class:`~turbomodal.solver.BoundaryCondition` (the first
+    accepted BC, or a default if none were accepted).
+    """
+    bcs = bc_editor(mesh)
+    if bcs:
+        return bcs[0]
+    from turbomodal.solver import BoundaryCondition
+    return BoundaryCondition(
+        name="unnamed", type="fixed",
+        plane_point=np.zeros(3), plane_normal=np.array([0.0, 0.0, 1.0]),
+    )
+
+
+_BC_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4"]
+_BC_TYPES = ["fixed", "displacement", "frictionless"]
+
+
+def bc_editor(mesh: Mesh):
+    """Interactive boundary condition editor.
+
+    Opens a 3D viewer where you can position cutting planes to define
+    boundary condition node groups.  Surface nodes on the positive side
+    of the plane *and within the selection radius* are highlighted in
+    real-time.
+
+    Controls
+    --------
+    T          cycle BC type (FIXED -> DISPLACEMENT -> FRICTIONLESS)
+    X / Y / Z  toggle constrained component (DISPLACEMENT only)
+    1 / 2 / 3  snap plane normal to +X / +Y / +Z axis
+    4 / 5 / 6  rotate normal +90 deg around X / Y / Z
+    7 / 8 / 9  rotate normal -90 deg around X / Y / Z
+    F          flip normal (180 deg)
+    Enter      accept current BC, start a new one
+    Backspace  undo last accepted BC
+    Q          finish and return all BCs
+
+    Sliders (bottom of viewer):
+    Origin X/Y/Z      translate the cutting plane origin
+    Rot X/Y/Z         rotate the cutting plane normal via Euler angles
+    Selection Radius  limit selection to nodes within this radius of origin
+
+    Parameters
+    ----------
+    mesh : Mesh object with cyclic boundaries identified
+
+    Returns
+    -------
+    list[BoundaryCondition]
+    """
+    import pyvista as pv
+    from turbomodal.solver import BoundaryCondition
+
+    grid = _mesh_to_pyvista(mesh)
+    surface = grid.extract_surface(algorithm="dataset_surface")
+    all_coords = np.asarray(mesh.nodes)
+
+    # --- Precompute surface node IDs (excluding cyclic boundaries) ---
+    surf_point_ids = surface.point_data.get("vtkOriginalPointIds", None)
+    if surf_point_ids is None:
+        surf_point_ids = np.array(
+            mesh.select_nodes_by_plane(
+                np.array([0.0, 0.0, 0.0]),
+                np.array([0.0, 0.0, 1e30]),
+                tolerance=1e30,
+            )
+        )
+    else:
+        surf_point_ids = np.asarray(surf_point_ids)
+
+    exclude = set(mesh.left_boundary) | set(mesh.right_boundary)
+    mask = np.array([nid not in exclude for nid in surf_point_ids])
+    surface_node_ids = surf_point_ids[mask]
+    surface_coords = all_coords[surface_node_ids]
+
+    # Mesh bounds and center
+    bounds = surface.bounds
+    center = np.array([(bounds[0] + bounds[1]) / 2,
+                       (bounds[2] + bounds[3]) / 2,
+                       (bounds[4] + bounds[5]) / 2])
+    bbox_min = np.array([bounds[0], bounds[2], bounds[4]])
+    bbox_max = np.array([bounds[1], bounds[3], bounds[5]])
+    bbox_range = bbox_max - bbox_min
+    bbox_diag = float(np.linalg.norm(bbox_range))
+    slider_lo = bbox_min - 0.2 * bbox_range
+    slider_hi = bbox_max + 0.2 * bbox_range
+    max_radius = bbox_diag * 1.5
+
+    # --- Editor state ---
+    state = {
+        "type_idx": 0,
+        "components": [True, True, True],
+        "counter": 1,
+        "origin": center.copy(),
+        "normal": np.array([0.0, 0.0, 1.0]),
+        "accepted": [],
+        "accepted_ids": [],
+        "widget": None,
+        "suppress_cb": False,
+        "ready": False,
+        "selection_radius": max_radius,  # start with full (unbounded) selection
+    }
+
+    def _current_type():
+        return _BC_TYPES[state["type_idx"]]
+
+    def _select_nodes():
+        """Return mask into surface_node_ids for current plane + radius."""
+        n = np.asarray(state["normal"], dtype=np.float64)
+        n_hat = n / (np.linalg.norm(n) + 1e-30)
+        o = np.asarray(state["origin"], dtype=np.float64)
+        dists = surface_coords @ n_hat - o @ n_hat
+        sel_mask = dists >= -1e-6
+
+        # Bounded selection: filter by distance from origin on the plane
+        radius = state["selection_radius"]
+        if radius < max_radius * 0.99:
+            delta = surface_coords - o
+            normal_comp = np.outer(delta @ n_hat, n_hat)
+            on_plane = delta - normal_comp
+            plane_dist = np.linalg.norm(on_plane, axis=1)
+            sel_mask &= plane_dist <= radius
+
+        # Exclude nodes already claimed by accepted BCs
+        claimed = set()
+        for ids in state["accepted_ids"]:
+            claimed.update(ids.tolist())
+        if claimed:
+            for i, nid in enumerate(surface_node_ids):
+                if nid in claimed:
+                    sel_mask[i] = False
+        return sel_mask
+
+    def _type_display():
+        parts = []
+        for i, t in enumerate(_BC_TYPES):
+            label = {"displacement": "DISP", "frictionless": "FRICT"}.get(t, t.upper())
+            parts.append(f"[{label}]" if i == state["type_idx"] else f" {label} ")
+        return "  ".join(parts)
+
+    def _constrained_dof_count(n_nodes):
+        ct = _current_type()
+        if ct == "fixed":
+            return n_nodes * 3
+        elif ct == "displacement":
+            return n_nodes * sum(state["components"])
+        return n_nodes  # frictionless: 1 DOF per node
+
+    def _add_hud_text(plotter, text, name, position, font_size, color):
+        """Add text with a dark semi-transparent background."""
+        actor = plotter.add_text(
+            text, name=name, position=position,
+            font_size=font_size, color=color,
+        )
+        if hasattr(actor, "prop"):
+            actor.prop.background_color = "black"
+            actor.prop.background_opacity = 0.6
+        return actor
+
+    def _refresh(plotter):
+        """Redraw all dynamic actors and HUD text."""
+        if not state["ready"]:
+            return
+        sel_mask = _select_nodes()
+        n_selected = int(sel_mask.sum())
+
+        # Current selection — yellow spheres
+        if n_selected > 0:
+            plotter.add_mesh(
+                pv.PolyData(surface_coords[sel_mask]), name="current_sel",
+                color="yellow", point_size=8,
+                render_points_as_spheres=True,
+            )
+        else:
+            try:
+                plotter.remove_actor("current_sel")
+            except Exception:
+                pass
+
+        # Accepted BC node groups — colored spheres
+        for i, ids in enumerate(state["accepted_ids"]):
+            color = _BC_COLORS[i % len(_BC_COLORS)]
+            if len(ids) > 0:
+                plotter.add_mesh(
+                    pv.PolyData(all_coords[ids]), name=f"accepted_{i}",
+                    color=color, point_size=7,
+                    render_points_as_spheres=True,
+                )
+
+        # Selection radius visualization — translucent disc
+        radius = state["selection_radius"]
+        if radius < max_radius * 0.99:
+            try:
+                disk = pv.Disc(
+                    center=state["origin"],
+                    normal=state["normal"],
+                    inner=0.0, outer=radius,
+                    r_res=1, c_res=36,
+                )
+                plotter.add_mesh(
+                    disk, name="radius_disk",
+                    color="yellow", opacity=0.12,
+                    show_edges=True, edge_color="yellow", line_width=1,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                plotter.remove_actor("radius_disk")
+            except Exception:
+                pass
+
+        # --- HUD: Status panel (upper left) ---
+        name = f"bc_{state['counter']}"
+        n_dofs = _constrained_dof_count(n_selected)
+        n_total = len(surface_node_ids)
+        n_claimed = sum(len(ids) for ids in state["accepted_ids"])
+
+        hud = [
+            f"Editing: {name}",
+            f"Type: {_type_display()}",
+        ]
+        if _current_type() == "displacement":
+            labels = ["ux", "uy", "uz"]
+            parts = [f"[{labels[i]}=0]" if state["components"][i] else f" {labels[i]} "
+                     for i in range(3)]
+            hud.append(f"DOFs: {'  '.join(parts)}")
+        hud += [
+            f"Selected: {n_selected} nodes  ({n_dofs} DOFs)",
+            f"Available: {n_total - n_claimed}/{n_total} surface nodes",
+            f"Origin: ({state['origin'][0]:.4f}, {state['origin'][1]:.4f}, {state['origin'][2]:.4f})",
+            f"Normal: ({state['normal'][0]:.3f}, {state['normal'][1]:.3f}, {state['normal'][2]:.3f})",
+        ]
+        if radius < max_radius * 0.99:
+            hud.append(f"Radius: {radius:.4f}")
+        _add_hud_text(plotter, "\n".join(hud), "status_text",
+                      "upper_left", 9, "white")
+
+        # --- Accepted list (upper right) ---
+        if state["accepted"]:
+            lines = [f"Accepted ({len(state['accepted'])})"]
+            for i, bc in enumerate(state["accepted"]):
+                nn = len(state["accepted_ids"][i])
+                tp = bc.type.upper()
+                if bc.type == "displacement":
+                    ax = [c for c, v in zip("xyz", bc.constrained_components) if v]
+                    tp += f"({''.join(ax)})"
+                lines.append(f"  {bc.name}: {tp} {nn}n")
+            _add_hud_text(plotter, "\n".join(lines), "accepted_text",
+                          "upper_right", 9, "white")
+        else:
+            _add_hud_text(plotter, "No BCs accepted", "accepted_text",
+                          "upper_right", 9, "gray")
+
+        # --- Controls (lower left) — compact ---
+        ct = _current_type().upper()
+        ctrl = f"[T] {ct}  [F] Flip  [Enter] Accept  [Backspace] Undo  [Q] Finish"
+        ctrl += "\n[1/2/3] Snap  [4/5/6] +90  [7/8/9] -90"
+        if _current_type() == "displacement":
+            cx = "LOCKED" if state["components"][0] else "free"
+            cy = "LOCKED" if state["components"][1] else "free"
+            cz = "LOCKED" if state["components"][2] else "free"
+            ctrl += f"\n[X] ux={cx}  [Y] uy={cy}  [Z] uz={cz}"
+        _add_hud_text(plotter, ctrl, "controls_text",
+                      "lower_left", 8, "lightgray")
+
+        plotter.render()
+
+    # --- Programmatic plane control helpers ---
+    def _set_plane(origin, normal):
+        state["origin"] = np.array(origin, dtype=np.float64)
+        n = np.array(normal, dtype=np.float64)
+        n_len = np.linalg.norm(n)
+        if n_len > 1e-12:
+            n = n / n_len
+        state["normal"] = n
+        w = state["widget"]
+        if w is not None:
+            state["suppress_cb"] = True
+            w.SetOrigin(*state["origin"])
+            w.SetNormal(*state["normal"])
+            w.UpdatePlacement()
+            state["suppress_cb"] = False
+        _refresh(plotter)
+
+    def _rotate_normal(axis_char, degrees):
+        axis_idx = {"x": 0, "y": 1, "z": 2}[axis_char.lower()]
+        rad = np.radians(degrees)
+        c, s = np.cos(rad), np.sin(rad)
+        R = np.eye(3)
+        i, j = [(1, 2), (2, 0), (0, 1)][axis_idx]
+        R[i, i] = c;  R[i, j] = -s
+        R[j, i] = s;  R[j, j] = c
+        _set_plane(state["origin"], R @ state["normal"])
+
+    # --- Build plotter ---
+    plotter = pv.Plotter(title="BC Editor - turbomodal")
+    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
+                     edge_color="gray", line_width=0.5)
+
+    # Plane widget
+    def on_plane(normal, origin, widget=None):
+        if widget is not None and state["widget"] is None:
+            state["widget"] = widget
+        if state["suppress_cb"] or not state["ready"]:
+            return
+        state["normal"] = np.array(normal)
+        state["origin"] = np.array(origin)
+        _refresh(plotter)
+
+    plotter.add_plane_widget(
+        on_plane,
+        normal=state["normal"],
+        origin=state["origin"],
+        normal_rotation=True,
+        interaction_event="always",
+        pass_widget=True,
+    )
+
+    # --- Sliders: right side, vertical column with generous spacing ---
+    axis_labels = ["X", "Y", "Z"]
+
+    # Selection Radius (most important — topmost slider)
+    def _on_radius(value):
+        if state["suppress_cb"] or not state["ready"]:
+            return
+        state["selection_radius"] = value
+        _refresh(plotter)
+
+    plotter.add_slider_widget(
+        _on_radius,
+        rng=(0.0, float(max_radius)),
+        value=float(max_radius),
+        title="Radius",
+        pointa=(0.72, 0.55), pointb=(0.98, 0.55),
+        style="modern",
+    )
+
+    # Origin X/Y/Z sliders
+    for ax_i in range(3):
+        def _make_origin_cb(idx):
+            def _cb(value):
+                if state["suppress_cb"] or not state["ready"]:
+                    return
+                state["origin"][idx] = value
+                w = state["widget"]
+                if w is not None:
+                    state["suppress_cb"] = True
+                    w.SetOrigin(*state["origin"])
+                    w.UpdatePlacement()
+                    state["suppress_cb"] = False
+                _refresh(plotter)
+            return _cb
+        y_pos = 0.40 - ax_i * 0.15  # y=0.40, 0.25, 0.10
+        plotter.add_slider_widget(
+            _make_origin_cb(ax_i),
+            rng=(float(slider_lo[ax_i]), float(slider_hi[ax_i])),
+            value=float(center[ax_i]),
+            title=f"Orig {axis_labels[ax_i]}",
+            pointa=(0.72, y_pos), pointb=(0.98, y_pos),
+            style="modern",
+        )
+
+    # --- Key bindings ---
+    def _cycle_type():
+        state["type_idx"] = (state["type_idx"] + 1) % len(_BC_TYPES)
+        ct = _current_type().upper()
+        print(f"  -> BC type: {ct}")
+        if _current_type() == "displacement":
+            print("     Press X/Y/Z to toggle which DOFs are constrained")
+        _refresh(plotter)
+
+    def _toggle_comp(idx):
+        if _current_type() != "displacement":
+            print("  -> X/Y/Z toggles only apply in DISPLACEMENT mode")
+            return
+        state["components"][idx] = not state["components"][idx]
+        tag = "LOCKED" if state["components"][idx] else "free"
+        print(f"  -> u{'xyz'[idx]}: {tag}")
+        _refresh(plotter)
+
+    def _accept():
+        sel_mask = _select_nodes()
+        selected_ids = surface_node_ids[sel_mask]
+        if len(selected_ids) == 0:
+            print("  -> No nodes selected, nothing to accept")
+            return
+        name = f"bc_{state['counter']}"
+        radius = state["selection_radius"]
+        bc = BoundaryCondition(
+            name=name,
+            type=_current_type(),
+            plane_point=state["origin"].copy(),
+            plane_normal=state["normal"].copy(),
+            constrained_components=tuple(state["components"]),
+            node_ids=selected_ids.tolist(),
+            selection_radius=radius if radius < max_radius * 0.99 else None,
+        )
+        state["accepted"].append(bc)
+        state["accepted_ids"].append(selected_ids.copy())
+        tp = _current_type().upper()
+        if _current_type() == "displacement":
+            ax = [c for c, v in zip("xyz", state["components"]) if v]
+            tp += f" ({''.join(ax)})"
+        print(f"  -> Accepted: {name} | {tp} | {len(selected_ids)} nodes")
+        state["counter"] += 1
+        state["type_idx"] = 0
+        state["components"] = [True, True, True]
+        _refresh(plotter)
+
+    def _undo():
+        if state["accepted"]:
+            removed = state["accepted"].pop()
+            idx = len(state["accepted_ids"]) - 1
+            state["accepted_ids"].pop()
+            try:
+                plotter.remove_actor(f"accepted_{idx}")
+            except Exception:
+                pass
+            state["counter"] = max(1, state["counter"] - 1)
+            print(f"  -> Undone: {removed.name}")
+            _refresh(plotter)
+        else:
+            print("  -> Nothing to undo")
+
+    plotter.add_key_event("t", _cycle_type)
+    plotter.add_key_event("x", lambda: _toggle_comp(0))
+    plotter.add_key_event("y", lambda: _toggle_comp(1))
+    plotter.add_key_event("z", lambda: _toggle_comp(2))
+    plotter.add_key_event("Return", _accept)
+    plotter.add_key_event("BackSpace", _undo)
+
+    # Plane orientation keys
+    def _snap(nx, ny, nz):
+        print(f"  -> Snap normal to ({nx},{ny},{nz})")
+        _set_plane(state["origin"], [nx, ny, nz])
+
+    plotter.add_key_event("1", lambda: _snap(1, 0, 0))
+    plotter.add_key_event("2", lambda: _snap(0, 1, 0))
+    plotter.add_key_event("3", lambda: _snap(0, 0, 1))
+
+    for key, axis, deg in [("4", "x", 90), ("5", "y", 90), ("6", "z", 90),
+                            ("7", "x", -90), ("8", "y", -90), ("9", "z", -90)]:
+        def _make_rot(a, d):
+            def _cb():
+                print(f"  -> Rotate normal {d:+d} deg around {a.upper()}")
+                _rotate_normal(a, d)
+            return _cb
+        plotter.add_key_event(key, _make_rot(axis, deg))
+
+    def _flip():
+        print("  -> Flip normal (180 deg)")
+        _set_plane(state["origin"], -state["normal"])
+    plotter.add_key_event("f", _flip)
+
+    # All widgets created — enable callbacks and do initial refresh
+    state["ready"] = True
+    _refresh(plotter)
+    plotter.reset_camera()
+    plotter.show()
+
+    # Auto-accept if user closed without explicit accept
+    if not state["accepted"]:
+        sel_mask = _select_nodes()
+        selected_ids = surface_node_ids[sel_mask]
+        if len(selected_ids) > 0:
+            radius = state["selection_radius"]
+            bc = BoundaryCondition(
+                name=f"bc_{state['counter']}",
+                type=_current_type(),
+                plane_point=state["origin"].copy(),
+                plane_normal=state["normal"].copy(),
+                constrained_components=tuple(state["components"]),
+                node_ids=selected_ids.tolist(),
+                selection_radius=radius if radius < max_radius * 0.99 else None,
+            )
+            state["accepted"].append(bc)
+
+    return state["accepted"]
+
+
+def plot_boundary_conditions(mesh: Mesh, bcs, off_screen: bool = False):
+    """Visualize selected node groups for each boundary condition.
+
+    Parameters
+    ----------
+    mesh : Mesh object
+    bcs : list of BoundaryCondition objects
+    off_screen : render off-screen (for testing)
+
+    Returns
+    -------
+    pyvista.Plotter
+    """
+    import pyvista as pv
+
+    grid = _mesh_to_pyvista(mesh)
+    surface = grid.extract_surface(algorithm="dataset_surface")
+    nodes_arr = np.asarray(mesh.nodes)
+
+    plotter = pv.Plotter(off_screen=off_screen)
+    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
+                     edge_color="gray", line_width=0.5)
+
+    for i, bc in enumerate(bcs):
+        color = _BC_COLORS[i % len(_BC_COLORS)]
+        selected = mesh.select_nodes_by_plane(
+            np.asarray(bc.plane_point, dtype=np.float64),
+            np.asarray(bc.plane_normal, dtype=np.float64),
+            bc.tolerance,
+        )
+        if selected:
+            pts = nodes_arr[selected]
+            cloud = pv.PolyData(pts)
+            tp = bc.type.upper()
+            if bc.type == "displacement":
+                labels = "xyz"
+                active = [labels[j] for j in range(3) if bc.constrained_components[j]]
+                tp += f" ({','.join(active)})"
+            plotter.add_mesh(cloud, color=color, point_size=8,
+                             render_points_as_spheres=True,
+                             label=f"{bc.name}: {tp}, {len(selected)} nodes")
+
+    plotter.add_legend()
+    if not off_screen:
+        plotter.show()
+    return plotter

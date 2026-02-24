@@ -86,6 +86,31 @@ PYBIND11_MODULE(_core, m) {
                    std::to_string(ns.node_ids.size()) + " nodes>";
         });
 
+    // --- BCType ---
+    py::enum_<BCType>(m, "BCType")
+        .value("FIXED", BCType::FIXED)
+        .value("DISPLACEMENT", BCType::DISPLACEMENT)
+        .value("FRICTIONLESS", BCType::FRICTIONLESS);
+
+    // --- ConstraintGroup ---
+    py::class_<ConstraintGroup>(m, "ConstraintGroup")
+        .def(py::init<>())
+        .def_readwrite("name", &ConstraintGroup::name)
+        .def_readwrite("node_ids", &ConstraintGroup::node_ids)
+        .def_readwrite("type", &ConstraintGroup::type)
+        .def_readwrite("constrained_components", &ConstraintGroup::constrained_components)
+        .def_readwrite("surface_normal", &ConstraintGroup::surface_normal)
+        .def("__repr__", [](const ConstraintGroup& cg) {
+            std::string type_str;
+            switch (cg.type) {
+                case BCType::FIXED: type_str = "FIXED"; break;
+                case BCType::DISPLACEMENT: type_str = "DISPLACEMENT"; break;
+                case BCType::FRICTIONLESS: type_str = "FRICTIONLESS"; break;
+            }
+            return "<ConstraintGroup '" + cg.name + "' " + type_str +
+                   " with " + std::to_string(cg.node_ids.size()) + " nodes>";
+        });
+
     // --- Mesh ---
     py::class_<Mesh>(m, "Mesh")
         .def(py::init<>())
@@ -111,6 +136,13 @@ PYBIND11_MODULE(_core, m) {
         .def("match_boundary_nodes", &Mesh::match_boundary_nodes)
         .def("find_node_set", &Mesh::find_node_set, py::arg("name"),
              py::return_value_policy::reference_internal)
+        .def("select_nodes_by_plane", &Mesh::select_nodes_by_plane,
+             py::arg("plane_point"), py::arg("plane_normal"),
+             py::arg("tolerance") = 1e-6,
+             "Select surface nodes on the positive side of a cutting plane")
+        .def("compute_surface_normal", &Mesh::compute_surface_normal,
+             py::arg("node_ids"),
+             "Compute area-weighted average outward normal for faces touching given nodes")
         .def("num_nodes", &Mesh::num_nodes)
         .def("num_elements", &Mesh::num_elements)
         .def("num_dof", &Mesh::num_dof)
@@ -244,6 +276,11 @@ PYBIND11_MODULE(_core, m) {
              py::arg("fluid") = FluidConfig(),
              py::arg("apply_hub_constraint") = true,
              py::keep_alive<1, 2>())  // solver keeps mesh alive
+        .def(py::init<const Mesh&, const Material&, const std::vector<ConstraintGroup>&, const FluidConfig&>(),
+             py::arg("mesh"), py::arg("material"),
+             py::arg("constraints"),
+             py::arg("fluid") = FluidConfig(),
+             py::keep_alive<1, 2>())
         .def("solve_at_rpm",
              [](CyclicSymmetrySolver& self, double rpm, int num_modes,
                 const std::vector<int>& hi, int max_threads, bool coriolis,

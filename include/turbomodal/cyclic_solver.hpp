@@ -44,6 +44,11 @@ public:
                          const FluidConfig& fluid = FluidConfig(),
                          bool apply_hub_constraint = true);
 
+    // Constructor with arbitrary constraint groups (replaces hub_constraint boolean)
+    CyclicSymmetrySolver(const Mesh& mesh, const Material& mat,
+                         const std::vector<ConstraintGroup>& constraints,
+                         const FluidConfig& fluid = FluidConfig());
+
     std::vector<ModalResult> solve_at_rpm(
         double rpm, int num_modes_per_harmonic,
         const std::vector<int>& harmonic_indices = {},
@@ -91,7 +96,12 @@ private:
     Material mat_;
     FluidConfig fluid_;
     bool apply_hub_constraint_;
+    std::vector<ConstraintGroup> constraints_;
+    bool has_constraints_ = false;
     GlobalAssembler assembler_;
+
+    // Build the full list of constrained DOF indices from all constraint groups
+    std::vector<int> build_constrained_dofs() const;
 
     // DOF classification for cyclic symmetry
     std::vector<int> interior_dofs_;
