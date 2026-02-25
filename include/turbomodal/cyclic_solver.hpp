@@ -39,6 +39,13 @@ struct StationaryFrameResult {
     Eigen::VectorXi whirl_direction; // +1 FW, -1 BW, 0 standing
 };
 
+// Condition for parametric sweep
+struct ParametricCondition {
+    double rpm = 0.0;
+    double temperature = 293.15;   // K (default room temp)
+    std::vector<double> mistuning; // per-blade frequency deviations (empty = tuned)
+};
+
 class CyclicSymmetrySolver {
 public:
     CyclicSymmetrySolver(const Mesh& mesh, const Material& mat,
@@ -56,7 +63,9 @@ public:
         int max_threads = 0,
         bool include_coriolis = false,
         double min_frequency = 0.0,
-        ProgressCallback progress_cb = nullptr);
+        ProgressCallback progress_cb = nullptr,
+        bool allow_condensation = false,
+        double memory_reserve_fraction = 0.2);
 
     std::vector<std::vector<ModalResult>> solve_rpm_sweep(
         const Eigen::VectorXd& rpm_values, int num_modes_per_harmonic,
@@ -64,6 +73,19 @@ public:
         int max_threads = 0,
         bool include_coriolis = false,
         double min_frequency = 0.0);
+
+    // Fast parametric sweep: precompute once, then scale for each condition.
+    // Returns one vector<ModalResult> (all harmonics) per condition.
+    std::vector<std::vector<ModalResult>> solve_parametric(
+        const std::vector<ParametricCondition>& conditions,
+        int num_modes_per_harmonic,
+        const std::vector<int>& harmonic_indices = {},
+        int max_threads = 0,
+        bool include_coriolis = false,
+        double min_frequency = 0.0,
+        bool allow_condensation = false,
+        double memory_reserve_fraction = 0.2,
+        ProgressCallback progress_cb = nullptr);
 
     void export_campbell_csv(const std::string& filename,
                              const std::vector<std::vector<ModalResult>>& results);
@@ -114,6 +136,26 @@ private:
     SpMatd M_base_;
     bool base_assembled_ = false;
 
+    // --- Precomputed cyclic projections (Feature 3 Phase 1) ---
+    // Cached after first call to precompute_cyclic_projections().
+    SpMatcd Kcf_, Kpf_, Kpf_H_;     // Stiffness projections (free DOF space)
+    SpMatcd Mcf_, Mpf_, Mpf_H_;     // Mass projections (free DOF space)
+    SpMatcd T0_;                      // T(0) transformation
+    std::set<int> right_dof_set_;
+    std::set<int> hub_red_set_;
+    std::vector<int> free_reduced_map_;
+    int n_reduced_ = 0;
+    int n_free_ = 0;
+    bool projections_precomputed_ = false;
+
+    // Precompute cyclic projections from K_eff and M_sector.
+    // Caches Kcf_, Kpf_, Mcf_, Mpf_, etc. for fast per-harmonic assembly.
+    void precompute_cyclic_projections(const SpMatd& K_eff, const SpMatd& M_sector);
+
+    // --- Unit-speed rotation effects for parametric scaling ---
+    SpMatd K_omega_unit_;     // K_omega at omega=1 rad/s (scales as omega^2)
+    bool K_omega_unit_computed_ = false;
+
     // BEM added mass cache (precomputed once per geometry, reused across RPM points)
     std::unique_ptr<PotentialFlowAddedMass> bem_added_mass_;
     std::vector<SpMatcd> M_added_free_cache_;  // per-harmonic, in free-DOF space
@@ -131,6 +173,7 @@ private:
     double added_mass_factor(int harmonic_index) const;
 
     Eigen::VectorXd static_centrifugal(double omega);
+    Eigen::VectorXd static_centrifugal_scaled(double omega, double E_scale);
 };
 
 }  // namespace turbomodal

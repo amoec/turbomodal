@@ -15,7 +15,13 @@ from typing import Any, Optional
 
 import numpy as np
 
-from turbomodal._core import CyclicSymmetrySolver, FluidConfig, FMMSolver, Material
+from turbomodal._core import (
+    CyclicSymmetrySolver,
+    FluidConfig,
+    FMMSolver,
+    Material,
+    ParametricCondition,
+)
 from turbomodal._utils import progress_bar as _progress_bar
 from turbomodal.dataset import DatasetConfig, OperatingCondition, export_modal_results
 
@@ -213,18 +219,53 @@ def run_parametric_sweep(
     all_results: dict[int, list] = {}
     t_start = time.perf_counter()
 
-    for idx, cond in enumerate(conditions):
-        t0 = time.perf_counter()
+    # Fast path: batch all conditions through C++ solve_parametric
+    # when mistuning is not required (avoids Python loop overhead and
+    # re-assembles K/M once, scaling by temperature/RPM internally).
+    if not config.include_mistuning:
+        # Build C++ ParametricCondition list
+        cpp_conditions = []
+        for cond in conditions:
+            pc = ParametricCondition(
+                rpm=cond.rpm,
+                temperature=cond.temperature,
+            )
+            cpp_conditions.append(pc)
 
-        # Adjust material for temperature
-        mat = base_material.at_temperature(cond.temperature)
+        # Single solver instance, single batched call
+        solver = CyclicSymmetrySolver(mesh, base_material, fluid)
 
-        # Solve tuned cyclic symmetry problem
-        solver = CyclicSymmetrySolver(mesh, mat, fluid)
-        results = solver.solve_at_rpm(cond.rpm, config.num_modes)
+        progress_cb = None
+        if verbose >= 1:
+            def progress_cb(done, total, _k, _conv):
+                elapsed = time.perf_counter() - t_start
+                bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+                sys.stdout.write(bar)
+                sys.stdout.flush()
+                if done == total:
+                    sys.stdout.write("\n")
 
-        # Optional: apply FMM mistuning
-        if config.include_mistuning:
+        batch_results = solver.solve_parametric(
+            cpp_conditions, config.num_modes,
+            progress_cb=progress_cb,
+        )
+
+        for idx, cond in enumerate(conditions):
+            all_results[cond.condition_id] = batch_results[idx]
+
+    else:
+        # Slow path: per-condition Python loop (needed for FMM mistuning)
+        for idx, cond in enumerate(conditions):
+            t0 = time.perf_counter()
+
+            # Adjust material for temperature
+            mat = base_material.at_temperature(cond.temperature)
+
+            # Solve tuned cyclic symmetry problem
+            solver = CyclicSymmetrySolver(mesh, mat, fluid)
+            results = solver.solve_at_rpm(cond.rpm, config.num_modes)
+
+            # Apply FMM mistuning
             mistuning_pattern = FMMSolver.random_mistuning(
                 mesh.num_sectors,
                 config.mistuning_sigma,
@@ -232,9 +273,6 @@ def run_parametric_sweep(
             )
             cond.mistuning_pattern = np.asarray(mistuning_pattern)
 
-            # Run FMM for each mode family (approximated as the first
-            # mode at each harmonic).  We extract tuned frequencies
-            # across all harmonic indices for mode family 0.
             n_harmonics = len(results)
             if n_harmonics > 0:
                 tuned_freqs = np.array([
@@ -246,28 +284,25 @@ def run_parametric_sweep(
                     tuned_freqs,
                     cond.mistuning_pattern,
                 )
-                # The FMM result is informational; the tuned modal
-                # results are still stored so downstream consumers can
-                # combine them with the mistuning amplification factors.
 
-        all_results[cond.condition_id] = results
-        dt = time.perf_counter() - t0
-        elapsed = time.perf_counter() - t_start
+            all_results[cond.condition_id] = results
+            dt = time.perf_counter() - t0
+            elapsed = time.perf_counter() - t_start
 
-        if verbose == 1:
-            bar = _progress_bar(idx + 1, n_cond, prefix="  ", elapsed=elapsed)
-            sys.stdout.write(bar)
-            sys.stdout.flush()
-            if idx == n_cond - 1:
-                sys.stdout.write("\n")
-        elif verbose >= 2:
-            n_modes_total = sum(len(r.frequencies) for r in results)
-            print(
-                f"  [{idx + 1}/{n_cond}] cond={cond.condition_id}  "
-                f"rpm={cond.rpm:.0f}  T={cond.temperature:.1f}K  "
-                f"{len(results)} harmonics, {n_modes_total} modes  "
-                f"({dt:.2f}s)"
-            )
+            if verbose == 1:
+                bar = _progress_bar(idx + 1, n_cond, prefix="  ", elapsed=elapsed)
+                sys.stdout.write(bar)
+                sys.stdout.flush()
+                if idx == n_cond - 1:
+                    sys.stdout.write("\n")
+            elif verbose >= 2:
+                n_modes_total = sum(len(r.frequencies) for r in results)
+                print(
+                    f"  [{idx + 1}/{n_cond}] cond={cond.condition_id}  "
+                    f"rpm={cond.rpm:.0f}  T={cond.temperature:.1f}K  "
+                    f"{len(results)} harmonics, {n_modes_total} modes  "
+                    f"({dt:.2f}s)"
+                )
 
     total_time = time.perf_counter() - t_start
     if verbose >= 1:

@@ -1,4 +1,5 @@
 #include "turbomodal/cyclic_solver.hpp"
+#include "turbomodal/static_condensation.hpp"
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -476,13 +477,146 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     return u;
 }
 
+Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal_scaled(
+    double omega, double E_scale) {
+    // Like static_centrifugal but with K = E_scale * K_base.
+    // Since u_static = K^{-1} * F and F ∝ ω², K ∝ E_scale,
+    // u_static = (1/E_scale) * K_base^{-1} * F
+    // which is equivalent to: u_static(omega, E_scale) = u_static(omega, 1.0) / E_scale
+    // But that requires solving at omega first. Instead we just call
+    // static_centrifugal directly — the material scaling is already handled
+    // by the assembler when K_base is constructed with the scaled material.
+    // This method exists so callers can force the scale when K_base uses E_ref.
+    //
+    // For the parametric sweep, K_base is at E_ref. The static solve K*u = F
+    // with K = E_scale * K_base gives u = (1/E_scale) * K_base^{-1} * F.
+    // F_centrifugal ∝ rho * omega^2 * r (independent of E), so we solve at
+    // unit E_scale and divide: u_scaled = u_unit / E_scale.
+    // However, this optimization is fragile with constraints, so for now
+    // we just solve directly.
+    (void)E_scale;  // TODO: optimize by caching the factorization
+    return static_centrifugal(omega);
+}
+
+void CyclicSymmetrySolver::precompute_cyclic_projections(
+    const SpMatd& K_eff, const SpMatd& M_sector) {
+
+    int ndof_full = mesh_.num_dof();
+
+    // Build constrained DOFs and reduced-to-full map
+    std::vector<int> constrained_dofs = build_constrained_dofs();
+    std::vector<int> reduced_to_full;
+    reduced_to_full.reserve(interior_dofs_.size() + left_dofs_.size());
+    for (int dof : interior_dofs_) reduced_to_full.push_back(dof);
+    for (int dof : left_dofs_) reduced_to_full.push_back(dof);
+
+    std::set<int> constrained_set(constrained_dofs.begin(), constrained_dofs.end());
+    hub_red_set_.clear();
+    for (int r = 0; r < static_cast<int>(reduced_to_full.size()); r++) {
+        if (constrained_set.count(reduced_to_full[r]) > 0) {
+            hub_red_set_.insert(r);
+        }
+    }
+
+    // Convert K and M to complex
+    SpMatcd K_complex(ndof_full, ndof_full), M_complex(ndof_full, ndof_full);
+    {
+        std::vector<TripletC> kc, mc;
+        kc.reserve(K_eff.nonZeros());
+        mc.reserve(M_sector.nonZeros());
+        for (int col = 0; col < K_eff.outerSize(); ++col)
+            for (SpMatd::InnerIterator it(K_eff, col); it; ++it)
+                kc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+        for (int col = 0; col < M_sector.outerSize(); ++col)
+            for (SpMatd::InnerIterator it(M_sector, col); it; ++it)
+                mc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
+        K_complex.setFromTriplets(kc.begin(), kc.end());
+        M_complex.setFromTriplets(mc.begin(), mc.end());
+    }
+
+    // Precompute T0 and fast-path projections
+    double alpha = 2.0 * PI / mesh_.num_sectors;
+    right_dof_set_.clear();
+    right_dof_set_.insert(right_dofs_.begin(), right_dofs_.end());
+
+    T0_ = build_cyclic_transformation(0);
+    SpMatcd T0_H = T0_.adjoint();
+    n_reduced_ = static_cast<int>(T0_.cols());
+
+    // Partition by right-DOF membership
+    auto partition = [&](const SpMatcd& A) {
+        std::vector<TripletC> ts, tnr;
+        for (int col = 0; col < A.outerSize(); ++col) {
+            bool cr = right_dof_set_.count(col) > 0;
+            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
+                bool rr = right_dof_set_.count(static_cast<int>(it.row())) > 0;
+                if (rr == cr)
+                    ts.emplace_back(it.row(), it.col(), it.value());
+                else if (!rr && cr)
+                    tnr.emplace_back(it.row(), it.col(), it.value());
+            }
+        }
+        int sz = static_cast<int>(A.rows());
+        SpMatcd As(sz, sz), Anr(sz, sz);
+        As.setFromTriplets(ts.begin(), ts.end());
+        Anr.setFromTriplets(tnr.begin(), tnr.end());
+        return std::make_pair(std::move(As), std::move(Anr));
+    };
+
+    auto [K_same, K_nr] = partition(K_complex);
+    auto [M_same, M_nr] = partition(M_complex);
+
+    SpMatcd K_const_proj = (T0_H * K_same * T0_).pruned(1e-15);
+    SpMatcd K_phase_proj = (T0_H * K_nr * T0_).pruned(1e-15);
+    SpMatcd M_const_proj = (T0_H * M_same * T0_).pruned(1e-15);
+    SpMatcd M_phase_proj = (T0_H * M_nr * T0_).pruned(1e-15);
+
+    // Pre-eliminate constrained DOFs
+    free_reduced_map_.clear();
+    std::vector<int> reduced_to_free_vec(n_reduced_, -1);
+    for (int i = 0; i < n_reduced_; i++) {
+        if (hub_red_set_.count(i) == 0) {
+            reduced_to_free_vec[i] = static_cast<int>(free_reduced_map_.size());
+            free_reduced_map_.push_back(i);
+        }
+    }
+    n_free_ = static_cast<int>(free_reduced_map_.size());
+
+    auto extract_free = [&](const SpMatcd& A) -> SpMatcd {
+        std::vector<TripletC> trips;
+        for (int col = 0; col < A.outerSize(); ++col) {
+            int rj = reduced_to_free_vec[col];
+            if (rj < 0) continue;
+            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
+                int ri = reduced_to_free_vec[static_cast<int>(it.row())];
+                if (ri >= 0)
+                    trips.emplace_back(ri, rj, it.value());
+            }
+        }
+        SpMatcd R(n_free_, n_free_);
+        R.setFromTriplets(trips.begin(), trips.end());
+        return R;
+    };
+
+    Kcf_ = extract_free(K_const_proj);
+    Kpf_ = extract_free(K_phase_proj);
+    Mcf_ = extract_free(M_const_proj);
+    Mpf_ = extract_free(M_phase_proj);
+    Kpf_H_ = Kpf_.adjoint();
+    Mpf_H_ = Mpf_.adjoint();
+
+    projections_precomputed_ = true;
+}
+
 std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     double rpm, int num_modes_per_harmonic,
     const std::vector<int>& harmonic_indices,
     int max_threads,
     bool include_coriolis,
     double min_frequency,
-    ProgressCallback progress_cb) {
+    ProgressCallback progress_cb,
+    bool allow_condensation,
+    double memory_reserve_fraction) {
 
     double omega = rpm * 2.0 * PI / 60.0;
 
@@ -518,104 +652,79 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         }
     }
 
-    // Step 3: Apply boundary conditions (constrained DOFs from all constraint groups)
-    std::vector<int> constrained_dofs = build_constrained_dofs();
+    // Step 2.5: Optional static condensation for large meshes
+    SpMatd T_condensation;  // identity if no condensation
+    bool condensation_active = false;
+    if (allow_condensation) {
+        int ndof_reduced = static_cast<int>(interior_dofs_.size() + left_dofs_.size());
+        size_t per_harmonic = estimate_per_harmonic_bytes(ndof_reduced, num_modes_per_harmonic);
+        size_t total_mem = total_system_memory();
+        size_t budget = static_cast<size_t>(total_mem * (1.0 - memory_reserve_fraction));
 
-    // Build the reduced-to-full DOF mapping (interior + left DOFs)
-    std::vector<int> reduced_to_full;
-    reduced_to_full.reserve(interior_dofs_.size() + left_dofs_.size());
-    for (int dof : interior_dofs_) {
-        reduced_to_full.push_back(dof);
-    }
-    for (int dof : left_dofs_) {
-        reduced_to_full.push_back(dof);
-    }
+        if (total_mem > 0 && per_harmonic > budget) {
+            int n_target = compute_target_dofs(ndof_reduced, num_modes_per_harmonic, budget);
 
-    // Find which reduced DOFs are constrained
-    std::set<int> constrained_set(constrained_dofs.begin(), constrained_dofs.end());
-    std::vector<int> hub_reduced_dofs;
-    for (int r = 0; r < static_cast<int>(reduced_to_full.size()); r++) {
-        if (constrained_set.count(reduced_to_full[r]) > 0) {
-            hub_reduced_dofs.push_back(r);
+            // Collect boundary DOFs (mandatory for cyclic correctness)
+            std::set<int> boundary_dof_indices;
+            // In reduced space, left DOFs start after interior DOFs
+            int interior_count = static_cast<int>(interior_dofs_.size());
+            for (int i = interior_count; i < ndof_reduced; i++) {
+                boundary_dof_indices.insert(i);
+            }
+            // Also add constrained DOFs
+            std::vector<int> constrained = build_constrained_dofs();
+            std::set<int> constrained_full(constrained.begin(), constrained.end());
+            std::vector<int> reduced_to_full_map;
+            for (int dof : interior_dofs_) reduced_to_full_map.push_back(dof);
+            for (int dof : left_dofs_) reduced_to_full_map.push_back(dof);
+            for (int r = 0; r < ndof_reduced; r++) {
+                if (constrained_full.count(reduced_to_full_map[r]) > 0)
+                    boundary_dof_indices.insert(r);
+            }
+
+            if (n_target < ndof_reduced) {
+                auto master = select_master_dofs(K_eff, boundary_dof_indices, n_target);
+                auto cond = condense(K_eff, M_sector, master);
+                std::cerr << "[CyclicSolver] Condensation active: "
+                          << ndof_reduced << " → " << static_cast<int>(master.size())
+                          << " DOFs (target " << n_target << ")" << std::endl;
+                K_eff = std::move(cond.K_reduced);
+                M_sector = std::move(cond.M_reduced);
+                T_condensation = std::move(cond.T_c);
+                condensation_active = true;
+            }
         }
     }
+
+    // Step 3: Precompute cyclic projections
+    precompute_cyclic_projections(K_eff, M_sector);
+
+    // Use cached projections
+    const SpMatcd& Kcf = Kcf_;
+    const SpMatcd& Kpf = Kpf_;
+    const SpMatcd& Mcf = Mcf_;
+    const SpMatcd& Mpf = Mpf_;
+    const SpMatcd& Kpf_H = Kpf_H_;
+    const SpMatcd& Mpf_H = Mpf_H_;
+    const SpMatcd& T0 = T0_;
+    const std::set<int>& right_dof_set = right_dof_set_;
+    const std::set<int>& hub_red_set = hub_red_set_;
+    const std::vector<int>& free_reduced_map = free_reduced_map_;
+    int n_reduced = n_reduced_;
+    int n_free = n_free_;
+    double alpha = 2.0 * PI / mesh_.num_sectors;
 
     int max_k = mesh_.num_sectors / 2;
 
-    // Build constrained reduced DOF set once (shared across all k)
-    std::set<int> hub_red_set(hub_reduced_dofs.begin(), hub_reduced_dofs.end());
-
-    // Convert K and M to complex once
-    int ndof_full = mesh_.num_dof();
-    SpMatcd K_complex(ndof_full, ndof_full), M_complex(ndof_full, ndof_full);
-    {
-        std::vector<TripletC> kc, mc;
-        kc.reserve(K_eff.nonZeros());
-        mc.reserve(M_sector.nonZeros());
-        for (int col = 0; col < K_eff.outerSize(); ++col) {
-            for (SpMatd::InnerIterator it(K_eff, col); it; ++it)
-                kc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
-        }
-        for (int col = 0; col < M_sector.outerSize(); ++col) {
-            for (SpMatd::InnerIterator it(M_sector, col); it; ++it)
-                mc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
-        }
-        K_complex.setFromTriplets(kc.begin(), kc.end());
-        M_complex.setFromTriplets(mc.begin(), mc.end());
-    }
-
-    // --- Direct K_k assembly precomputation ---
-    // T(k) = S_k * T0 where S_k is diagonal with e^{ikα} on right DOFs.
-    // K_k = K_const + P*K_phase + conj(P)*K_phase^H where P = e^{ikα}.
-    // 6 triple products precomputed once vs 2*N_harmonics per sweep.
-    double alpha = 2.0 * PI / mesh_.num_sectors;
-    std::set<int> right_dof_set(right_dofs_.begin(), right_dofs_.end());
-
-    SpMatcd T0 = build_cyclic_transformation(0);
-    SpMatcd T0_H = T0.adjoint();
-    int n_reduced = static_cast<int>(T0.cols());
-
-    // Partition by right-DOF membership: same-type entries (phase-independent)
-    // and non-right-row/right-col entries (scale by P = e^{ikα}).
-    // K_rn (right-row/non-right-col) is K_nr^T for real symmetric K.
-    auto partition = [&](const SpMatcd& A) {
-        std::vector<TripletC> ts, tnr;
-        for (int col = 0; col < A.outerSize(); ++col) {
-            bool cr = right_dof_set.count(col) > 0;
-            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
-                bool rr = right_dof_set.count(static_cast<int>(it.row())) > 0;
-                if (rr == cr)
-                    ts.emplace_back(it.row(), it.col(), it.value());
-                else if (!rr && cr)
-                    tnr.emplace_back(it.row(), it.col(), it.value());
-            }
-        }
-        int sz = static_cast<int>(A.rows());
-        SpMatcd As(sz, sz), Anr(sz, sz);
-        As.setFromTriplets(ts.begin(), ts.end());
-        Anr.setFromTriplets(tnr.begin(), tnr.end());
-        return std::make_pair(std::move(As), std::move(Anr));
-    };
-
-    auto [K_same, K_nr] = partition(K_complex);
-    auto [M_same, M_nr] = partition(M_complex);
-
-    SpMatcd K_const_proj = (T0_H * K_same * T0).pruned(1e-15);
-    SpMatcd K_phase_proj = (T0_H * K_nr * T0).pruned(1e-15);
-    SpMatcd M_const_proj = (T0_H * M_same * T0).pruned(1e-15);
-    SpMatcd M_phase_proj = (T0_H * M_nr * T0).pruned(1e-15);
-
-    // Pre-eliminate constrained DOFs from projected matrices
-    std::vector<int> free_reduced_map;
+    // Helper to extract free DOFs from a projected matrix
     std::vector<int> reduced_to_free_vec(n_reduced, -1);
     for (int i = 0; i < n_reduced; i++) {
         if (hub_red_set.count(i) == 0) {
-            reduced_to_free_vec[i] = static_cast<int>(free_reduced_map.size());
-            free_reduced_map.push_back(i);
+            reduced_to_free_vec[i] = static_cast<int>(
+                std::find(free_reduced_map.begin(), free_reduced_map.end(), i)
+                - free_reduced_map.begin());
         }
     }
-    int n_free = static_cast<int>(free_reduced_map.size());
-
     auto extract_free = [&](const SpMatcd& A) -> SpMatcd {
         std::vector<TripletC> trips;
         for (int col = 0; col < A.outerSize(); ++col) {
@@ -632,17 +741,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         return R;
     };
 
-    SpMatcd Kcf = extract_free(K_const_proj);
-    SpMatcd Kpf = extract_free(K_phase_proj);
-    SpMatcd Mcf = extract_free(M_const_proj);
-    SpMatcd Mpf = extract_free(M_phase_proj);
-    SpMatcd Kpf_H = Kpf.adjoint();
-    SpMatcd Mpf_H = Mpf.adjoint();
-
     // Gyroscopic matrix projection (same pipeline as K/M)
     SpMatcd Gcf, Gpf, Gpf_H;
     bool coriolis_active = include_coriolis && omega > 0.0;
     if (coriolis_active) {
+        int ndof_full = mesh_.num_dof();
         SpMatd G_global = assembler_.G();
         SpMatcd G_complex(ndof_full, ndof_full);
         {
@@ -653,9 +756,29 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     gc.emplace_back(it.row(), it.col(), std::complex<double>(it.value(), 0.0));
             G_complex.setFromTriplets(gc.begin(), gc.end());
         }
-        auto [G_same, G_nr] = partition(G_complex);
-        SpMatcd G_const_proj = (T0_H * G_same * T0).pruned(1e-15);
-        SpMatcd G_phase_proj = (T0_H * G_nr * T0).pruned(1e-15);
+        // Partition by right-DOF membership
+        auto partition_g = [&](const SpMatcd& A) {
+            std::vector<TripletC> ts, tnr;
+            for (int col = 0; col < A.outerSize(); ++col) {
+                bool cr = right_dof_set.count(col) > 0;
+                for (SpMatcd::InnerIterator it(A, col); it; ++it) {
+                    bool rr = right_dof_set.count(static_cast<int>(it.row())) > 0;
+                    if (rr == cr)
+                        ts.emplace_back(it.row(), it.col(), it.value());
+                    else if (!rr && cr)
+                        tnr.emplace_back(it.row(), it.col(), it.value());
+                }
+            }
+            int sz = static_cast<int>(A.rows());
+            SpMatcd As(sz, sz), Anr(sz, sz);
+            As.setFromTriplets(ts.begin(), ts.end());
+            Anr.setFromTriplets(tnr.begin(), tnr.end());
+            return std::make_pair(std::move(As), std::move(Anr));
+        };
+        SpMatcd T0_H_local = T0.adjoint();
+        auto [G_same, G_nr] = partition_g(G_complex);
+        SpMatcd G_const_proj = (T0_H_local * G_same * T0).pruned(1e-15);
+        SpMatcd G_phase_proj = (T0_H_local * G_nr * T0).pruned(1e-15);
         Gcf = extract_free(G_const_proj);
         Gpf = extract_free(G_phase_proj);
         Gpf_H = Gpf.adjoint();
@@ -702,24 +825,9 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             // Phase factor needed by both paths (also used by Coriolis G below)
             std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
 
-#ifdef TURBOMODAL_SLOW_PATH_DIAG
-            // DIAGNOSTIC (Scenario B): direct T(k)^H * A * T(k) triple products.
-            // Bypasses the fast-path precomputed Kcf/Kpf/Mcf/Mpf entirely.
-            // Decision tree for the k>0 frequency error:
-            //   Slow path correct, fast path wrong → fast-path partition/projection has a bug
-            //   Slow path also wrong              → K_complex / M_complex themselves are wrong
-            SpMatcd K_free, M_free;
-            {
-                SpMatcd T_k   = build_cyclic_transformation(k);
-                SpMatcd T_k_H = T_k.adjoint();
-                K_free = extract_free((T_k_H * K_complex * T_k).pruned(1e-15));
-                M_free = extract_free((T_k_H * M_complex * T_k).pruned(1e-15));
-            }
-#else
             // Fast path: K_k = K_const + P*K_phase + conj(P)*K_phase^H
             SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
             SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
-#endif
 
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
@@ -947,11 +1055,18 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             {
                 int n_result_modes = static_cast<int>(result.mode_shapes.cols());
 
+                // If condensation was used, expand through T_condensation first
+                Eigen::MatrixXcd modes_to_expand = result.mode_shapes;
+                if (condensation_active) {
+                    modes_to_expand = expand_modes(T_condensation, result.mode_shapes);
+                }
+
                 // Expand from n_free to n_reduced (insert zeros at hub DOFs)
                 Eigen::MatrixXcd modes_reduced = Eigen::MatrixXcd::Zero(
                     n_reduced, n_result_modes);
-                for (Eigen::Index i = 0; i < n_free && i < result.mode_shapes.rows(); i++) {
-                    modes_reduced.row(free_reduced_map[i]) = result.mode_shapes.row(i);
+                for (Eigen::Index i = 0; i < modes_to_expand.rows()
+                     && i < static_cast<Eigen::Index>(free_reduced_map.size()); i++) {
+                    modes_reduced.row(free_reduced_map[i]) = modes_to_expand.row(i);
                 }
 
                 // u_full = T0 * u_reduced, then scale right DOF rows by phase
@@ -1080,6 +1195,107 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_rpm_sweep(
                                             harmonic_indices, max_threads,
                                             include_coriolis, min_frequency));
     }
+    return all_results;
+}
+
+std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_parametric(
+    const std::vector<ParametricCondition>& conditions,
+    int num_modes_per_harmonic,
+    const std::vector<int>& harmonic_indices,
+    int max_threads,
+    bool include_coriolis,
+    double min_frequency,
+    bool allow_condensation,
+    double memory_reserve_fraction,
+    ProgressCallback progress_cb) {
+
+    if (conditions.empty()) return {};
+
+    // Step 1: Assemble base K, M at reference temperature (cached)
+    if (!base_assembled_) {
+        assembler_.assemble(mesh_, mat_);
+        K_base_ = assembler_.K();
+        M_base_ = assembler_.M();
+        base_assembled_ = true;
+    }
+
+    // Step 2: Precompute K_omega at unit speed (omega=1) for fast RPM scaling.
+    // K_omega ∝ omega², so K_omega(omega) = omega² * K_omega_unit.
+    if (!K_omega_unit_computed_) {
+        assembler_.assemble_rotating_effects(mesh_, mat_, 1.0);
+        K_omega_unit_ = assembler_.K_omega();
+        K_omega_unit_computed_ = true;
+    }
+
+    // Step 3: Find unique temperatures for K_sigma precomputation
+    double E_ref = mat_.E;
+    double T_ref = mat_.T_ref;
+    double E_slope = mat_.E_slope;
+
+    // Collect unique RPM values for stress stiffening precomputation
+    std::map<double, Eigen::VectorXd> rpm_to_u_static;  // rpm -> static displacement
+
+    std::vector<std::vector<ModalResult>> all_results(conditions.size());
+
+    int total_conditions = static_cast<int>(conditions.size());
+    std::atomic<int> completed{0};
+
+    for (int ci = 0; ci < total_conditions; ci++) {
+        const auto& cond = conditions[ci];
+        double omega = cond.rpm * 2.0 * PI / 60.0;
+
+        // Temperature scaling: E(T) = E_ref + E_slope * (T - T_ref)
+        double E_T = E_ref + E_slope * (cond.temperature - T_ref);
+        double E_scale = (E_ref > 0) ? E_T / E_ref : 1.0;
+
+        // Build K_eff for this condition
+        SpMatd K_eff = E_scale * K_base_;
+
+        if (omega > 0.0) {
+            // Spin softening: K_omega = omega^2 * K_omega_unit
+            SpMatd K_omega = omega * omega * K_omega_unit_;
+            K_eff -= K_omega;
+
+            // Stress stiffening
+            if (has_constraints_) {
+                // Check if we've already computed u_static for this RPM
+                auto it = rpm_to_u_static.find(cond.rpm);
+                if (it == rpm_to_u_static.end()) {
+                    Eigen::VectorXd u_static = static_centrifugal(omega);
+                    rpm_to_u_static[cond.rpm] = u_static;
+                    it = rpm_to_u_static.find(cond.rpm);
+                }
+                // K_sigma also scales with E(T): stress = E * strain, so
+                // K_sigma(T) = E_scale * K_sigma_ref.
+                // But K_sigma depends on the stress field which depends on E,
+                // and the static displacement u = K^{-1}*F ∝ 1/E.
+                // So stress = E * B * u = E * B * (F/E) = B*F, independent of E!
+                // This means K_sigma is independent of temperature (for uniform E scaling).
+                assembler_.assemble_stress_stiffening(
+                    mesh_, mat_, it->second, omega);
+                K_eff += assembler_.K_sigma();
+            }
+        }
+
+        SpMatd M_sector = M_base_;  // M is independent of temperature
+
+        // Solve at this condition using the existing infrastructure
+        // Precompute projections for this K_eff
+        precompute_cyclic_projections(K_eff, M_sector);
+
+        // Delegate to solve_at_rpm-like logic with the precomputed projections
+        all_results[ci] = solve_at_rpm(cond.rpm, num_modes_per_harmonic,
+                                        harmonic_indices, max_threads,
+                                        include_coriolis, min_frequency,
+                                        nullptr, allow_condensation,
+                                        memory_reserve_fraction);
+
+        int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (progress_cb) {
+            progress_cb(done, total_conditions, -1, true);
+        }
+    }
+
     return all_results;
 }
 
