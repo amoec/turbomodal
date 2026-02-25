@@ -85,15 +85,69 @@ endif()
 
 # --- SuiteSparse CHOLMOD (optional, for faster sparse factorization) ---
 if(USE_CHOLMOD)
-  find_package(CHOLMOD QUIET)
+  # Strategy 1: CMake config package (vcpkg, conda-forge, system cmake configs)
+  find_package(SuiteSparse CONFIG QUIET COMPONENTS CHOLMOD)
+  if(SuiteSparse_FOUND OR TARGET SuiteSparse::CHOLMOD)
+    set(CHOLMOD_FOUND TRUE)
+    if(TARGET SuiteSparse::CHOLMOD)
+      set(CHOLMOD_TARGET SuiteSparse::CHOLMOD)
+    endif()
+  endif()
+
+  # Strategy 2: pkg-config
   if(NOT CHOLMOD_FOUND)
-    # Try pkg-config as fallback
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
       pkg_check_modules(CHOLMOD QUIET IMPORTED_TARGET cholmod)
+      if(CHOLMOD_FOUND)
+        set(CHOLMOD_TARGET PkgConfig::CHOLMOD)
+      endif()
     endif()
   endif()
-  if(CHOLMOD_FOUND OR CHOLMOD_INCLUDE_DIRS)
+
+  # Strategy 3: Manual discovery for common install locations
+  if(NOT CHOLMOD_FOUND)
+    find_path(CHOLMOD_INCLUDE_DIR cholmod.h
+      HINTS
+        /opt/homebrew/include/suitesparse
+        /opt/homebrew/include
+        /usr/local/include/suitesparse
+        /usr/local/include
+        /usr/include/suitesparse
+        /usr/include
+        $ENV{CONDA_PREFIX}/include/suitesparse
+        $ENV{CONDA_PREFIX}/include
+    )
+    find_library(CHOLMOD_LIBRARY cholmod
+      HINTS
+        /opt/homebrew/lib
+        /usr/local/lib
+        /usr/lib
+        /usr/lib/x86_64-linux-gnu
+        $ENV{CONDA_PREFIX}/lib
+    )
+    if(CHOLMOD_INCLUDE_DIR AND CHOLMOD_LIBRARY)
+      set(CHOLMOD_FOUND TRUE)
+      set(CHOLMOD_INCLUDE_DIRS ${CHOLMOD_INCLUDE_DIR})
+      set(CHOLMOD_LIBRARIES ${CHOLMOD_LIBRARY})
+      foreach(_dep amd colamd suitesparseconfig)
+        find_library(_${_dep}_lib ${_dep}
+          HINTS
+            /opt/homebrew/lib
+            /usr/local/lib
+            /usr/lib
+            /usr/lib/x86_64-linux-gnu
+            $ENV{CONDA_PREFIX}/lib
+        )
+        if(_${_dep}_lib)
+          list(APPEND CHOLMOD_LIBRARIES ${_${_dep}_lib})
+        endif()
+        unset(_${_dep}_lib CACHE)
+      endforeach()
+    endif()
+  endif()
+
+  if(CHOLMOD_FOUND)
     message(STATUS "CHOLMOD found — enabling supernodal factorization")
     set(TURBOMODAL_HAS_CHOLMOD ON)
   else()
@@ -112,6 +166,7 @@ add_library(turbomodal_core STATIC
   src/modal_solver.cpp
   src/hermitian_lanczos.cpp
   src/cyclic_solver.cpp
+  src/static_condensation.cpp
   src/added_mass.cpp
   src/damping.cpp
   src/forced_response.cpp
@@ -126,8 +181,12 @@ if(OpenMP_CXX_FOUND)
 endif()
 if(TURBOMODAL_HAS_CHOLMOD)
   target_compile_definitions(turbomodal_core PUBLIC TURBOMODAL_HAS_CHOLMOD)
-  target_include_directories(turbomodal_core PUBLIC ${CHOLMOD_INCLUDE_DIRS})
-  target_link_libraries(turbomodal_core PUBLIC ${CHOLMOD_LIBRARIES})
+  if(CHOLMOD_TARGET)
+    target_link_libraries(turbomodal_core PUBLIC ${CHOLMOD_TARGET})
+  else()
+    target_include_directories(turbomodal_core PUBLIC ${CHOLMOD_INCLUDE_DIRS})
+    target_link_libraries(turbomodal_core PUBLIC ${CHOLMOD_LIBRARIES})
+  endif()
 endif()
 if(SLOW_PATH_DIAG)
   target_compile_definitions(turbomodal_core PUBLIC TURBOMODAL_SLOW_PATH_DIAG)
