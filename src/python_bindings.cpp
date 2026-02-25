@@ -53,6 +53,12 @@ py::object eigen_sparse_to_scipy(const Eigen::SparseMatrix<Scalar>& mat) {
 PYBIND11_MODULE(_core, m) {
     m.doc() = "Cyclic symmetry FEA solver for turbomachinery modal analysis";
 
+#ifdef TURBOMODAL_HAS_CHOLMOD
+    m.attr("HAS_CHOLMOD") = true;
+#else
+    m.attr("HAS_CHOLMOD") = false;
+#endif
+
     // --- Material ---
     py::class_<Material>(m, "Material")
         .def(py::init<double, double, double>(),
@@ -270,6 +276,26 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("disk_thickness", &FluidConfig::disk_thickness)
         .def_readwrite("speed_of_sound", &FluidConfig::speed_of_sound);
 
+    // --- ParametricCondition ---
+    py::class_<ParametricCondition>(m, "ParametricCondition")
+        .def(py::init<>())
+        .def(py::init([](double rpm, double temperature, std::vector<double> mistuning) {
+            ParametricCondition c;
+            c.rpm = rpm;
+            c.temperature = temperature;
+            c.mistuning = std::move(mistuning);
+            return c;
+        }), py::arg("rpm"), py::arg("temperature") = 293.15,
+             py::arg("mistuning") = std::vector<double>{})
+        .def_readwrite("rpm", &ParametricCondition::rpm)
+        .def_readwrite("temperature", &ParametricCondition::temperature)
+        .def_readwrite("mistuning", &ParametricCondition::mistuning)
+        .def("__repr__", [](const ParametricCondition& c) {
+            return "<ParametricCondition rpm=" + std::to_string(c.rpm) +
+                   " T=" + std::to_string(c.temperature) + "K" +
+                   " mistuning=" + std::to_string(c.mistuning.size()) + " blades>";
+        });
+
     // --- CyclicSymmetrySolver ---
     py::class_<CyclicSymmetrySolver>(m, "CyclicSymmetrySolver")
         .def(py::init<const Mesh&, const Material&, const FluidConfig&, bool>(),
@@ -285,7 +311,8 @@ PYBIND11_MODULE(_core, m) {
         .def("solve_at_rpm",
              [](CyclicSymmetrySolver& self, double rpm, int num_modes,
                 const std::vector<int>& hi, int max_threads, bool coriolis,
-                double min_freq, py::object progress_cb) {
+                double min_freq, py::object progress_cb,
+                bool allow_condensation, double memory_reserve_fraction) {
                  ProgressCallback cpp_cb = nullptr;
                  if (!progress_cb.is_none()) {
                      cpp_cb = [progress_cb](int done, int total, int k, bool conv) {
@@ -295,7 +322,8 @@ PYBIND11_MODULE(_core, m) {
                  }
                  py::gil_scoped_release release;
                  return self.solve_at_rpm(rpm, num_modes, hi, max_threads,
-                                          coriolis, min_freq, cpp_cb);
+                                          coriolis, min_freq, cpp_cb,
+                                          allow_condensation, memory_reserve_fraction);
              },
              py::arg("rpm"), py::arg("num_modes_per_harmonic"),
              py::arg("harmonic_indices") = std::vector<int>{},
@@ -303,6 +331,8 @@ PYBIND11_MODULE(_core, m) {
              py::arg("include_coriolis") = false,
              py::arg("min_frequency") = 0.0,
              py::arg("progress_cb") = py::none(),
+             py::arg("allow_condensation") = false,
+             py::arg("memory_reserve_fraction") = 0.2,
              "Solve modal analysis at a given RPM")
         .def("solve_rpm_sweep", &CyclicSymmetrySolver::solve_rpm_sweep,
              py::arg("rpm_values"), py::arg("num_modes_per_harmonic"),
@@ -312,6 +342,36 @@ PYBIND11_MODULE(_core, m) {
              py::arg("min_frequency") = 0.0,
              "Solve over a range of RPM values",
              py::call_guard<py::gil_scoped_release>())
+        .def("solve_parametric",
+             [](CyclicSymmetrySolver& self,
+                const std::vector<ParametricCondition>& conditions,
+                int num_modes, const std::vector<int>& hi,
+                int max_threads, bool coriolis, double min_freq,
+                bool allow_condensation, double memory_reserve_fraction,
+                py::object progress_cb) {
+                 ProgressCallback cpp_cb = nullptr;
+                 if (!progress_cb.is_none()) {
+                     cpp_cb = [progress_cb](int done, int total, int k, bool conv) {
+                         py::gil_scoped_acquire gil;
+                         progress_cb(done, total, k, conv);
+                     };
+                 }
+                 py::gil_scoped_release release;
+                 return self.solve_parametric(conditions, num_modes, hi,
+                                              max_threads, coriolis, min_freq,
+                                              allow_condensation,
+                                              memory_reserve_fraction, cpp_cb);
+             },
+             py::arg("conditions"), py::arg("num_modes_per_harmonic"),
+             py::arg("harmonic_indices") = std::vector<int>{},
+             py::arg("max_threads") = 0,
+             py::arg("include_coriolis") = false,
+             py::arg("min_frequency") = 0.0,
+             py::arg("allow_condensation") = false,
+             py::arg("memory_reserve_fraction") = 0.2,
+             py::arg("progress_cb") = py::none(),
+             "Fast parametric sweep over multiple operating conditions",
+             py::return_value_policy::move)
         .def_static("compute_stationary_frame",
              &CyclicSymmetrySolver::compute_stationary_frame,
              py::arg("rotating_result"), py::arg("num_sectors"),
