@@ -4,16 +4,13 @@
 #include <Eigen/SparseCore>
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
-#ifdef TURBOMODAL_HAS_CHOLMOD
-#include <Eigen/CholmodSupport>
-#endif
 #include <memory>
 #include <stdexcept>
 
 namespace turbomodal {
 
 // Drop-in replacement for Spectra::SymShiftInvert that uses
-// SimplicialLDLT (or CHOLMOD when available) instead of SparseLU.
+// SimplicialLDLT instead of SparseLU.
 //
 // LDLT stores only L + D (not L + U), roughly halving factorization
 // memory for symmetric matrices.  Falls back to SparseLU if the
@@ -36,11 +33,7 @@ private:
     using MapConstVec = Eigen::Map<const Vector>;
     using MapVec = Eigen::Map<Vector>;
 
-#ifdef TURBOMODAL_HAS_CHOLMOD
-    using LDLTSolver = Eigen::CholmodSupernodalLLT<SpMat, Eigen::Lower>;
-#else
     using LDLTSolver = Eigen::SimplicialLDLT<SpMat, Eigen::Lower>;
-#endif
     using LUSolver = Eigen::SparseLU<SpMat>;
 
     const SpMat& m_K;

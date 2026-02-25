@@ -53,12 +53,6 @@ py::object eigen_sparse_to_scipy(const Eigen::SparseMatrix<Scalar>& mat) {
 PYBIND11_MODULE(_core, m) {
     m.doc() = "Cyclic symmetry FEA solver for turbomachinery modal analysis";
 
-#ifdef TURBOMODAL_HAS_CHOLMOD
-    m.attr("HAS_CHOLMOD") = true;
-#else
-    m.attr("HAS_CHOLMOD") = false;
-#endif
-
     // --- Material ---
     py::class_<Material>(m, "Material")
         .def(py::init<double, double, double>(),
