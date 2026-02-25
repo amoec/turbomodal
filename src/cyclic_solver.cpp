@@ -910,6 +910,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
             result.harmonic_index = k;
             result.rpm = rpm;
+            result.converged = status.converged;
             return result;
         } catch (const std::bad_alloc&) {
             std::cerr << "[CyclicSolver] k=" << k << " out of memory, will retry" << std::endl;
@@ -977,7 +978,8 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 // Report progress
                 int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (progress_cb) {
-                    progress_cb(done, n_harmonics);
+                    bool conv = results_vec[idx].has_value() && results_vec[idx]->converged;
+                    progress_cb(done, n_harmonics, k, conv);
                 }
             }
         });

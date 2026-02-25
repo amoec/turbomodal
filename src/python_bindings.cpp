@@ -219,6 +219,7 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("frequencies", &ModalResult::frequencies)
         .def_readwrite("mode_shapes", &ModalResult::mode_shapes)
         .def_readwrite("whirl_direction", &ModalResult::whirl_direction)
+        .def_readwrite("converged", &ModalResult::converged)
         .def("wave_propagation_velocity", &ModalResult::wave_propagation_velocity,
              py::arg("radius"),
              "Compute wave propagation velocity (m/s) for each mode. v = 2*pi*f*R/ND")
@@ -287,9 +288,9 @@ PYBIND11_MODULE(_core, m) {
                 double min_freq, py::object progress_cb) {
                  ProgressCallback cpp_cb = nullptr;
                  if (!progress_cb.is_none()) {
-                     cpp_cb = [progress_cb](int done, int total) {
+                     cpp_cb = [progress_cb](int done, int total, int k, bool conv) {
                          py::gil_scoped_acquire gil;
-                         progress_cb(done, total);
+                         progress_cb(done, total, k, conv);
                      };
                  }
                  py::gil_scoped_release release;
