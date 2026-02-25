@@ -699,10 +699,27 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         try {
             if (n_free <= 1) return std::nullopt;
 
-            // K_k = K_const + P*K_phase + conj(P)*K_phase^H  (sparse add, no triple products)
+            // Phase factor needed by both paths (also used by Coriolis G below)
             std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
+
+#ifdef TURBOMODAL_SLOW_PATH_DIAG
+            // DIAGNOSTIC (Scenario B): direct T(k)^H * A * T(k) triple products.
+            // Bypasses the fast-path precomputed Kcf/Kpf/Mcf/Mpf entirely.
+            // Decision tree for the k>0 frequency error:
+            //   Slow path correct, fast path wrong → fast-path partition/projection has a bug
+            //   Slow path also wrong              → K_complex / M_complex themselves are wrong
+            SpMatcd K_free, M_free;
+            {
+                SpMatcd T_k   = build_cyclic_transformation(k);
+                SpMatcd T_k_H = T_k.adjoint();
+                K_free = extract_free((T_k_H * K_complex * T_k).pruned(1e-15));
+                M_free = extract_free((T_k_H * M_complex * T_k).pruned(1e-15));
+            }
+#else
+            // Fast path: K_k = K_const + P*K_phase + conj(P)*K_phase^H
             SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
             SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+#endif
 
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
@@ -723,6 +740,17 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             SolverStatus status;
             bool used_qep = false;
 
+            // Degenerate harmonics (0 < k < N/2) have multiplicity 2: each
+            // eigenvalue of the complex Hermitian problem represents a pair
+            // of standing-wave modes (cosine + sine, or equivalently forward
+            // + backward traveling waves).  Solve for ceil(M/2) eigenvalues
+            // and duplicate them afterwards to match the full-model mode count.
+            bool is_degenerate = (k > 0) &&
+                !(mesh_.num_sectors % 2 == 0 && k == max_k);
+            int nev_target = is_degenerate
+                ? (num_modes_per_harmonic + 1) / 2
+                : num_modes_per_harmonic;
+
             // Coriolis QEP branch: for k > 0 with Coriolis enabled, solve the
             // Lancaster-linearized QEP (K + omega*D - omega^2*M)*phi = 0.
             if (coriolis_active && k > 0) {
@@ -733,7 +761,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
                 SolverConfig qep_config;
                 int n_extra_qep = (min_frequency > 0.0) ? 6 : 0;
-                qep_config.nev = num_modes_per_harmonic + n_extra_qep;
+                qep_config.nev = nev_target + n_extra_qep;
                 // Adaptive shift from K/M norms: ω² ≈ ||K|| / ||M||
                 // This targets the middle of the spectrum for the given model,
                 // rather than a hardcoded frequency that may miss everything.
@@ -743,7 +771,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 qep_config.tolerance = 1e-8;
 
                 std::tie(result, status) = modal_solver.solve_lancaster_qep(
-                    K_free, M_free, D_free, num_modes_per_harmonic, qep_config);
+                    K_free, M_free, D_free, nev_target, qep_config);
                 used_qep = true;
             } else {
                 // Standard n x n Hermitian GEP: K*x = lambda*M*x
@@ -751,7 +779,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 // Request extra eigenvalues when filtering is active (free hub
                 // produces rigid body modes that will be discarded).
                 int n_extra = (min_frequency > 0.0) ? 6 : 0;
-                config.nev = std::min(num_modes_per_harmonic + n_extra, n_free - 1);
+                config.nev = std::min(nev_target + n_extra, n_free - 1);
                 if (config.nev <= 0) return std::nullopt;
                 config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
                 // Shift near lowest eigenvalue: use small positive value
@@ -820,11 +848,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 }
             }
 
-            // Truncate to requested number of modes (extra were requested above
+            // Truncate to nev_target (extra were requested above
             // to compensate for filtered-out rigid body modes).
             {
                 int n_have = static_cast<int>(result.frequencies.size());
-                int n_want = num_modes_per_harmonic;
+                int n_want = nev_target;
                 if (n_have > n_want) {
                     result.frequencies.conservativeResize(n_want);
                     result.mode_shapes.conservativeResize(Eigen::NoChange, n_want);
@@ -885,6 +913,34 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             if (!used_qep) {
                 int num_modes = static_cast<int>(result.frequencies.size());
                 result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
+            }
+
+            // Expand degenerate modes: duplicate each eigenvalue/eigenvector
+            // pair for 0 < k < N/2.  The conjugate eigenvector represents
+            // the opposite traveling wave (same frequency, opposite phase).
+            // This matches the ANSYS convention where degenerate harmonics
+            // report 2M modes (M cosine + M sine standing wave pairs).
+            if (is_degenerate) {
+                int n_unique = static_cast<int>(result.frequencies.size());
+                int n_expanded = std::min(2 * n_unique, num_modes_per_harmonic);
+                Eigen::VectorXd exp_f(n_expanded);
+                Eigen::MatrixXcd exp_s(result.mode_shapes.rows(), n_expanded);
+                Eigen::VectorXi exp_w(n_expanded);
+                for (int m = 0; m < n_expanded; m++) {
+                    int src = m / 2;
+                    exp_f(m) = result.frequencies(src);
+                    if (m % 2 == 0) {
+                        exp_s.col(m) = result.mode_shapes.col(src);
+                        exp_w(m) = used_qep ? result.whirl_direction(src) : 0;
+                    } else {
+                        // Conjugate eigenvector: opposite traveling wave
+                        exp_s.col(m) = result.mode_shapes.col(src).conjugate();
+                        exp_w(m) = used_qep ? -result.whirl_direction(src) : 0;
+                    }
+                }
+                result.frequencies = exp_f;
+                result.mode_shapes = exp_s;
+                result.whirl_direction = exp_w;
             }
 
             // Mode shape expansion: T(k) = S_k * T0
