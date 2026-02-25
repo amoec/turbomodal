@@ -11,6 +11,7 @@ struct ModalResult {
     Eigen::VectorXd frequencies;       // Natural frequencies (Hz)
     Eigen::MatrixXcd mode_shapes;      // Complex mode shape vectors
     Eigen::VectorXi whirl_direction;   // +1 = FW, -1 = BW, 0 = standing
+    bool converged = true;             // False if eigensolver hit iteration limit
 
     // Compute circumferential wave propagation velocity for each mode (m/s)
     // radius: characteristic radius (m), e.g. mean blade radius
