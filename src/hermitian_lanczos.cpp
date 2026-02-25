@@ -14,47 +14,30 @@ bool HermitianLanczosEigenSolver::factorize_shifted(
 
     SpMatcd mat = K - std::complex<double>(sigma, 0.0) * M;
 
-    if (!m_pattern_set) {
-        // First call: full symbolic + numeric factorization
-        m_ldlt = std::make_unique<ComplexLDLT>();
-        m_ldlt->analyzePattern(mat);
-        m_ldlt->factorize(mat);
-        if (m_ldlt->info() == Eigen::Success) {
-            m_using_ldlt = true;
-            m_lu.reset();
-            m_pattern_set = true;
-            return true;
-        }
+    // NOTE: SimplicialLDLT<complex> is bypassed entirely while diagnosing
+    // the k>0 frequency overestimate.  SparseLU is correct for all complex
+    // Hermitian matrices (positive-definite or not) at the cost of ~1.5–2×
+    // slower factorization vs Cholesky.  If this fixes the 45% error,
+    // replace with CHOLMOD (enable TURBOMODAL_HAS_CHOLMOD in CMake).
+    m_using_ldlt = false;
 
-        // Fallback to SparseLU
-        m_ldlt.reset();
+    if (!m_pattern_set) {
         m_lu = std::make_unique<ComplexLU>();
         m_lu->analyzePattern(mat);
         m_lu->factorize(mat);
         if (m_lu->info() != Eigen::Success) {
             return false;
         }
-        m_using_ldlt = false;
         m_pattern_set = true;
         return true;
-    } else {
-        // Reuse symbolic, only do numeric factorization
-        if (m_using_ldlt) {
-            m_ldlt->factorize(mat);
-            if (m_ldlt->info() != Eigen::Success) {
-                // Pattern might be stale; retry with full factorization
-                m_pattern_set = false;
-                return factorize_shifted(K, M, sigma);
-            }
-        } else {
-            m_lu->factorize(mat);
-            if (m_lu->info() != Eigen::Success) {
-                m_pattern_set = false;
-                return factorize_shifted(K, M, sigma);
-            }
-        }
-        return true;
     }
+
+    m_lu->factorize(mat);
+    if (m_lu->info() != Eigen::Success) {
+        m_pattern_set = false;
+        return factorize_shifted(K, M, sigma);
+    }
+    return true;
 }
 
 Eigen::VectorXcd HermitianLanczosEigenSolver::solve_shifted(
