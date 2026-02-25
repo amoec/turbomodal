@@ -721,6 +721,17 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
 #endif
 
+            // Diagnostic: per-harmonic matrix norms to detect K/M scaling anomalies
+            {
+                double kn = K_free.norm();
+                double mn = M_free.norm();
+                std::cerr << "[diag] k=" << k
+                          << " K_free=" << std::scientific << kn
+                          << " M_free=" << mn
+                          << " K/M=" << std::defaultfloat << (mn > 0 ? kn/mn : 0.0)
+                          << " n=" << n_free << "\n";
+            }
+
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
                 M_added_free_cache_[k].nonZeros() > 0) {
