@@ -11,8 +11,9 @@
 
 namespace turbomodal {
 
-// Callback: (completed, total) invoked from worker threads as each harmonic finishes.
-using ProgressCallback = std::function<void(int completed, int total)>;
+// Callback invoked from worker threads as each harmonic finishes.
+// Args: completed, total, harmonic_index k, did the eigensolver converge.
+using ProgressCallback = std::function<void(int completed, int total, int harmonic_k, bool converged)>;
 
 struct FluidConfig {
     enum class Type {

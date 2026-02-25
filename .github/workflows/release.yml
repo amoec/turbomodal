@@ -2,9 +2,9 @@ name: Release
 
 on:
   push:
-    # Match vMAJOR.MINOR.PATCH only — no pre-release suffixes.
-    # Testing tags (v*-testing) are handled by testing.yml.
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"  ]
+    tags:
+      - "v*"        # match all v* tags...
+      - "!v*.dev*"  # ...except dev/testing builds (v0.2.4.dev0, v0.2.4.7.dev0, etc.)
 
 jobs:
   build-wheels:

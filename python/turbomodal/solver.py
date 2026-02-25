@@ -110,6 +110,7 @@ def solve(
     temperature: float | None = None,
     condition: OperatingCondition | None = None,
     boundary_conditions: list[BoundaryCondition] | None = None,
+    show_convergence: bool = False,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -144,6 +145,9 @@ def solve(
         constraint groups via cutting planes.  When provided, overrides
         ``hub_constraint``.  Each BC selects surface nodes on the positive
         side of a plane and applies the specified constraint type.
+    show_convergence : if True, open a live matplotlib bar chart showing
+        per-harmonic convergence status as each nodal diameter is solved.
+        Requires matplotlib.  The plot stays open after solving completes.
 
     Returns
     -------
@@ -182,19 +186,28 @@ def solve(
         apply_hub = hub_constraint == "fixed"
         solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
 
-    progress_cb = None
-    if verbose >= PROGRESS:
-        def _on_progress(done: int, total: int) -> None:
-            elapsed = time.perf_counter() - t0
-            bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
-            sys.stdout.write(bar)
-            sys.stdout.flush()
-            if done == total:
-                sys.stdout.write("\n")
-        progress_cb = _on_progress
+    if show_convergence:
+        max_k = mesh.num_sectors // 2
+        hi_resolved = hi if hi else list(range(max_k + 1))
+        results = _solve_with_convergence_plot(
+            solver, rpm, num_modes, hi, hi_resolved, max_threads, include_coriolis,
+            min_frequency, verbose, t0,
+        )
+    else:
+        progress_cb = None
+        if verbose >= PROGRESS:
+            def _on_progress(done: int, total: int, k: int, converged: bool) -> None:
+                elapsed = time.perf_counter() - t0
+                bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+                sys.stdout.write(bar)
+                sys.stdout.flush()
+                if done == total:
+                    sys.stdout.write("\n")
+            progress_cb = _on_progress
 
-    results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis,
-                                   min_frequency, progress_cb)
+        results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis,
+                                       min_frequency, progress_cb)
+
     elapsed = time.perf_counter() - t0
 
     if verbose >= PROGRESS:
@@ -206,6 +219,123 @@ def solve(
             print(f"    ND={r.harmonic_index:2d}: [{freqs}] Hz (rotating frame)")
 
     return results
+
+
+def _solve_with_convergence_plot(
+    solver: CyclicSymmetrySolver,
+    rpm: float,
+    num_modes: int,
+    hi: list[int],
+    hi_resolved: list[int],
+    max_threads: int,
+    include_coriolis: bool,
+    min_frequency: float,
+    verbose: int,
+    t0: float,
+) -> list[ModalResult]:
+    """Run solve_at_rpm in a background thread while updating a live bar chart."""
+    import queue
+    import threading
+
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    n_harmonics = len(hi_resolved)
+    hi_list = hi_resolved
+
+    update_queue: queue.Queue = queue.Queue()
+    results_holder: list = []
+
+    PENDING  = "#d0d0d0"
+    DONE_OK  = "#4caf50"
+    DONE_BAD = "#ff9800"
+
+    fig, ax = plt.subplots(figsize=(max(6, n_harmonics * 0.35 + 2), 3.5))
+    fig.patch.set_facecolor("#1e1e1e")
+    ax.set_facecolor("#1e1e1e")
+
+    bars = ax.bar(range(n_harmonics), [1] * n_harmonics, color=PENDING,
+                  edgecolor="#444", linewidth=0.5)
+    ax.set_xticks(range(n_harmonics))
+    ax.set_xticklabels([str(k) for k in hi_list], fontsize=7, color="white")
+    ax.set_yticks([])
+    ax.set_xlim(-0.6, n_harmonics - 0.4)
+    ax.set_ylim(0, 1.3)
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#555")
+    ax.set_xlabel("Nodal Diameter (k)", color="white", fontsize=9)
+    title_obj = ax.set_title(
+        f"Cyclic Solver  |  {rpm:.0f} RPM  |  0 / {n_harmonics}",
+        color="white", fontsize=10,
+    )
+    ax.legend(
+        handles=[
+            mpatches.Patch(color=DONE_OK,  label="Converged"),
+            mpatches.Patch(color=DONE_BAD, label="Not converged"),
+            mpatches.Patch(color=PENDING,  label="Pending"),
+        ],
+        loc="upper right", fontsize=7, facecolor="#333", labelcolor="white", framealpha=0.8,
+    )
+    plt.tight_layout()
+    plt.ion()
+    plt.show()
+
+    k_to_bar = {k: i for i, k in enumerate(hi_list)}
+
+    def _progress_cb(done: int, total: int, k: int, converged: bool) -> None:
+        if verbose >= PROGRESS:
+            elapsed = time.perf_counter() - t0
+            bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+            sys.stdout.write(bar)
+            sys.stdout.flush()
+            if done == total:
+                sys.stdout.write("\n")
+        update_queue.put((done, k, converged))
+
+    def _run() -> None:
+        results_holder.append(
+            solver.solve_at_rpm(rpm, num_modes, hi, max_threads,
+                                include_coriolis, min_frequency, _progress_cb)
+        )
+        update_queue.put(None)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    done_count = 0
+    while True:
+        changed = False
+        while True:
+            try:
+                item = update_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                done_count = n_harmonics
+                changed = True
+                break
+            done, k, converged = item
+            done_count = done
+            bar_idx = k_to_bar.get(k)
+            if bar_idx is not None:
+                bars[bar_idx].set_color(DONE_OK if converged else DONE_BAD)
+                changed = True
+
+        if changed:
+            title_obj.set_text(
+                f"Cyclic Solver  |  {rpm:.0f} RPM  |  {done_count} / {n_harmonics}"
+            )
+            fig.canvas.draw_idle()
+
+        plt.pause(0.05)
+
+        if done_count >= n_harmonics and not t.is_alive():
+            break
+
+    t.join()
+    plt.ioff()
+    return results_holder[0] if results_holder else []
 
 
 def rpm_sweep(
