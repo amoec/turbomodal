@@ -97,15 +97,8 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
     const SpMatcd& K_complex, const SpMatcd& M_complex,
     const SolverConfig& config) {
 
-    // DIAGNOSTIC: Bypass custom Hermitian Lanczos entirely.
-    // Convert complex Hermitian n×n GEP  K x = λ M x  to real symmetric 2n×2n:
-    //   K_2n = [[Kr, -Ki], [Ki,  Kr]]   (real symmetric since Ki is antisymmetric)
-    //   M_2n = [[Mr, -Mi], [Mi,  Mr]]
-    // Each eigenvalue appears exactly twice in the 2n system.
-    // Uses proven Spectra SymGEigsShiftSolver (same path as k=0).
-    //
-    // If this fixes the ~45% overestimate vs ANSYS → bug is in the Hermitian Lanczos.
-    // If the same error persists              → bug is in K_free / M_free assembly.
+    // Solve complex Hermitian K*x = λ*M*x using native Hermitian Lanczos.
+    // Operates directly on n×n complex system (no 2n×2n doubling).
 
     ModalResult result;
     SolverStatus status;
@@ -122,84 +115,33 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
         return {result, status};
     }
 
-    // Build 2n×2n real symmetric blocks from K = Kr + i*Ki, M = Mr + i*Mi
-    int n2 = 2 * n;
-    std::vector<Triplet> k2_trips, m2_trips;
-    k2_trips.reserve(4 * K_complex.nonZeros());
-    m2_trips.reserve(4 * M_complex.nonZeros());
+    HermitianLanczosEigenSolver::Config lanczos_cfg;
+    lanczos_cfg.nev           = nev;
+    lanczos_cfg.ncv           = config.ncv;
+    lanczos_cfg.shift         = config.shift;
+    lanczos_cfg.tolerance     = config.tolerance;
+    lanczos_cfg.max_iterations = config.max_iterations;
 
-    auto fill_2n = [&](const SpMatcd& A, std::vector<Triplet>& trips) {
-        for (int col = 0; col < A.outerSize(); ++col) {
-            for (SpMatcd::InnerIterator it(A, col); it; ++it) {
-                int r = static_cast<int>(it.row());
-                int c = col;
-                double ar = it.value().real();
-                double ai = it.value().imag();
-                // Top-left and bottom-right blocks: Ar
-                if (std::abs(ar) > 1e-20) {
-                    trips.emplace_back(r,     c,     ar);
-                    trips.emplace_back(r + n, c + n, ar);
-                }
-                // Top-right: -Ai  |  Bottom-left: +Ai
-                if (std::abs(ai) > 1e-20) {
-                    trips.emplace_back(r,     c + n, -ai);
-                    trips.emplace_back(r + n, c,      ai);
-                }
-            }
+    auto lanczos_result = m_hermitian_lanczos.solve(K_complex, M_complex, lanczos_cfg);
+
+    int num_modes = lanczos_result.nconv;
+    result.frequencies.resize(num_modes);
+    result.mode_shapes.resize(n, num_modes);
+
+    for (int i = 0; i < num_modes; i++) {
+        double lambda = lanczos_result.eigenvalues(i);
+        if (lambda > 0.0) {
+            result.frequencies(i) = std::sqrt(lambda) / (2.0 * PI);
+        } else {
+            result.frequencies(i) = 0.0;
         }
-    };
-
-    fill_2n(K_complex, k2_trips);
-    fill_2n(M_complex, m2_trips);
-
-    SpMatd K_2n(n2, n2), M_2n(n2, n2);
-    K_2n.setFromTriplets(k2_trips.begin(), k2_trips.end());
-    M_2n.setFromTriplets(m2_trips.begin(), m2_trips.end());
-
-    // Request 2*nev+4 eigenvalues so deduplication yields at least nev unique ones
-    SolverConfig real_cfg = config;
-    real_cfg.nev  = std::min(2 * nev + 4, n2 - 1);
-    real_cfg.ncv  = std::min(std::max(2 * real_cfg.nev + 1, 40), n2);
-
-    auto [real_result, real_status] = solve_real(K_2n, M_2n, real_cfg);
-
-    // Deduplicate: eigenvalues come in near-identical pairs.
-    // Keep an entry only if its frequency differs from the previous kept one.
-    int n_real = static_cast<int>(real_result.frequencies.size());
-    std::vector<int> kept;
-    kept.reserve(nev);
-    for (int i = 0; i < n_real && (int)kept.size() < nev; ++i) {
-        if (!kept.empty()) {
-            double f_prev = real_result.frequencies(kept.back());
-            double f_curr = real_result.frequencies(i);
-            double denom  = std::max(f_prev, 1.0);
-            if (std::abs(f_curr - f_prev) / denom < 1e-4)
-                continue;  // duplicate — skip
-        }
-        kept.push_back(i);
+        result.mode_shapes.col(i) = lanczos_result.eigenvectors.col(i);
     }
 
-    int n_modes = static_cast<int>(kept.size());
-    result.frequencies.resize(n_modes);
-    result.mode_shapes.resize(n, n_modes);
-    result.whirl_direction = Eigen::VectorXi::Zero(n_modes);
-
-    for (int i = 0; i < n_modes; ++i) {
-        int idx = kept[i];
-        result.frequencies(i) = real_result.frequencies(idx);
-
-        // Reconstruct complex mode shape: φ = xr + i*xi
-        // real_result.mode_shapes is MatrixXcd cast from real, so .real() gives value
-        for (int j = 0; j < n; ++j) {
-            double xr = real_result.mode_shapes.col(idx)(j    ).real();
-            double xi = real_result.mode_shapes.col(idx)(j + n).real();
-            result.mode_shapes(j, i) = std::complex<double>(xr, xi);
-        }
-    }
-
-    status.num_converged = n_modes;
-    status.converged     = real_status.converged;
-    status.message       = "[2n×2n diag] " + real_status.message;
+    status.num_converged = num_modes;
+    status.converged     = lanczos_result.converged;
+    status.message       = lanczos_result.message;
+    result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
 
     return {result, status};
 }

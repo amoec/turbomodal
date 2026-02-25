@@ -699,10 +699,27 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         try {
             if (n_free <= 1) return std::nullopt;
 
-            // K_k = K_const + P*K_phase + conj(P)*K_phase^H  (sparse add, no triple products)
+            // Phase factor needed by both paths (also used by Coriolis G below)
             std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
+
+#ifdef TURBOMODAL_SLOW_PATH_DIAG
+            // DIAGNOSTIC (Scenario B): direct T(k)^H * A * T(k) triple products.
+            // Bypasses the fast-path precomputed Kcf/Kpf/Mcf/Mpf entirely.
+            // Decision tree for the k>0 frequency error:
+            //   Slow path correct, fast path wrong → fast-path partition/projection has a bug
+            //   Slow path also wrong              → K_complex / M_complex themselves are wrong
+            SpMatcd K_free, M_free;
+            {
+                SpMatcd T_k   = build_cyclic_transformation(k);
+                SpMatcd T_k_H = T_k.adjoint();
+                K_free = extract_free((T_k_H * K_complex * T_k).pruned(1e-15));
+                M_free = extract_free((T_k_H * M_complex * T_k).pruned(1e-15));
+            }
+#else
+            // Fast path: K_k = K_const + P*K_phase + conj(P)*K_phase^H
             SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
             SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+#endif
 
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&

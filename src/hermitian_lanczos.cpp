@@ -14,24 +14,39 @@ bool HermitianLanczosEigenSolver::factorize_shifted(
 
     SpMatcd mat = K - std::complex<double>(sigma, 0.0) * M;
 
-    // NOTE: SimplicialLDLT<complex> is bypassed entirely while diagnosing
-    // the k>0 frequency overestimate.  SparseLU is correct for all complex
-    // Hermitian matrices (positive-definite or not) at the cost of ~1.5–2×
-    // slower factorization vs Cholesky.  If this fixes the 45% error,
-    // replace with CHOLMOD (enable TURBOMODAL_HAS_CHOLMOD in CMake).
-    m_using_ldlt = false;
-
     if (!m_pattern_set) {
+        // First call: try LDLT (faster for positive-definite shift)
+        m_ldlt = std::make_unique<ComplexLDLT>();
+        m_ldlt->analyzePattern(mat);
+        m_ldlt->factorize(mat);
+        if (m_ldlt->info() == Eigen::Success) {
+            m_using_ldlt = true;
+            m_pattern_set = true;
+            return true;
+        }
+        // LDLT failed (matrix indefinite at this shift) — fall back to LU
+        m_using_ldlt = false;
         m_lu = std::make_unique<ComplexLU>();
         m_lu->analyzePattern(mat);
         m_lu->factorize(mat);
-        if (m_lu->info() != Eigen::Success) {
-            return false;
-        }
+        if (m_lu->info() != Eigen::Success) return false;
         m_pattern_set = true;
         return true;
     }
 
+    if (m_using_ldlt) {
+        m_ldlt->factorize(mat);
+        if (m_ldlt->info() == Eigen::Success) return true;
+        // LDLT failed on refactorization — switch permanently to LU
+        m_using_ldlt = false;
+        m_lu = std::make_unique<ComplexLU>();
+        m_lu->analyzePattern(mat);
+        m_lu->factorize(mat);
+        if (m_lu->info() != Eigen::Success) { m_pattern_set = false; return false; }
+        return true;
+    }
+
+    // Already using LU (pattern cached)
     m_lu->factorize(mat);
     if (m_lu->info() != Eigen::Success) {
         m_pattern_set = false;
