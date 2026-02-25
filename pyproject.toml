@@ -42,7 +42,7 @@ version_file = "python/turbomodal/_version.py"
 
 [tool.scikit-build]
 cmake.build-type = "Release"
-cmake.args = ["-DBUILD_TESTS=OFF", "-DBUILD_PYTHON=ON", "-DUSE_OPENMP=OFF"]
+cmake.args = ["-DBUILD_TESTS=OFF", "-DBUILD_PYTHON=ON", "-DUSE_OPENMP=OFF", "-DSLOW_PATH_DIAG=ON"]
 wheel.packages = ["python/turbomodal"]
 
 [tool.scikit-build.cmake.define]
