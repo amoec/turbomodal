@@ -1,13 +1,13 @@
 name: Testing Build
 
-# Triggered by tags of the form v*-testing (e.g. v0.3.1-testing).
+# Triggered by tags of the form v*.devN (e.g. v0.2.4.7.dev0).
+# This is a valid PEP 440 pre-release version so setuptools_scm accepts it.
 # Unlike release.yml this does NOT publish to GitHub Releases — wheels are
-# uploaded as workflow artifacts and optionally as a draft pre-release so
-# they can be downloaded from the Actions / Releases UI without polluting
-# the official release history.
+# uploaded as workflow artifacts and as a draft pre-release so they can be
+# downloaded from the Releases UI without polluting the official release list.
 on:
   push:
-    tags: ["v*-testing"]
+    tags: ["v*.dev*"]
   workflow_dispatch:
     inputs:
       ref:
@@ -68,12 +68,12 @@ jobs:
           draft: false
           name: "${{ github.ref_name }} (testing build)"
           body: |
-            **Testing build — not for production use.**
+            **Testing/dev build — not for production use.**
 
             Tag: `${{ github.ref_name }}`
-            Triggered from: `${{ github.sha }}`
+            Commit: `${{ github.sha }}`
 
             Download the `.whl` for your platform and Python version and install with:
             ```
-            pip install turbomodal-*.whl
+            pip install turbomodal-*.whl --force-reinstall
             ```
