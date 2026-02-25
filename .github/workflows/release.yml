@@ -2,7 +2,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"        # match all v* tags...
+      - "!v*.dev*"  # ...except dev/testing builds (v0.2.4.dev0, v0.2.4.7.dev0, etc.)
 
 jobs:
   build-wheels:
