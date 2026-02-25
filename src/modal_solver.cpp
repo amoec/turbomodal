@@ -116,10 +116,10 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
     }
 
     HermitianLanczosEigenSolver::Config lanczos_cfg;
-    lanczos_cfg.nev = nev;
-    lanczos_cfg.ncv = config.ncv;
-    lanczos_cfg.shift = config.shift;
-    lanczos_cfg.tolerance = config.tolerance;
+    lanczos_cfg.nev           = nev;
+    lanczos_cfg.ncv           = config.ncv;
+    lanczos_cfg.shift         = config.shift;
+    lanczos_cfg.tolerance     = config.tolerance;
     lanczos_cfg.max_iterations = config.max_iterations;
 
     auto lanczos_result = m_hermitian_lanczos.solve(K_complex, M_complex, lanczos_cfg);
@@ -139,8 +139,8 @@ std::pair<ModalResult, SolverStatus> ModalSolver::solve_complex_hermitian(
     }
 
     status.num_converged = num_modes;
-    status.converged = lanczos_result.converged;
-    status.message = lanczos_result.message;
+    status.converged     = lanczos_result.converged;
+    status.message       = lanczos_result.message;
     result.whirl_direction = Eigen::VectorXi::Zero(num_modes);
 
     return {result, status};

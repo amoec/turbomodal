@@ -33,6 +33,10 @@ option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_VALIDATION_TESTS "Build slow validation tests (requires mesh files)" OFF)
 option(USE_OPENMP "Enable OpenMP parallelism" ON)
 option(USE_CHOLMOD "Use SuiteSparse CHOLMOD for faster sparse factorization" OFF)
+# Diagnostic: replace fast-path T0-precomputed K_k/M_k assembly with direct
+# T(k)^H*K*T(k) triple products per harmonic.  Set ON to test whether the
+# fast-path precomputation is the source of k>0 frequency error.
+option(SLOW_PATH_DIAG "Use slow-path cyclic assembly (diagnostic only)" OFF)
 
 # --- Eigen 3.4.0 via FetchContent (header-only) ---
 # System has Eigen 5.0.1 which is incompatible with Spectra.
@@ -124,6 +128,10 @@ if(TURBOMODAL_HAS_CHOLMOD)
   target_compile_definitions(turbomodal_core PUBLIC TURBOMODAL_HAS_CHOLMOD)
   target_include_directories(turbomodal_core PUBLIC ${CHOLMOD_INCLUDE_DIRS})
   target_link_libraries(turbomodal_core PUBLIC ${CHOLMOD_LIBRARIES})
+endif()
+if(SLOW_PATH_DIAG)
+  target_compile_definitions(turbomodal_core PUBLIC TURBOMODAL_SLOW_PATH_DIAG)
+  message(STATUS "SLOW_PATH_DIAG=ON: using direct T(k)^H*K*T(k) assembly for k>0")
 endif()
 
 # --- Unit tests ---
