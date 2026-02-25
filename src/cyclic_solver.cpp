@@ -853,15 +853,20 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             // of standing-wave modes (cosine + sine, or equivalently forward
             // + backward traveling waves).  Solve for ceil(M/2) eigenvalues
             // and duplicate them afterwards to match the full-model mode count.
+            //
+            // Exception: when Coriolis is active, the Lancaster QEP explicitly
+            // breaks the degeneracy into distinct FW/BW eigenvalues, so we
+            // request the full mode count and skip the duplication step.
             bool is_degenerate = (k > 0) &&
                 !(mesh_.num_sectors % 2 == 0 && k == max_k);
-            int nev_target = is_degenerate
+            bool will_use_qep = coriolis_active && k > 0;
+            int nev_target = (is_degenerate && !will_use_qep)
                 ? (num_modes_per_harmonic + 1) / 2
                 : num_modes_per_harmonic;
 
             // Coriolis QEP branch: for k > 0 with Coriolis enabled, solve the
             // Lancaster-linearized QEP (K + omega*D - omega^2*M)*phi = 0.
-            if (coriolis_active && k > 0) {
+            if (will_use_qep) {
                 SpMatcd G_free = Gcf + P * Gpf + std::conj(P) * Gpf_H;
                 // D = i * 2 * omega * G_k. Since G_k is skew-Hermitian, D is Hermitian.
                 std::complex<double> coriolis_factor(0.0, 2.0 * omega);
@@ -1028,7 +1033,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             // the opposite traveling wave (same frequency, opposite phase).
             // This matches the ANSYS convention where degenerate harmonics
             // report 2M modes (M cosine + M sine standing wave pairs).
-            if (is_degenerate) {
+            if (is_degenerate && !used_qep) {
                 int n_unique = static_cast<int>(result.frequencies.size());
                 int n_expanded = std::min(2 * n_unique, num_modes_per_harmonic);
                 Eigen::VectorXd exp_f(n_expanded);
