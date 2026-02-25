@@ -7,10 +7,6 @@
 #include <set>
 #include <vector>
 
-#ifdef TURBOMODAL_HAS_CHOLMOD
-#include <Eigen/CholmodSupport>
-#endif
-
 namespace turbomodal {
 
 int compute_target_dofs(int n_free, int nev, size_t available_bytes) {
@@ -152,28 +148,12 @@ CondensationResult condense(
     Eigen::MatrixXd K_sm_dense(K_sm);
     Eigen::MatrixXd T_sm_dense;
 
-#ifdef TURBOMODAL_HAS_CHOLMOD
-    Eigen::CholmodSupernodalLLT<SpMatd> solver;
-    solver.compute(K_ss);
-    if (solver.info() != Eigen::Success) {
-        // Fall back to SparseLU if CHOLMOD fails (K_ss may not be SPD)
-        Eigen::SparseLU<SpMatd> lu;
-        lu.compute(K_ss);
-        if (lu.info() != Eigen::Success) {
-            throw std::runtime_error("Static condensation: K_ss factorization failed");
-        }
-        T_sm_dense = -lu.solve(K_sm_dense);
-    } else {
-        T_sm_dense = -solver.solve(K_sm_dense);
-    }
-#else
     Eigen::SparseLU<SpMatd> lu;
     lu.compute(K_ss);
     if (lu.info() != Eigen::Success) {
         throw std::runtime_error("Static condensation: K_ss factorization failed");
     }
     T_sm_dense = -lu.solve(K_sm_dense);
-#endif
 
     // Build transformation matrix T_c (n x n_m):
     //   T_c = [I; T_sm]  (master DOFs = identity, slave DOFs = T_sm)

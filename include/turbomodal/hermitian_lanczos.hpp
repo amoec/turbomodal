@@ -4,9 +4,6 @@
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseLU>
 #include <memory>
-#ifdef TURBOMODAL_HAS_CHOLMOD
-#include <Eigen/CholmodSupport>
-#endif
 
 namespace turbomodal {
 
@@ -56,11 +53,7 @@ public:
 
 private:
     // Complex LDLT-based shift-invert operator
-#ifdef TURBOMODAL_HAS_CHOLMOD
-    using ComplexLDLT = Eigen::CholmodSupernodalLLT<SpMatcd, Eigen::Lower>;
-#else
     using ComplexLDLT = Eigen::SimplicialLDLT<SpMatcd, Eigen::Lower>;
-#endif
     using ComplexLU = Eigen::SparseLU<SpMatcd>;
 
     std::unique_ptr<ComplexLDLT> m_ldlt;
