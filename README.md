@@ -13,7 +13,7 @@ Cyclic symmetry FEA solver with ML-based modal identification for turbomachinery
   <img src="docs/assets/nd4_full_annulus.gif" width="48%" alt="ND=4 full annulus mode animation">
 </p>
 <p align="center">
-  <em>Animated mode shapes: 2 nodal diameters (left) and 4 nodal diameters (right) on a 24-sector bladed disk.</em>
+  <em>Animated mode shapes: 2 nodal diameters (left) and 4 nodal diameters (right) on a 24-sector flat disk.</em>
 </p>
 
 ## Overview
