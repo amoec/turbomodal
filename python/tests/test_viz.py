@@ -1,5 +1,7 @@
 """Tests for turbomodal.viz visualization module."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -51,12 +53,17 @@ class TestPlotMode:
                                 component=comp, off_screen=True)
             plotter.close()
 
+    @pytest.mark.skipif(
+        os.environ.get("CI") == "true",
+        reason="GIF rendering requires a GPU/display context unavailable on CI",
+    )
     def test_animate_saves_gif(self, solved_result, tmp_path):
         from turbomodal.viz import plot_mode
         mesh, results = solved_result
         gif_path = str(tmp_path / "mode.gif")
         plotter = plot_mode(mesh, results[0], mode_index=0, scale=0.002,
-                            animate=True, n_frames=4, filename=gif_path)
+                            animate=True, n_frames=4, filename=gif_path,
+                            off_screen=True)
         assert (tmp_path / "mode.gif").exists()
         assert (tmp_path / "mode.gif").stat().st_size > 0
 
