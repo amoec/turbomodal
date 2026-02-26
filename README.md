@@ -217,6 +217,11 @@ instructions.
   [Optimization](docs/api/optimization.md)
 - [ML Guide](docs/ml-guide.md)
 - [Validation Criteria](docs/validation.md)
+- Examples:
+  [Basic FEA](examples/python_example.py) |
+  [Data Generation](examples/data_generation_pipeline.py) |
+  [ML Training](examples/ml_pipeline.py) |
+  [Visualizations](examples/generate_visualizations.py)
 
 ## Project Structure
 
@@ -246,7 +251,11 @@ turbomodal/
   external/spectra/          Spectra eigenvalue library (git submodule)
   tests/                     C++ GTest unit tests
   python/tests/              Python pytest suite
-  examples/                  Runnable example scripts
+  examples/
+    python_example.py        Basic FEA: load, solve, visualize
+    data_generation_pipeline.py  Mesh -> solve -> sensors -> signals -> HDF5
+    ml_pipeline.py           Signals -> features -> train -> evaluate
+    generate_visualizations.py   Batch PNG export for review
   docs/                      Documentation
 ```
 
@@ -263,13 +272,13 @@ PyTorch, Internal analysis, Internal, Internal tracker. These are installed auto
 ## Running Tests
 
 ```bash
-# C++ unit tests (14 suites, ~130 tests, ~8 seconds)
+# C++ unit tests (15 suites, ~25 seconds)
 cd build && ctest --output-on-failure
 
-# C++ validation tests (requires rebuild with slow tests enabled, ~10 min)
+# C++ validation tests (requires rebuild with slow tests enabled)
 cmake .. -DBUILD_VALIDATION_TESTS=ON && cmake --build . && ctest --output-on-failure
 
-# Python tests (14 test files, 170+ tests)
+# Python tests (13 test files, 210+ tests)
 pytest python/tests/ -v
 
 # Python validation tests only

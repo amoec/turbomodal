@@ -486,13 +486,14 @@ The `conformal` method also provides `prediction_interval_lower` and
 - **API Reference** -- See `docs/api/` for detailed class and function
   documentation.
 - **Examples** -- `examples/python_example.py` demonstrates mesh loading,
-  solving, and visualization. `examples/generate_visualizations.py` shows
-  plotting workflows.
+  solving, and visualization. `examples/data_generation_pipeline.py` shows
+  the full data generation workflow (solve, sensors, signals, HDF5).
+  `examples/ml_pipeline.py` demonstrates feature extraction and ML training.
 - **Tests** -- Run `pytest python/tests/ -v` for the Python test suite
-  (170+ tests). Run `pytest -m validation` for analytical benchmark tests
+  (210+ tests). Run `pytest -m validation` for analytical benchmark tests
   (Leissa plate, Kwak added mass, FMM, SDOF FRF).
-- **C++ Tests** -- Build with `BUILD_TESTS=ON` and run `ctest` for unit
-  tests (~8 seconds). Add `BUILD_VALIDATION_TESTS=ON` for slow validation
-  tests (~10 minutes) including Leissa, Kwak, and Coriolis benchmarks.
+- **C++ Tests** -- Build with `BUILD_TESTS=ON` and run `ctest` for 15
+  test suites (~25 seconds). Add `BUILD_VALIDATION_TESTS=ON` for slow
+  validation tests including Leissa, Kwak, and Coriolis benchmarks.
 - **Internal tracker** -- Training metrics are logged automatically when internal tracker is
   installed. Launch the dashboard with `internal tracker ui`.

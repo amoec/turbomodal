@@ -300,7 +300,7 @@ Run with coverage reporting:
 pytest python/tests/ -v --cov=turbomodal --cov-report=term-missing
 ```
 
-Run C++ unit tests (fast, ~8 seconds):
+Run C++ unit tests (15 suites, ~25 seconds):
 
 ```bash
 cd build && ctest --output-on-failure
