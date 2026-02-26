@@ -485,60 +485,99 @@ def plot_mode(
     whirl = result.whirl_direction[mode_index]
     whirl_str = {1: "FW", -1: "BW", 0: ""}
 
-    # --- Full annulus (static) ---
+    # --- Full annulus ---
     if full_annulus:
         elements = np.asarray(mesh.elements)
         n_sectors = mesh.num_sectors
         k = nd
         sector_angle = 2 * np.pi / n_sectors
-
         n_elem = elements.shape[0]
-        all_nodes = np.empty((n_sectors * n_nodes, 3), dtype=np.float64)
-        all_cells = np.empty((n_sectors * n_elem, 11), dtype=np.int64)
-        all_celltypes = np.full(n_sectors * n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
-        all_scalars = np.empty(n_sectors * n_nodes, dtype=np.float64)
 
+        # Pre-compute per-sector rotations and rotated rest positions
+        rotations = []
+        rotated_rest = []
         for s in range(n_sectors):
             theta = s * sector_angle
             R = _rotation_matrix(theta, mesh.rotation_axis)
+            rotations.append((theta, R))
+            rotated_rest.append(nodes @ R.T)
 
-            rotated_nodes = nodes @ R.T
-
-            phase = np.exp(1j * k * theta)
-            u_complex = mode_3d * phase
-            u_real = np.real(u_complex) @ R.T
-
-            deformed = rotated_nodes + scale * u_real
-
-            node_offset = s * n_nodes
-            elem_offset = s * n_elem
-
-            cells = all_cells[elem_offset:elem_offset + n_elem]
+        # Build connectivity (constant across frames)
+        all_cells = np.empty((n_sectors * n_elem, 11), dtype=np.int64)
+        all_celltypes = np.full(n_sectors * n_elem, _VTK_QUADRATIC_TETRA,
+                                dtype=np.uint8)
+        for s in range(n_sectors):
+            offset = s * n_elem
+            cells = all_cells[offset:offset + n_elem]
             cells[:, 0] = 10
-            cells[:, 1:] = elements + node_offset
+            cells[:, 1:] = elements + s * n_nodes
 
-            all_nodes[node_offset:node_offset + n_nodes] = deformed
-            all_scalars[node_offset:node_offset + n_nodes] = np.sqrt(
-                np.sum(u_real ** 2, axis=1)
-            )
+        def _build_annulus(time_phase=1.0):
+            """Return (points, scalars) for all sectors at a given time phase."""
+            all_pts = np.empty((n_sectors * n_nodes, 3))
+            all_scl = np.empty(n_sectors * n_nodes)
+            for s, (theta, R) in enumerate(rotations):
+                spatial_phase = np.exp(1j * k * theta)
+                u_real = np.real(mode_3d * spatial_phase * time_phase) @ R.T
+                i = s * n_nodes
+                all_pts[i:i + n_nodes] = rotated_rest[s] + scale * u_real
+                all_scl[i:i + n_nodes] = np.sqrt(np.sum(u_real ** 2, axis=1))
+            return all_pts, all_scl
 
-        grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
-        grid.point_data["displacement"] = all_scalars
+        pts, scl = _build_annulus()
+        grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, pts)
+        grid.point_data["displacement"] = scl
 
         title = (f"Full Annulus: ND={nd} Mode {mode_index} "
                  f"f={freq:.2f} Hz {whirl_str.get(whirl, '')}")
+        clim = [0, np.max(np.abs(mode_3d)) * scale]
 
-        plotter = pv.Plotter(off_screen=off_screen)
+        if not animate:
+            plotter = pv.Plotter(off_screen=off_screen)
+            plotter.add_mesh(grid, scalars="displacement", cmap="turbo",
+                             show_edges=False)
+            plotter.add_text(title, font_size=12)
+            plotter.add_axes()
+            return plotter
+
+        # Full-annulus animation
+        save_only = filename is not None
+        plotter = pv.Plotter(off_screen=off_screen or save_only)
         plotter.add_mesh(grid, scalars="displacement", cmap="turbo",
-                         show_edges=False)
+                         show_edges=False, clim=clim)
         plotter.add_text(title, font_size=12)
         plotter.add_axes()
+
+        def _update_annulus(frame_idx):
+            phase = np.exp(2j * np.pi * frame_idx / n_frames)
+            pts, scl = _build_annulus(phase)
+            grid.points = pts
+            grid.point_data["displacement"] = scl
+
+        if save_only:
+            import imageio
+            frames = []
+            for f in range(n_frames):
+                _update_annulus(f)
+                plotter.render()
+                frames.append(plotter.screenshot(return_img=True))
+            plotter.close()
+            imageio.mimsave(filename, frames, duration=33, loop=0)
+            return plotter
+
+        def _cb(step):
+            _update_annulus(step % n_frames)
+
+        plotter.add_timer_event(max_steps=n_frames * 100, duration=33,
+                                callback=_cb)
+        plotter.show()
         return plotter
 
     # --- Single-sector animation ---
     if animate:
         grid = _mesh_to_pyvista(mesh)
         title = f"ND={nd} Mode {mode_index} f={freq:.2f} Hz {whirl_str.get(whirl, '')}"
+        clim = [0, np.max(np.abs(mode_3d)) * scale]
 
         save_only = filename is not None
         plotter = pv.Plotter(off_screen=off_screen or save_only)
@@ -548,41 +587,36 @@ def plot_mode(
         deformed_grid = grid.copy()
         disp = np.real(mode_3d) * scale
         deformed_grid.points = nodes + disp
-        scalars = np.sqrt(np.sum(disp ** 2, axis=1))
-        deformed_grid.point_data["displacement"] = scalars
-        actor = plotter.add_mesh(deformed_grid, scalars="displacement",
-                                 cmap="turbo", show_edges=False,
-                                 clim=[0, np.max(np.abs(mode_3d)) * scale])
+        deformed_grid.point_data["displacement"] = np.sqrt(
+            np.sum(disp ** 2, axis=1))
+        plotter.add_mesh(deformed_grid, scalars="displacement",
+                         cmap="turbo", show_edges=False, clim=clim)
         plotter.add_text(title, font_size=12)
         plotter.add_axes()
 
-        if save_only:
-            plotter.open_gif(filename)
-            for frame in range(n_frames):
-                t = frame / n_frames
-                phase = np.exp(2j * np.pi * t)
-                disp = np.real(mode_3d * phase) * scale
-                deformed_grid.points = nodes + disp
-                deformed_grid.point_data["displacement"] = np.sqrt(
-                    np.sum(disp ** 2, axis=1))
-                plotter.write_frame()
-            plotter.close()
-            return plotter
-
-        # Interactive animation — use a timer callback so the render window
-        # stays responsive and the user can rotate/zoom during playback.
-        state = {"frame": 0}
-
-        def _update_frame(*args):
-            t = state["frame"] / n_frames
-            phase = np.exp(2j * np.pi * t)
+        def _update_sector(frame_idx):
+            phase = np.exp(2j * np.pi * frame_idx / n_frames)
             disp = np.real(mode_3d * phase) * scale
             deformed_grid.points = nodes + disp
             deformed_grid.point_data["displacement"] = np.sqrt(
                 np.sum(disp ** 2, axis=1))
-            state["frame"] = (state["frame"] + 1) % n_frames
 
-        plotter.add_callback(_update_frame, interval=33)  # ~30 fps
+        if save_only:
+            import imageio
+            frames = []
+            for f in range(n_frames):
+                _update_sector(f)
+                plotter.render()
+                frames.append(plotter.screenshot(return_img=True))
+            plotter.close()
+            imageio.mimsave(filename, frames, duration=33, loop=0)
+            return plotter
+
+        def _cb(step):
+            _update_sector(step % n_frames)
+
+        plotter.add_timer_event(max_steps=n_frames * 100, duration=33,
+                                callback=_cb)
         plotter.show()
         return plotter
 
