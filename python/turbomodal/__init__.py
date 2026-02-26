@@ -15,7 +15,7 @@ from turbomodal._core import (
     CyclicSymmetrySolver,
     AddedMassModel,
     ModalSolver,
-    # New C++ classes
+    # Damping, forced response, mistuning, and mode identification
     DampingConfig,
     DampingType,
     ForcedResponseConfig,
@@ -37,10 +37,8 @@ from turbomodal.solver import solve, rpm_sweep, campbell_data, BoundaryCondition
 from turbomodal.viz import (
     plot_mesh,
     plot_mode,
-    plot_full_annulus,
     plot_full_mesh,
     plot_cad,
-    animate_mode,
     plot_campbell,
     plot_zzenf,
     format_condition_label,
@@ -95,7 +93,7 @@ __all__ = [
     "CyclicSymmetrySolver",
     "AddedMassModel",
     "ModalSolver",
-    # New C++ classes
+    # Damping, forced response, mistuning, and mode identification
     "DampingConfig",
     "DampingType",
     "ForcedResponseConfig",
@@ -122,10 +120,8 @@ __all__ = [
     # Visualization
     "plot_mesh",
     "plot_mode",
-    "plot_full_annulus",
     "plot_full_mesh",
     "plot_cad",
-    "animate_mode",
     "plot_campbell",
     "plot_zzenf",
     "format_condition_label",

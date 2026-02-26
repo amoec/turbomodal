@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -733,7 +734,6 @@ def load_cad(
         n_matched = len(left_ns.node_ids) if left_ns else 0
 
         if n_matched == 0:
-            import logging
             logging.getLogger("turbomodal.io").info(
                 "Pass 1 found zero matched boundary pairs; remeshing with "
                 "geometrically-detected surface pairs.",
@@ -843,8 +843,6 @@ def _validate_boundary_detection(
     rotation_axis: int,
 ) -> None:
     """Log diagnostics about detected cyclic boundaries."""
-    import logging
-
     logger = logging.getLogger("turbomodal.io")
     sector_angle = 2 * np.pi / num_sectors
 
@@ -903,7 +901,6 @@ def _set_periodic_centroid_matched(
     Returns the number of successfully applied periodic constraints.
     """
     import gmsh
-    import logging
 
     logger = logging.getLogger("turbomodal.io")
 
@@ -1087,8 +1084,6 @@ def _apply_periodic_and_mesh(
     n_left, n_right = _count_boundary_nodes()
     if n_left == n_right and n_left > 0:
         return True  # periodic meshing worked
-
-    import logging
 
     logging.getLogger("turbomodal.io").info(
         "setPeriodic produced mismatched boundary nodes "
@@ -1338,8 +1333,6 @@ def _auto_detect_cyclic_boundaries(
 
     # --- Warn if boundaries not found ---
     if not left_candidates or not right_candidates:
-        import warnings
-
         n_surf = len(surface_data)
         n_cand = len(boundary_candidates) if "boundary_candidates" in dir() else 0
         theta_range = ""
@@ -1824,7 +1817,6 @@ def _detect_boundaries_geometric(
     if free_ns is not None:
         free_ns.node_ids = sorted(free_nodes)
 
-    import logging
     logger = logging.getLogger("turbomodal.io")
     logger.info(
         "Geometric boundary detection: matched %d node pairs, "
@@ -1931,7 +1923,6 @@ def _snap_boundary_nodes(
             "have periodic boundaries."
         )
 
-    import logging
     logger = logging.getLogger("turbomodal.io")
     n_dropped = len(left_ids) + len(right_ids) - 2 * len(matched_left)
     if n_dropped > 0 or n_rejected_cross_patch > 0:

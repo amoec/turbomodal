@@ -20,18 +20,6 @@ const std::array<Eigen::Vector3d, 4> TET10Element::gauss_points = {
 const std::array<double, 4> TET10Element::gauss_weights = {
     {1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0, 1.0 / 24.0}};
 
-// 5-point Stroud degree-3 quadrature for tetrahedra (sum = 1/6 = ref tet
-// volume) Used for mass-type integrals where integrand is N^T*N (degree 4).
-const std::array<Eigen::Vector3d, 5> TET10Element::mass_gauss_points = {
-    {{1.0 / 4.0, 1.0 / 4.0, 1.0 / 4.0}, // centroid
-     {1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0},
-     {1.0 / 2.0, 1.0 / 6.0, 1.0 / 6.0},
-     {1.0 / 6.0, 1.0 / 2.0, 1.0 / 6.0},
-     {1.0 / 6.0, 1.0 / 6.0, 1.0 / 2.0}}};
-
-const std::array<double, 5> TET10Element::mass_gauss_weights = {
-    {-2.0 / 15.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0, 3.0 / 40.0}};
-
 // Keast Rule 6: 14-point degree-4 quadrature, ALL positive weights.
 // Reference: Keast, CMAME 55(3), 1986, pp. 339-348.
 //

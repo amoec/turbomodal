@@ -144,18 +144,305 @@ turbomodal.CyclicSymmetrySolver(mesh, material, fluid)
   eigenvalue problem at the given RPM. Returns one `ModalResult` per harmonic
   index (0 to N/2).
 
-### Additional C++ Classes
+### AddedMassModel
 
-- `DampingConfig` / `DampingType` -- Damping models (structural, Rayleigh, modal).
-- `ForcedResponseConfig` / `ForcedResponseResult` / `ForcedResponseSolver` --
-  Harmonic forced response analysis.
-- `ExcitationType` -- Excitation type enumeration.
-- `MistuningConfig` / `MistuningResult` / `FMMSolver` -- Fundamental Mistuning
-  Model for blade-to-blade frequency deviations.
-- `AddedMassModel` / `ModalSolver` -- Added mass and general modal solver.
-- `ModeIdentification` / `GroundTruthLabel` -- Mode classification utilities.
-- `identify_nodal_circles(...)`, `classify_mode_family(...)`,
-  `identify_modes(...)` -- C++ mode identification functions.
+Static methods for computing Kwak's Added Virtual Mass Incremental (AVMI)
+factors for fluid-coupled vibration of annular plates.
+
+**Methods:**
+
+- `AddedMassModel.kwak_avmi(nodal_diameter, rho_fluid, rho_structure, thickness, radius) -> float`
+  -- Compute the AVMI factor for a given nodal diameter.
+- `AddedMassModel.frequency_ratio(nodal_diameter, rho_fluid, rho_structure, thickness, radius) -> float`
+  -- Compute the wet-to-dry frequency ratio `f_wet / f_dry`.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+ratio = tm.AddedMassModel.frequency_ratio(
+    nodal_diameter=3, rho_fluid=1000.0, rho_structure=7800.0,
+    thickness=0.01, radius=0.15,
+)
+print(f"Frequency ratio (wet/dry) at ND=3: {ratio:.4f}")
+```
+
+### DampingConfig / DampingType
+
+Configuration for structural damping in forced response analysis.
+
+```python
+turbomodal.DampingConfig()
+```
+
+**DampingType** enumeration:
+
+| Value | Description |
+|-------|-------------|
+| `DampingType.NONE` | No damping |
+| `DampingType.MODAL` | Per-mode damping ratios |
+| `DampingType.RAYLEIGH` | Mass- and stiffness-proportional (alpha, beta) |
+
+**Attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `type` | `DampingType` | Damping model to use |
+| `modal_damping_ratios` | `ndarray` | Per-mode damping ratios (for `MODAL` type) |
+| `rayleigh_alpha` | `float` | Mass-proportional coefficient (for `RAYLEIGH` type) |
+| `rayleigh_beta` | `float` | Stiffness-proportional coefficient (for `RAYLEIGH` type) |
+| `aero_damping_ratios` | `ndarray` | Aerodynamic damping ratios (additive) |
+
+**Methods:**
+
+- `effective_damping(mode_index: int, omega_r: float) -> float` -- Compute the
+  effective damping ratio for a mode, combining structural and aerodynamic
+  contributions.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+damping = tm.DampingConfig()
+damping.type = tm.DampingType.RAYLEIGH
+damping.rayleigh_alpha = 0.5   # mass-proportional
+damping.rayleigh_beta = 1e-6   # stiffness-proportional
+```
+
+### ForcedResponseConfig / ExcitationType
+
+Configuration for harmonic forced response analysis.
+
+```python
+turbomodal.ForcedResponseConfig()
+```
+
+**ExcitationType** enumeration:
+
+| Value | Description |
+|-------|-------------|
+| `ExcitationType.UNIFORM_PRESSURE` | Uniform pressure load on all blade surfaces |
+| `ExcitationType.POINT_FORCE` | Concentrated force at a single node |
+| `ExcitationType.SPATIAL_DISTRIBUTION` | Arbitrary spatial force distribution |
+
+**Attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `engine_order` | `int` | Engine order of the excitation |
+| `force_amplitude` | `float` | Force amplitude (N or Pa) |
+| `excitation_type` | `ExcitationType` | Type of excitation |
+| `force_node_id` | `int` | Node ID for `POINT_FORCE` excitation |
+| `force_direction` | `ndarray (3,)` | Direction of point force |
+| `force_vector` | `ndarray` | Full force vector for `SPATIAL_DISTRIBUTION` |
+| `freq_min` | `float` | Minimum sweep frequency (Hz) |
+| `freq_max` | `float` | Maximum sweep frequency (Hz) |
+| `num_freq_points` | `int` | Number of points in the frequency sweep |
+
+### ForcedResponseResult
+
+Container for forced response analysis results.
+
+```python
+turbomodal.ForcedResponseResult()
+```
+
+**Attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `engine_order` | `int` | Engine order of the excitation |
+| `rpm` | `float` | Rotational speed (RPM) |
+| `natural_frequencies` | `ndarray` | Natural frequencies of participating modes (Hz) |
+| `modal_forces` | `ndarray (complex)` | Modal force coefficients |
+| `modal_damping_ratios` | `ndarray` | Effective damping ratio per mode |
+| `participation_factors` | `ndarray` | Modal participation factors |
+| `effective_modal_mass` | `ndarray` | Effective modal mass per mode |
+| `sweep_frequencies` | `ndarray` | Frequency sweep points (Hz) |
+| `modal_amplitudes` | `ndarray (complex)` | Complex amplitude at each sweep frequency |
+| `max_response_amplitude` | `float` | Peak response amplitude |
+| `resonance_frequencies` | `ndarray` | Detected resonance frequencies (Hz) |
+
+### ForcedResponseSolver
+
+Solver for modal-superposition-based harmonic forced response.
+
+```python
+turbomodal.ForcedResponseSolver(mesh, damping=DampingConfig())
+```
+
+**Parameters:**
+
+- `mesh` : `Mesh` -- Sector mesh.
+- `damping` : `DampingConfig` -- Damping configuration (default: no damping).
+
+**Methods:**
+
+- `solve(modal_results, rpm, config) -> ForcedResponseResult` -- Compute the
+  forced response from modal results.
+- `compute_modal_forces(mode_shapes, force_vector) -> ndarray` -- Project a
+  physical force vector onto the modal basis.
+- `modal_frf(omega, omega_r, Q_r, zeta_r) -> complex` -- Single-DOF modal
+  frequency response function.
+- `compute_participation_factors(mode_shapes, M, direction) -> ndarray` --
+  Modal participation factors along a direction.
+- `compute_effective_modal_mass(mode_shapes, M, direction) -> ndarray` --
+  Effective modal mass per mode.
+- `build_eo_excitation(engine_order, amplitude, type, ...) -> ndarray` --
+  Build an engine-order excitation vector.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+damping = tm.DampingConfig()
+damping.type = tm.DampingType.MODAL
+damping.modal_damping_ratios = np.array([0.01] * 10)
+
+fr_solver = tm.ForcedResponseSolver(mesh, damping)
+
+fr_config = tm.ForcedResponseConfig()
+fr_config.engine_order = 24
+fr_config.force_amplitude = 100.0
+fr_config.freq_min = 100.0
+fr_config.freq_max = 5000.0
+fr_config.num_freq_points = 500
+
+fr_result = fr_solver.solve(results, rpm=10000, config=fr_config)
+print(f"Peak amplitude: {fr_result.max_response_amplitude:.6f}")
+print(f"Resonance at: {fr_result.resonance_frequencies} Hz")
+```
+
+### MistuningConfig / MistuningResult
+
+Configuration and results for the Fundamental Mistuning Model (FMM).
+
+```python
+turbomodal.MistuningConfig()
+```
+
+**MistuningConfig attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `blade_frequency_deviations` | `ndarray (N,)` | Per-blade frequency deviation from tuned (fractional) |
+| `tuned_frequencies` | `ndarray` | Tuned system natural frequencies (Hz) |
+| `mode_family_index` | `int` | Index of the mode family to mistune |
+
+**MistuningResult attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `frequencies` | `ndarray` | Mistuned natural frequencies (Hz) |
+| `blade_amplitudes` | `ndarray (complex)` | Per-blade complex amplitudes |
+| `amplitude_magnification` | `ndarray` | Per-blade amplitude magnification factor |
+| `peak_magnification` | `float` | Maximum amplitude magnification across all blades |
+| `localization_ipr` | `float` | Inverse Participation Ratio (localization metric) |
+
+### FMMSolver
+
+Static solver for the Fundamental Mistuning Model.
+
+**Methods:**
+
+- `FMMSolver.solve(num_sectors, tuned_frequencies, blade_frequency_deviations) -> MistuningResult`
+  -- Solve the FMM eigenvalue problem.
+- `FMMSolver.random_mistuning(num_sectors, sigma, seed=42) -> ndarray` --
+  Generate random blade frequency deviations with standard deviation `sigma`.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+# Generate random 2% mistuning for 36 blades
+deviations = tm.FMMSolver.random_mistuning(num_sectors=36, sigma=0.02)
+
+# Solve FMM
+result = tm.FMMSolver.solve(
+    num_sectors=36,
+    tuned_frequencies=tuned_freqs,
+    blade_frequency_deviations=deviations,
+)
+print(f"Peak magnification: {result.peak_magnification:.3f}")
+print(f"Localization IPR: {result.localization_ipr:.3f}")
+```
+
+### ModeIdentification
+
+Result container for C++ mode classification.
+
+```python
+turbomodal.ModeIdentification()
+```
+
+**Attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `nodal_diameter` | `int` | Identified nodal diameter |
+| `nodal_circle` | `int` | Identified nodal circle count |
+| `whirl_direction` | `int` | +1=FW, -1=BW, 0=standing |
+| `frequency` | `float` | Natural frequency (Hz) |
+| `wave_velocity` | `float` | Circumferential wave velocity (m/s) |
+| `participation_factor` | `float` | Modal participation factor |
+| `family_label` | `str` | Mode family label (`"B"`, `"T"`, or `"A"`) |
+
+### GroundTruthLabel
+
+Extended label container for supervised ML training data.
+
+```python
+turbomodal.GroundTruthLabel()
+```
+
+**Attributes:**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `rpm` | `float` | Operating RPM |
+| `temperature` | `float` | Operating temperature (K) |
+| `nodal_diameter` | `int` | Nodal diameter |
+| `nodal_circle` | `int` | Nodal circle count |
+| `whirl_direction` | `int` | +1=FW, -1=BW, 0=standing |
+| `frequency` | `float` | Natural frequency (Hz) |
+| `wave_velocity` | `float` | Circumferential wave velocity (m/s) |
+| `family_label` | `str` | Mode family (`"B"`, `"T"`, `"A"`) |
+| `participation_factor` | `float` | Modal participation factor |
+| `effective_modal_mass` | `float` | Effective modal mass |
+| `amplitude` | `float` | Vibration amplitude |
+| `damping_ratio` | `float` | Effective damping ratio |
+| `amplitude_magnification` | `float` | Mistuning magnification factor |
+| `is_localized` | `bool` | Whether mode is spatially localized |
+| `condition_id` | `int` | Index into parametric sweep conditions |
+| `mode_index` | `int` | Mode index within the harmonic |
+
+### Mode Identification Functions
+
+Free functions for C++ mode classification.
+
+- `identify_nodal_circles(mode_shape, mesh) -> int` -- Count nodal circles
+  from the displacement field of a single mode shape vector.
+- `classify_mode_family(mode_shape, mesh) -> str` -- Classify mode as
+  bending (`"B"`), torsion (`"T"`), or axial (`"A"`).
+- `identify_modes(result, mesh, characteristic_radius=0.0) -> list[ModeIdentification]`
+  -- Identify all modes in a `ModalResult`, returning one `ModeIdentification`
+  per mode.
+
+**Example:**
+
+```python
+import turbomodal as tm
+
+results = tm.solve(mesh, mat, rpm=10000, num_modes=5)
+modes = tm.identify_modes(results[3], mesh, characteristic_radius=0.15)
+for m in modes:
+    print(f"ND={m.nodal_diameter} NC={m.nodal_circle} {m.family_label} "
+          f"f={m.frequency:.1f} Hz")
+```
 
 ---
 

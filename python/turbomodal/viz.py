@@ -540,7 +540,8 @@ def plot_mode(
         grid = _mesh_to_pyvista(mesh)
         title = f"ND={nd} Mode {mode_index} f={freq:.2f} Hz {whirl_str.get(whirl, '')}"
 
-        plotter = pv.Plotter(off_screen=off_screen or filename is not None)
+        save_only = filename is not None
+        plotter = pv.Plotter(off_screen=off_screen or save_only)
         plotter.add_mesh(grid, color="lightgray", style="wireframe",
                          opacity=0.3, line_width=0.5)
 
@@ -549,30 +550,40 @@ def plot_mode(
         deformed_grid.points = nodes + disp
         scalars = np.sqrt(np.sum(disp ** 2, axis=1))
         deformed_grid.point_data["displacement"] = scalars
-        plotter.add_mesh(deformed_grid, scalars="displacement", cmap="turbo",
-                         show_edges=False,
-                         clim=[0, np.max(np.abs(mode_3d)) * scale])
+        actor = plotter.add_mesh(deformed_grid, scalars="displacement",
+                                 cmap="turbo", show_edges=False,
+                                 clim=[0, np.max(np.abs(mode_3d)) * scale])
         plotter.add_text(title, font_size=12)
         plotter.add_axes()
 
-        if filename:
+        if save_only:
             plotter.open_gif(filename)
+            for frame in range(n_frames):
+                t = frame / n_frames
+                phase = np.exp(2j * np.pi * t)
+                disp = np.real(mode_3d * phase) * scale
+                deformed_grid.points = nodes + disp
+                deformed_grid.point_data["displacement"] = np.sqrt(
+                    np.sum(disp ** 2, axis=1))
+                plotter.write_frame()
+            plotter.close()
+            return plotter
 
-        for frame in range(n_frames):
-            t = frame / n_frames
+        # Interactive animation — use a timer callback so the render window
+        # stays responsive and the user can rotate/zoom during playback.
+        state = {"frame": 0}
+
+        def _update_frame(*args):
+            t = state["frame"] / n_frames
             phase = np.exp(2j * np.pi * t)
             disp = np.real(mode_3d * phase) * scale
             deformed_grid.points = nodes + disp
             deformed_grid.point_data["displacement"] = np.sqrt(
                 np.sum(disp ** 2, axis=1))
-            if filename:
-                plotter.write_frame()
-            else:
-                plotter.render()
+            state["frame"] = (state["frame"] + 1) % n_frames
 
-        if filename:
-            plotter.close()
-
+        plotter.add_callback(_update_frame, interval=33)  # ~30 fps
+        plotter.show()
         return plotter
 
     # --- Single-sector static view ---
@@ -610,40 +621,6 @@ def plot_mode(
     plotter.add_axes()
     return plotter
 
-
-def plot_full_annulus(
-    mesh: Mesh,
-    result: ModalResult,
-    mode_index: int = 0,
-    scale: float = 1.0,
-    off_screen: bool = False,
-):
-    """Reconstruct and plot the full 360-degree mode shape.
-
-    .. deprecated::
-        Use ``plot_mode(..., full_annulus=True)`` instead.
-    """
-    return plot_mode(mesh, result, mode_index=mode_index, scale=scale,
-                     off_screen=off_screen, full_annulus=True)
-
-
-def animate_mode(
-    mesh: Mesh,
-    result: ModalResult,
-    mode_index: int = 0,
-    scale: float = 1.0,
-    n_frames: int = 60,
-    filename: str | None = None,
-    off_screen: bool = False,
-):
-    """Animate mode shape oscillation.
-
-    .. deprecated::
-        Use ``plot_mode(..., animate=True)`` instead.
-    """
-    return plot_mode(mesh, result, mode_index=mode_index, scale=scale,
-                     off_screen=off_screen, animate=True, n_frames=n_frames,
-                     filename=filename)
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1327,7 @@ def bc_editor(mesh: Mesh):
         else:
             try:
                 plotter.remove_actor("current_sel")
-            except Exception:
+            except (KeyError, ValueError):
                 pass
 
         # Accepted BC node groups — colored glyphs
@@ -1376,12 +1353,12 @@ def bc_editor(mesh: Mesh):
                     color="yellow", opacity=0.12,
                     show_edges=True, edge_color="yellow", line_width=1,
                 )
-            except Exception:
+            except (KeyError, ValueError):
                 pass
         else:
             try:
                 plotter.remove_actor("radius_disk")
-            except Exception:
+            except (KeyError, ValueError):
                 pass
 
         # --- HUD: Status panel (upper left) ---
@@ -1589,7 +1566,7 @@ def bc_editor(mesh: Mesh):
             state["accepted_ids"].pop()
             try:
                 plotter.remove_actor(f"accepted_{idx}")
-            except Exception:
+            except (KeyError, ValueError):
                 pass
             state["counter"] = max(1, state["counter"] - 1)
             print(f"  -> Undone: {removed.name}")
