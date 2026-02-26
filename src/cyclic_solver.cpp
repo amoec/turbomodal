@@ -65,8 +65,7 @@ static size_t estimate_per_harmonic_bytes(int n_dofs, int nev = 20) {
 CyclicSymmetrySolver::CyclicSymmetrySolver(
     const Mesh& mesh, const Material& mat, const FluidConfig& fluid,
     bool apply_hub_constraint)
-    : mesh_(mesh), mat_(mat), fluid_(fluid),
-      apply_hub_constraint_(apply_hub_constraint) {
+    : mesh_(mesh), mat_(mat), fluid_(fluid) {
     // Map legacy boolean to constraint groups
     if (apply_hub_constraint) {
         const NodeSet* hub = mesh_.find_node_set("hub_constraint");
@@ -87,7 +86,6 @@ CyclicSymmetrySolver::CyclicSymmetrySolver(
     const std::vector<ConstraintGroup>& constraints,
     const FluidConfig& fluid)
     : mesh_(mesh), mat_(mat), fluid_(fluid),
-      apply_hub_constraint_(false),
       constraints_(constraints),
       has_constraints_(!constraints.empty()) {
     classify_dofs();
@@ -477,27 +475,6 @@ Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal(double omega) {
     return u;
 }
 
-Eigen::VectorXd CyclicSymmetrySolver::static_centrifugal_scaled(
-    double omega, double E_scale) {
-    // Like static_centrifugal but with K = E_scale * K_base.
-    // Since u_static = K^{-1} * F and F ∝ ω², K ∝ E_scale,
-    // u_static = (1/E_scale) * K_base^{-1} * F
-    // which is equivalent to: u_static(omega, E_scale) = u_static(omega, 1.0) / E_scale
-    // But that requires solving at omega first. Instead we just call
-    // static_centrifugal directly — the material scaling is already handled
-    // by the assembler when K_base is constructed with the scaled material.
-    // This method exists so callers can force the scale when K_base uses E_ref.
-    //
-    // For the parametric sweep, K_base is at E_ref. The static solve K*u = F
-    // with K = E_scale * K_base gives u = (1/E_scale) * K_base^{-1} * F.
-    // F_centrifugal ∝ rho * omega^2 * r (independent of E), so we solve at
-    // unit E_scale and divide: u_scaled = u_unit / E_scale.
-    // However, this optimization is fragile with constraints, so for now
-    // we just solve directly.
-    (void)E_scale;  // TODO: optimize by caching the factorization
-    return static_centrifugal(omega);
-}
-
 void CyclicSymmetrySolver::precompute_cyclic_projections(
     const SpMatd& K_eff, const SpMatd& M_sector) {
 
@@ -661,8 +638,6 @@ void CyclicSymmetrySolver::precompute_real_matrices() {
         Khalf_real_.setFromTriplets(kr.begin(), kr.end());
         Mhalf_real_.setFromTriplets(mr.begin(), mr.end());
     }
-
-    real_matrices_precomputed_ = true;
 }
 
 std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
