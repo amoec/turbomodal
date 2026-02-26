@@ -39,6 +39,15 @@ public:
     // element mass matrices.
     static const std::array<Eigen::Vector3d, 14> mass_gauss_points_14;
     static const std::array<double, 14> mass_gauss_weights_14;
+
+    // Precomputed shape derivatives and shape functions at 14 Gauss points.
+    // These depend only on natural coordinates (geometry-independent).
+    static const std::array<Matrix10x3d, 14> precomputed_dNdxi;
+    static const std::array<Vector10d, 14> precomputed_N;
+
+private:
+    static std::array<Matrix10x3d, 14> compute_dNdxi_at_gauss_points();
+    static std::array<Vector10d, 14> compute_N_at_gauss_points();
 };
 
 }  // namespace turbomodal

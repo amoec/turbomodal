@@ -148,6 +148,13 @@ private:
     int n_free_ = 0;
     bool projections_precomputed_ = false;
 
+    // Precompute real K/M for k=0 and k=N/2 (P8 optimization)
+    SpMatd K0_real_, M0_real_;
+    SpMatd Khalf_real_, Mhalf_real_;
+    bool real_matrices_precomputed_ = false;
+
+    void precompute_real_matrices();
+
     // Precompute cyclic projections from K_eff and M_sector.
     // Caches Kcf_, Kpf_, Mcf_, Mpf_, etc. for fast per-harmonic assembly.
     void precompute_cyclic_projections(const SpMatd& K_eff, const SpMatd& M_sector);

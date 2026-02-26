@@ -269,28 +269,50 @@ Matrix6x30d TET10Element::B_matrix(double xi, double eta, double zeta) const {
   return B;
 }
 
+// --- Precomputed shape derivatives and shape functions at 14 Gauss points ---
+std::array<Matrix10x3d, 14> TET10Element::compute_dNdxi_at_gauss_points() {
+    std::array<Matrix10x3d, 14> result;
+    TET10Element dummy;
+    dummy.node_coords.setZero();  // Not used by shape_derivatives
+    for (int gp = 0; gp < 14; gp++) {
+        result[gp] = dummy.shape_derivatives(
+            mass_gauss_points_14[gp](0),
+            mass_gauss_points_14[gp](1),
+            mass_gauss_points_14[gp](2));
+    }
+    return result;
+}
+
+std::array<Vector10d, 14> TET10Element::compute_N_at_gauss_points() {
+    std::array<Vector10d, 14> result;
+    TET10Element dummy;
+    dummy.node_coords.setZero();
+    for (int gp = 0; gp < 14; gp++) {
+        result[gp] = dummy.shape_functions(
+            mass_gauss_points_14[gp](0),
+            mass_gauss_points_14[gp](1),
+            mass_gauss_points_14[gp](2));
+    }
+    return result;
+}
+
+const std::array<Matrix10x3d, 14> TET10Element::precomputed_dNdxi =
+    TET10Element::compute_dNdxi_at_gauss_points();
+const std::array<Vector10d, 14> TET10Element::precomputed_N =
+    TET10Element::compute_N_at_gauss_points();
+
 Matrix30d TET10Element::stiffness(const Material &mat) const {
   Matrix6d D = mat.constitutive_matrix();
   Matrix30d Ke = Matrix30d::Zero();
 
-  // Keast Rule 6: 14-point degree-4 quadrature with all positive weights.
-  // For curved TET10 elements (mid-edge nodes off straight-edge midpoints),
-  // the Jacobian varies linearly, making the B^T*D*B*|J| integrand a rational
-  // function of effective degree ~3.  The 14-point rule integrates this
-  // accurately; the old 4-point degree-2 rule over-estimated stiffness
-  // by ~9% even on mildly curved elements (flat disk sector), causing
-  // systematic frequency overestimates on complex blade geometries.
   for (int gp = 0; gp < 14; gp++) {
-    double xi = mass_gauss_points_14[gp](0);
-    double eta = mass_gauss_points_14[gp](1);
-    double zeta = mass_gauss_points_14[gp](2);
     double w = mass_gauss_weights_14[gp];
+    const Matrix10x3d& dNdxi = precomputed_dNdxi[gp];
 
-    Matrix6x30d B = B_matrix(xi, eta, zeta);
-    Eigen::Matrix3d J = jacobian(xi, eta, zeta);
+    // Jacobian and its inverse
+    Eigen::Matrix3d J = dNdxi.transpose() * node_coords;
     double detJ = J.determinant();
 
-    // Safety net: use |detJ| if negative to prevent sign-flip corruption
     if (detJ <= 0.0) {
       if (s_neg_jac_warnings < 5) {
         std::cerr << "[TET10] Warning: negative Jacobian (detJ=" << detJ
@@ -302,7 +324,22 @@ Matrix30d TET10Element::stiffness(const Material &mat) const {
       detJ = std::abs(detJ);
     }
 
-    // K_e += B^T * D * B * det(J) * w
+    Eigen::Matrix3d Jinv = J.inverse();
+    Matrix10x3d dNdx = dNdxi * Jinv.transpose();
+
+    // Assemble B matrix inline (avoids function call overhead)
+    Matrix6x30d B = Matrix6x30d::Zero();
+    for (int i = 0; i < 10; i++) {
+      double dx = dNdx(i, 0), dy = dNdx(i, 1), dz = dNdx(i, 2);
+      int c = 3 * i;
+      B(0, c) = dx;
+      B(1, c + 1) = dy;
+      B(2, c + 2) = dz;
+      B(3, c) = dy; B(3, c + 1) = dx;
+      B(4, c + 1) = dz; B(4, c + 2) = dy;
+      B(5, c) = dz; B(5, c + 2) = dx;
+    }
+
     Ke.noalias() += B.transpose() * D * B * (detJ * w);
   }
 
@@ -312,17 +349,12 @@ Matrix30d TET10Element::stiffness(const Material &mat) const {
 Matrix30d TET10Element::mass(const Material &mat) const {
   Matrix30d Me = Matrix30d::Zero();
 
-  // Keast Rule 6: 14-point degree-4 quadrature with all positive weights.
-  // Integrates the degree-4 N^T*N integrand exactly while guaranteeing a
-  // positive-definite element mass matrix.
   for (int gp = 0; gp < 14; gp++) {
-    double xi = mass_gauss_points_14[gp](0);
-    double eta = mass_gauss_points_14[gp](1);
-    double zeta = mass_gauss_points_14[gp](2);
     double w = mass_gauss_weights_14[gp];
+    const Vector10d& N = precomputed_N[gp];
+    const Matrix10x3d& dNdxi = precomputed_dNdxi[gp];
 
-    Vector10d N = shape_functions(xi, eta, zeta);
-    Eigen::Matrix3d J = jacobian(xi, eta, zeta);
+    Eigen::Matrix3d J = dNdxi.transpose() * node_coords;
     double detJ = J.determinant();
 
     if (detJ <= 0.0) {
@@ -336,8 +368,7 @@ Matrix30d TET10Element::mass(const Material &mat) const {
       detJ = std::abs(detJ);
     }
 
-    // Build 3x30 shape function matrix N_mat
-    // N_mat(d, 3*i + d) = N(i) for d = 0,1,2
+    // Build N_mat inline from precomputed N
     Matrix3x30d N_mat = Matrix3x30d::Zero();
     for (int i = 0; i < 10; i++) {
       N_mat(0, 3 * i) = N(i);
@@ -345,7 +376,6 @@ Matrix30d TET10Element::mass(const Material &mat) const {
       N_mat(2, 3 * i + 2) = N(i);
     }
 
-    // M_e += rho * N_mat^T * N_mat * det(J) * w
     Me.noalias() += mat.rho * N_mat.transpose() * N_mat * (detJ * w);
   }
 

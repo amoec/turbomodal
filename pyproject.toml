@@ -54,7 +54,7 @@ skip = "*-musllinux_*"
 test-command = "python -c \"import turbomodal\""
 
 [tool.cibuildwheel.linux]
-before-all = "git submodule update --init --recursive"
+before-all = "yum install -y openblas-devel && git submodule update --init --recursive"
 
 [tool.cibuildwheel.macos]
 before-all = "git submodule update --init --recursive"
