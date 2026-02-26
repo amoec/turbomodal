@@ -123,7 +123,7 @@ def plot_full_mesh(
 
 **Returns:** `pyvista.Plotter` showing the full annulus mesh.
 
-Unlike `plot_full_annulus`, this function does not require solved mode shapes --
+Unlike `plot_mode(..., full_annulus=True)`, this function does not require solved mode shapes --
 it simply replicates the undeformed sector geometry around the axis of symmetry.
 
 **Example:**
@@ -139,7 +139,8 @@ tm.plot_full_mesh(mesh).show()
 
 ### plot_mode
 
-Plot a single mode shape on the sector mesh, with scalar coloring.
+Plot, animate, or reconstruct the full-annulus mode shape. This single
+function replaces the former `plot_full_annulus` and `animate_mode` helpers.
 
 ```python
 def plot_mode(
@@ -149,46 +150,10 @@ def plot_mode(
     scale: float = 1.0,
     component: str = "magnitude",
     off_screen: bool = False,
-) -> pyvista.Plotter
-```
-
-**Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `mesh` | `Mesh` | required | Mesh object |
-| `result` | `ModalResult` | required | Modal result from solver |
-| `mode_index` | `int` | `0` | Which mode to display (0-based) |
-| `scale` | `float` | `1.0` | Displacement amplification factor |
-| `component` | `str` | `"magnitude"` | Scalar field: `"magnitude"`, `"x"`, `"y"`, `"z"`, `"real"`, `"imag"` |
-| `off_screen` | `bool` | `False` | Render off-screen |
-
-**Returns:** `pyvista.Plotter` with a wireframe of the undeformed mesh
-overlaid with the deformed, color-mapped mode shape.
-
-The title shows `ND=<k> Mode <i> f=<freq> Hz FW/BW`.
-
-**Example:**
-
-```python
-results = tm.solve(mesh, mat, rpm=10000, num_modes=10)
-# Plot the first mode of nodal diameter 3
-plotter = tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0)
-plotter.show()
-```
-
-### plot_full_annulus
-
-Reconstruct and plot the full 360-degree mode shape by rotating the sector
-solution and applying the harmonic phase factor.
-
-```python
-def plot_full_annulus(
-    mesh: Mesh,
-    result: ModalResult,
-    mode_index: int = 0,
-    scale: float = 1.0,
-    off_screen: bool = False,
+    full_annulus: bool = False,
+    animate: bool = False,
+    n_frames: int = 60,
+    filename: str | None = None,
 ) -> pyvista.Plotter
 ```
 
@@ -197,55 +162,38 @@ def plot_full_annulus(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `mesh` | `Mesh` | required | Single-sector mesh |
-| `result` | `ModalResult` | required | Modal result |
-| `mode_index` | `int` | `0` | Mode to display |
-| `scale` | `float` | `1.0` | Displacement amplification |
-| `off_screen` | `bool` | `False` | Off-screen rendering |
-
-For harmonic index k and sector s, the displacement is:
-
-    u_s = Re(u_sector * exp(i * k * s * 2*pi/N))
-
-**Returns:** `pyvista.Plotter` showing the full annulus colored by
-displacement magnitude.
-
-### animate_mode
-
-Animate mode shape oscillation over one cycle.
-
-```python
-def animate_mode(
-    mesh: Mesh,
-    result: ModalResult,
-    mode_index: int = 0,
-    scale: float = 1.0,
-    n_frames: int = 60,
-    filename: str | None = None,
-    off_screen: bool = False,
-) -> pyvista.Plotter
-```
-
-**Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `mesh` | `Mesh` | required | Mesh object |
-| `result` | `ModalResult` | required | Modal result |
-| `mode_index` | `int` | `0` | Mode to animate |
-| `scale` | `float` | `1.0` | Displacement amplification |
-| `n_frames` | `int` | `60` | Number of animation frames |
-| `filename` | `str \| None` | `None` | If given, save as GIF file |
-| `off_screen` | `bool` | `False` | Off-screen rendering |
-
-The oscillation is: `u(t) = Re(mode * exp(i * 2*pi*t/T))`
+| `result` | `ModalResult` | required | Modal result from solver |
+| `mode_index` | `int` | `0` | Which mode to display (0-based) |
+| `scale` | `float` | `1.0` | Displacement amplification factor |
+| `component` | `str` | `"magnitude"` | Scalar field: `"magnitude"`, `"x"`, `"y"`, `"z"`, `"real"`, `"imag"` (single-sector static only) |
+| `off_screen` | `bool` | `False` | Render off-screen |
+| `full_annulus` | `bool` | `False` | Reconstruct all sectors and display full 360-degree mode shape |
+| `animate` | `bool` | `False` | Animate mode shape oscillation: `u(t) = Re(mode * exp(i*2*pi*t/T))` |
+| `n_frames` | `int` | `60` | Number of animation frames (when `animate=True`) |
+| `filename` | `str \| None` | `None` | Save animation as GIF (when `animate=True`) |
 
 **Returns:** `pyvista.Plotter`
 
-**Example:**
+For full-annulus reconstruction, the displacement at harmonic index k,
+sector s is: `u_s = Re(u_sector * exp(i * k * s * 2*pi/N))`
+
+**Examples:**
 
 ```python
-tm.animate_mode(mesh, results[3], mode_index=0, scale=50.0,
-                filename="nd3_mode0.gif")
+results = tm.solve(mesh, mat, rpm=10000, num_modes=10)
+
+# Single-sector mode shape
+tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0).show()
+
+# Full 360-degree annulus
+tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0, full_annulus=True).show()
+
+# Animated oscillation
+tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0, animate=True)
+
+# Save animation as GIF
+tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0,
+             animate=True, filename="nd3_mode0.gif")
 ```
 
 ---

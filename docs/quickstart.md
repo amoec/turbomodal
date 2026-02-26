@@ -160,8 +160,14 @@ results = tm.solve(mesh, mat, rpm=3000, num_modes=10, fluid=fluid)
 Visualize mode shapes:
 
 ```python
+# Single sector
 tm.plot_mode(mesh, results[2], mode_index=0, scale=0.001).show()
-tm.plot_full_annulus(mesh, results[2], mode_index=0, scale=0.001).show()
+
+# Full 360-degree annulus
+tm.plot_mode(mesh, results[2], mode_index=0, scale=0.001, full_annulus=True).show()
+
+# Animated oscillation
+tm.plot_mode(mesh, results[2], mode_index=0, scale=0.001, animate=True)
 ```
 
 ---
