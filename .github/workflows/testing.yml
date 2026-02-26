@@ -1,6 +1,7 @@
 name: Testing Build
 
-# Triggered by tags of the form v*.devN (e.g. v0.2.4.7.dev0).
+# Triggered by v*.dev* tags (e.g. v0.2.4.dev0) pushed from non-main branches.
+# Release tags on main are handled by release.yml instead.
 
 on:
   push:
@@ -40,10 +41,6 @@ jobs:
           path: wheelhouse/*.whl
           retention-days: 14
 
-  # Optional: collect all wheels into a single draft pre-release so you can
-  # download them from the Releases page rather than hunting through the
-  # Actions artifact UI.  The release is marked as a pre-release so it never
-  # appears as the "latest" release.
   draft-prerelease:
     needs: build-wheels
     runs-on: ubuntu-latest

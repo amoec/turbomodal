@@ -1,5 +1,8 @@
 name: Release
 
+# Triggered by release tags (v*) pushed from main, excluding dev tags.
+# Dev/testing tags (v*.dev*) are handled by testing.yml instead.
+
 on:
   push:
     tags:
@@ -19,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      
+
       - name: Disable Windows AV from interfering with build
         if: runner.os == 'Windows'
         run: Set-MpPreference -DisableRealtimeMonitoring $true
@@ -58,6 +61,34 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Find the previous release tag (skip dev tags)
+          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname \
+            | grep -v '\.dev' \
+            | awk "NR==2{print; exit}")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+            # Generate changelog from commit messages
+            CHANGELOG=$(git log --pretty=format:"- %s" "$PREV_TAG".."${{ github.ref_name }}" \
+              | grep -v '^- Merge' || true)
+            # Use heredoc for multiline output
+            {
+              echo "changelog<<CHANGELOG_EOF"
+              echo "$CHANGELOG"
+              echo "CHANGELOG_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "prev_tag=" >> "$GITHUB_OUTPUT"
+            echo "changelog=Initial release" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -66,3 +97,23 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          name: "turbomodal ${{ github.ref_name }}"
+          body: |
+            ## turbomodal ${{ github.ref_name }}
+
+            Cyclic-symmetry FEA modal solver for turbomachinery bladed disks.
+
+            ### What's Changed
+            ${{ steps.notes.outputs.changelog }}
+
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/${{ steps.notes.outputs.prev_tag }}...${{ github.ref_name }}
+
+            ---
+
+            ### Installation
+
+            ```bash
+            pip install turbomodal==${{ github.ref_name }}
+            ```
+
+            Or download the wheel for your platform below.
