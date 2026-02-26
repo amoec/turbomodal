@@ -70,8 +70,8 @@ print(f"  Saved {OUT / '04_mode_nd3_m0.png'}")
 
 # --- 6. Full annulus: ND=3 ---
 print("\nGenerating full annulus ND=3 mode 0...")
-plotter = tm.plot_full_annulus(
-    mesh, results_0[3], mode_index=0, scale=0.002, off_screen=True
+plotter = tm.plot_mode(
+    mesh, results_0[3], mode_index=0, scale=0.002, off_screen=True, full_annulus=True
 )
 plotter.camera_position = "xy"
 plotter.screenshot(str(OUT / "05_full_annulus_nd3.png"), window_size=[1600, 1200])
@@ -80,8 +80,8 @@ print(f"  Saved {OUT / '05_full_annulus_nd3.png'}")
 
 # --- 7. Full annulus: ND=5 ---
 print("Generating full annulus ND=5 mode 0...")
-plotter = tm.plot_full_annulus(
-    mesh, results_0[5], mode_index=0, scale=0.002, off_screen=True
+plotter = tm.plot_mode(
+    mesh, results_0[5], mode_index=0, scale=0.002, off_screen=True, full_annulus=True
 )
 plotter.camera_position = "xy"
 plotter.screenshot(str(OUT / "06_full_annulus_nd5.png"), window_size=[1600, 1200])

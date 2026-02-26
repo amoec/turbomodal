@@ -443,17 +443,29 @@ def plot_mode(
     scale: float = 1.0,
     component: str = "magnitude",
     off_screen: bool = False,
+    full_annulus: bool = False,
+    animate: bool = False,
+    n_frames: int = 60,
+    filename: str | None = None,
 ):
-    """Plot a mode shape on the sector mesh.
+    """Plot or animate a mode shape on the sector or full-annulus mesh.
 
     Parameters
     ----------
-    mesh : Mesh object
+    mesh : Mesh object (single sector)
     result : ModalResult from solver
     mode_index : which mode to display (0-based)
     scale : displacement amplification factor
     component : 'magnitude', 'x', 'y', 'z', 'real', 'imag'
+        (only used for single-sector static view)
     off_screen : render off-screen (for testing)
+    full_annulus : if True, reconstruct all sectors and display the full
+        360-degree mode shape.  For harmonic index k and sector s, the
+        displacement is: ``u_s = Re(u_sector * exp(i * k * s * 2*pi/N))``
+    animate : if True, animate the mode shape oscillation:
+        ``u(t) = Re(mode * exp(i * 2*pi*t/T))``
+    n_frames : number of animation frames (only used when ``animate=True``)
+    filename : if given with ``animate=True``, save the animation as a GIF
 
     Returns
     -------
@@ -461,7 +473,6 @@ def plot_mode(
     """
     import pyvista as pv
 
-    grid = _mesh_to_pyvista(mesh)
     nodes = np.asarray(mesh.nodes)
     n_nodes = mesh.num_nodes()
 
@@ -469,7 +480,104 @@ def plot_mode(
     mode = np.asarray(result.mode_shapes[:, mode_index])
     mode_3d = mode.reshape(n_nodes, 3)
 
-    # Compute scalar field
+    freq = result.frequencies[mode_index]
+    nd = result.harmonic_index
+    whirl = result.whirl_direction[mode_index]
+    whirl_str = {1: "FW", -1: "BW", 0: ""}
+
+    # --- Full annulus (static) ---
+    if full_annulus:
+        elements = np.asarray(mesh.elements)
+        n_sectors = mesh.num_sectors
+        k = nd
+        sector_angle = 2 * np.pi / n_sectors
+
+        n_elem = elements.shape[0]
+        all_nodes = np.empty((n_sectors * n_nodes, 3), dtype=np.float64)
+        all_cells = np.empty((n_sectors * n_elem, 11), dtype=np.int64)
+        all_celltypes = np.full(n_sectors * n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
+        all_scalars = np.empty(n_sectors * n_nodes, dtype=np.float64)
+
+        for s in range(n_sectors):
+            theta = s * sector_angle
+            R = _rotation_matrix(theta, mesh.rotation_axis)
+
+            rotated_nodes = nodes @ R.T
+
+            phase = np.exp(1j * k * theta)
+            u_complex = mode_3d * phase
+            u_real = np.real(u_complex) @ R.T
+
+            deformed = rotated_nodes + scale * u_real
+
+            node_offset = s * n_nodes
+            elem_offset = s * n_elem
+
+            cells = all_cells[elem_offset:elem_offset + n_elem]
+            cells[:, 0] = 10
+            cells[:, 1:] = elements + node_offset
+
+            all_nodes[node_offset:node_offset + n_nodes] = deformed
+            all_scalars[node_offset:node_offset + n_nodes] = np.sqrt(
+                np.sum(u_real ** 2, axis=1)
+            )
+
+        grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
+        grid.point_data["displacement"] = all_scalars
+
+        title = (f"Full Annulus: ND={nd} Mode {mode_index} "
+                 f"f={freq:.2f} Hz {whirl_str.get(whirl, '')}")
+
+        plotter = pv.Plotter(off_screen=off_screen)
+        plotter.add_mesh(grid, scalars="displacement", cmap="turbo",
+                         show_edges=False)
+        plotter.add_text(title, font_size=12)
+        plotter.add_axes()
+        return plotter
+
+    # --- Single-sector animation ---
+    if animate:
+        grid = _mesh_to_pyvista(mesh)
+        title = f"ND={nd} Mode {mode_index} f={freq:.2f} Hz {whirl_str.get(whirl, '')}"
+
+        plotter = pv.Plotter(off_screen=off_screen or filename is not None)
+        plotter.add_mesh(grid, color="lightgray", style="wireframe",
+                         opacity=0.3, line_width=0.5)
+
+        deformed_grid = grid.copy()
+        disp = np.real(mode_3d) * scale
+        deformed_grid.points = nodes + disp
+        scalars = np.sqrt(np.sum(disp ** 2, axis=1))
+        deformed_grid.point_data["displacement"] = scalars
+        plotter.add_mesh(deformed_grid, scalars="displacement", cmap="turbo",
+                         show_edges=False,
+                         clim=[0, np.max(np.abs(mode_3d)) * scale])
+        plotter.add_text(title, font_size=12)
+        plotter.add_axes()
+
+        if filename:
+            plotter.open_gif(filename)
+
+        for frame in range(n_frames):
+            t = frame / n_frames
+            phase = np.exp(2j * np.pi * t)
+            disp = np.real(mode_3d * phase) * scale
+            deformed_grid.points = nodes + disp
+            deformed_grid.point_data["displacement"] = np.sqrt(
+                np.sum(disp ** 2, axis=1))
+            if filename:
+                plotter.write_frame()
+            else:
+                plotter.render()
+
+        if filename:
+            plotter.close()
+
+        return plotter
+
+    # --- Single-sector static view ---
+    grid = _mesh_to_pyvista(mesh)
+
     if component == "magnitude":
         scalars = np.sqrt(np.sum(np.abs(mode_3d) ** 2, axis=1))
     elif component == "x":
@@ -485,23 +593,16 @@ def plot_mode(
     else:
         raise ValueError(f"Unknown component '{component}'")
 
-    # Deform mesh by real part of mode shape
     disp = np.real(mode_3d) * scale
     deformed_nodes = nodes + disp
     deformed_grid = grid.copy()
     deformed_grid.points = deformed_nodes
 
-    freq = result.frequencies[mode_index]
-    nd = result.harmonic_index
-    whirl = result.whirl_direction[mode_index]
-    whirl_str = {1: "FW", -1: "BW", 0: ""}
     title = f"ND={nd} Mode {mode_index} f={freq:.2f} Hz {whirl_str.get(whirl, '')}"
 
     plotter = pv.Plotter(off_screen=off_screen)
-    # Wireframe of undeformed
     plotter.add_mesh(grid, color="lightgray", style="wireframe",
                      opacity=0.3, line_width=0.5)
-    # Deformed with scalars
     deformed_grid.point_data["displacement"] = scalars
     plotter.add_mesh(deformed_grid, scalars="displacement", cmap="turbo",
                      show_edges=False)
@@ -519,84 +620,11 @@ def plot_full_annulus(
 ):
     """Reconstruct and plot the full 360-degree mode shape.
 
-    For harmonic index k and sector s, the displacement is:
-        u_s = Re(u_sector * exp(i * k * s * 2*pi/N))
-
-    Parameters
-    ----------
-    mesh : Mesh object (single sector)
-    result : ModalResult from solver
-    mode_index : which mode to display
-    scale : displacement amplification factor
-    off_screen : render off-screen (for testing)
-
-    Returns
-    -------
-    pyvista.Plotter
+    .. deprecated::
+        Use ``plot_mode(..., full_annulus=True)`` instead.
     """
-    import pyvista as pv
-
-    nodes = np.asarray(mesh.nodes)
-    elements = np.asarray(mesh.elements)
-    n_nodes = mesh.num_nodes()
-    n_sectors = mesh.num_sectors
-    k = result.harmonic_index
-
-    # Extract complex mode shape
-    mode = np.asarray(result.mode_shapes[:, mode_index])
-    mode_3d = mode.reshape(n_nodes, 3)
-
-    sector_angle = 2 * np.pi / n_sectors
-
-    plotter = pv.Plotter(off_screen=off_screen)
-
-    n_elem = elements.shape[0]
-    # Pre-allocate arrays for all sectors to avoid O(n_sectors^2) vstack
-    all_nodes = np.empty((n_sectors * n_nodes, 3), dtype=np.float64)
-    all_cells = np.empty((n_sectors * n_elem, 11), dtype=np.int64)
-    all_celltypes = np.full(n_sectors * n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
-    all_scalars = np.empty(n_sectors * n_nodes, dtype=np.float64)
-
-    for s in range(n_sectors):
-        theta = s * sector_angle
-
-        R = _rotation_matrix(theta, mesh.rotation_axis)
-
-        # Rotate nodes
-        rotated_nodes = nodes @ R.T
-
-        # Phase factor for this sector
-        phase = np.exp(1j * k * theta)
-        # Complex displacement in sector reference frame
-        u_complex = mode_3d * phase
-        # Take real part and rotate to global frame
-        u_real = np.real(u_complex) @ R.T
-
-        deformed = rotated_nodes + scale * u_real
-
-        # Build PyVista cells for this sector
-        node_offset = s * n_nodes
-        elem_offset = s * n_elem
-
-        cells = all_cells[elem_offset:elem_offset + n_elem]
-        cells[:, 0] = 10
-        cells[:, 1:] = elements + node_offset
-
-        all_nodes[node_offset:node_offset + n_nodes] = deformed
-        all_scalars[node_offset:node_offset + n_nodes] = np.sqrt(
-            np.sum(u_real ** 2, axis=1)
-        )
-
-    grid = pv.UnstructuredGrid(all_cells.ravel(), all_celltypes, all_nodes)
-    grid.point_data["displacement"] = all_scalars
-
-    freq = result.frequencies[mode_index]
-    title = f"Full Annulus: ND={k} Mode {mode_index} f={freq:.2f} Hz"
-
-    plotter.add_mesh(grid, scalars="displacement", cmap="turbo", show_edges=False)
-    plotter.add_text(title, font_size=12)
-    plotter.add_axes()
-    return plotter
+    return plot_mode(mesh, result, mode_index=mode_index, scale=scale,
+                     off_screen=off_screen, full_annulus=True)
 
 
 def animate_mode(
@@ -610,67 +638,12 @@ def animate_mode(
 ):
     """Animate mode shape oscillation.
 
-    The oscillation is: u(t) = Re(mode * exp(i * 2*pi*t/T))
-
-    Parameters
-    ----------
-    mesh : Mesh object
-    result : ModalResult from solver
-    mode_index : which mode to animate
-    scale : displacement amplification factor
-    n_frames : number of animation frames
-    filename : if given, save as GIF
-    off_screen : render off-screen
-
-    Returns
-    -------
-    pyvista.Plotter
+    .. deprecated::
+        Use ``plot_mode(..., animate=True)`` instead.
     """
-    import pyvista as pv
-
-    grid = _mesh_to_pyvista(mesh)
-    nodes = np.asarray(mesh.nodes)
-    n_nodes = mesh.num_nodes()
-
-    mode = np.asarray(result.mode_shapes[:, mode_index])
-    mode_3d = mode.reshape(n_nodes, 3)
-
-    freq = result.frequencies[mode_index]
-    title = f"ND={result.harmonic_index} Mode {mode_index} f={freq:.2f} Hz"
-
-    plotter = pv.Plotter(off_screen=off_screen or filename is not None)
-    plotter.add_mesh(grid, color="lightgray", style="wireframe",
-                     opacity=0.3, line_width=0.5)
-
-    # Initial deformed state
-    deformed_grid = grid.copy()
-    disp = np.real(mode_3d) * scale
-    deformed_grid.points = nodes + disp
-    scalars = np.sqrt(np.sum(disp ** 2, axis=1))
-    deformed_grid.point_data["displacement"] = scalars
-    actor = plotter.add_mesh(deformed_grid, scalars="displacement", cmap="turbo",
-                             show_edges=False, clim=[0, np.max(np.abs(mode_3d)) * scale])
-    plotter.add_text(title, font_size=12)
-    plotter.add_axes()
-
-    if filename:
-        plotter.open_gif(filename)
-
-    for frame in range(n_frames):
-        t = frame / n_frames
-        phase = np.exp(2j * np.pi * t)
-        disp = np.real(mode_3d * phase) * scale
-        deformed_grid.points = nodes + disp
-        deformed_grid.point_data["displacement"] = np.sqrt(np.sum(disp ** 2, axis=1))
-        if filename:
-            plotter.write_frame()
-        else:
-            plotter.render()
-
-    if filename:
-        plotter.close()
-
-    return plotter
+    return plot_mode(mesh, result, mode_index=mode_index, scale=scale,
+                     off_screen=off_screen, animate=True, n_frames=n_frames,
+                     filename=filename)
 
 
 # ---------------------------------------------------------------------------

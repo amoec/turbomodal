@@ -54,6 +54,14 @@ class TestPlotMode:
 
 class TestPlotFullAnnulus:
     def test_returns_plotter(self, solved_result):
+        from turbomodal.viz import plot_mode
+        mesh, results = solved_result
+        plotter = plot_mode(mesh, results[0], mode_index=0, off_screen=True,
+                            full_annulus=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_deprecated_alias(self, solved_result):
         from turbomodal.viz import plot_full_annulus
         mesh, results = solved_result
         plotter = plot_full_annulus(mesh, results[0], mode_index=0, off_screen=True)

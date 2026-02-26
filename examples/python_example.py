@@ -52,7 +52,7 @@ plotter.show()
 # --- 6. Full annulus reconstruction ---
 if len(results) > 1:
     print("\nPlotting full annulus ND=1 first mode...")
-    plotter = tm.plot_full_annulus(mesh, results[1], mode_index=0, scale=0.001)
+    plotter = tm.plot_mode(mesh, results[1], mode_index=0, scale=0.001, full_annulus=True)
     plotter.show()
 
 # --- 7. RPM sweep and Campbell diagram ---
