@@ -8,6 +8,14 @@ Cyclic symmetry FEA solver with ML-based modal identification for turbomachinery
 > [Releases](https://github.com/amoec/turbomodal/releases) page.
 > See [Installation](#installation) below for building from source.
 
+<p align="center">
+  <img src="docs/assets/nd2_full_annulus.gif" width="48%" alt="ND=2 full annulus mode animation">
+  <img src="docs/assets/nd4_full_annulus.gif" width="48%" alt="ND=4 full annulus mode animation">
+</p>
+<p align="center">
+  <em>Animated mode shapes: 2 nodal diameters (left) and 4 nodal diameters (right) on a 24-sector bladed disk.</em>
+</p>
+
 ## Overview
 
 turbomodal is an end-to-end toolkit for turbomachinery modal analysis. It
@@ -113,7 +121,16 @@ for r in results:
 # RPM sweep and Campbell diagram
 sweep = tm.rpm_sweep(mesh, mat, np.linspace(0, 15000, 20), num_modes=5)
 tm.plot_campbell(sweep, engine_orders=[1, 2, 36])
+
+# Animate a mode shape and save as GIF
+tm.plot_mode(mesh, results[2], mode_index=0, scale=0.005,
+             animate=True, full_annulus=True, filename="nd2.gif")
 ```
+
+<p align="center">
+  <img src="docs/assets/nd2_sector.gif" width="55%" alt="Single sector mode animation">
+</p>
+<p align="center"><em>Single-sector ND=2 mode shape with wireframe reference geometry.</em></p>
 
 ### Signal Generation and ML Pipeline
 

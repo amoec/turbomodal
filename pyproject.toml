@@ -38,7 +38,6 @@ dependencies = [
     "gmsh>=4.12",
     "meshio>=5.3",
     "h5py>=3.7",
-    "imageio>=2.9",
 ]
 
 [project.urls]
