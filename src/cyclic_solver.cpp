@@ -606,6 +606,63 @@ void CyclicSymmetrySolver::precompute_cyclic_projections(
     Mpf_H_ = Mpf_.adjoint();
 
     projections_precomputed_ = true;
+
+    // Precompute real K/M for k=0 and k=N/2
+    precompute_real_matrices();
+}
+
+void CyclicSymmetrySolver::precompute_real_matrices() {
+    // P8: Precompute real K/M for k=0 (P=1) and k=N/2 (P=-1).
+    // These harmonics produce real matrices, so we can avoid complex arithmetic.
+
+    // k=0: K_free = Kcf + Kpf + Kpf_H, all coefficients are real
+    {
+        SpMatcd K0_complex = Kcf_ + Kpf_ + Kpf_H_;
+        SpMatcd M0_complex = Mcf_ + Mpf_ + Mpf_H_;
+
+        std::vector<Triplet> kr, mr;
+        kr.reserve(K0_complex.nonZeros());
+        mr.reserve(M0_complex.nonZeros());
+        for (int col = 0; col < K0_complex.outerSize(); ++col)
+            for (SpMatcd::InnerIterator it(K0_complex, col); it; ++it)
+                if (std::abs(it.value().real()) > 1e-15)
+                    kr.emplace_back(it.row(), it.col(), it.value().real());
+        for (int col = 0; col < M0_complex.outerSize(); ++col)
+            for (SpMatcd::InnerIterator it(M0_complex, col); it; ++it)
+                if (std::abs(it.value().real()) > 1e-15)
+                    mr.emplace_back(it.row(), it.col(), it.value().real());
+
+        K0_real_.resize(n_free_, n_free_);
+        M0_real_.resize(n_free_, n_free_);
+        K0_real_.setFromTriplets(kr.begin(), kr.end());
+        M0_real_.setFromTriplets(mr.begin(), mr.end());
+    }
+
+    // k=N/2 (only exists for even num_sectors): P = e^{i*pi} = -1
+    int max_k = mesh_.num_sectors / 2;
+    if (mesh_.num_sectors % 2 == 0 && max_k > 0) {
+        SpMatcd Khalf_complex = Kcf_ - Kpf_ - Kpf_H_;
+        SpMatcd Mhalf_complex = Mcf_ - Mpf_ - Mpf_H_;
+
+        std::vector<Triplet> kr, mr;
+        kr.reserve(Khalf_complex.nonZeros());
+        mr.reserve(Mhalf_complex.nonZeros());
+        for (int col = 0; col < Khalf_complex.outerSize(); ++col)
+            for (SpMatcd::InnerIterator it(Khalf_complex, col); it; ++it)
+                if (std::abs(it.value().real()) > 1e-15)
+                    kr.emplace_back(it.row(), it.col(), it.value().real());
+        for (int col = 0; col < Mhalf_complex.outerSize(); ++col)
+            for (SpMatcd::InnerIterator it(Mhalf_complex, col); it; ++it)
+                if (std::abs(it.value().real()) > 1e-15)
+                    mr.emplace_back(it.row(), it.col(), it.value().real());
+
+        Khalf_real_.resize(n_free_, n_free_);
+        Mhalf_real_.resize(n_free_, n_free_);
+        Khalf_real_.setFromTriplets(kr.begin(), kr.end());
+        Mhalf_real_.setFromTriplets(mr.begin(), mr.end());
+    }
+
+    real_matrices_precomputed_ = true;
 }
 
 std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
@@ -700,12 +757,6 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     precompute_cyclic_projections(K_eff, M_sector);
 
     // Use cached projections
-    const SpMatcd& Kcf = Kcf_;
-    const SpMatcd& Kpf = Kpf_;
-    const SpMatcd& Mcf = Mcf_;
-    const SpMatcd& Mpf = Mpf_;
-    const SpMatcd& Kpf_H = Kpf_H_;
-    const SpMatcd& Mpf_H = Mpf_H_;
     const SpMatcd& T0 = T0_;
     const std::set<int>& right_dof_set = right_dof_set_;
     const std::set<int>& hub_red_set = hub_red_set_;
@@ -824,10 +875,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
             // Phase factor needed by both paths (also used by Coriolis G below)
             std::complex<double> P(std::cos(k * alpha), std::sin(k * alpha));
+            std::complex<double> Pc = std::conj(P);
 
             // Fast path: K_k = K_const + P*K_phase + conj(P)*K_phase^H
-            SpMatcd K_free = Kcf + P * Kpf + std::conj(P) * Kpf_H;
-            SpMatcd M_free = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+            SpMatcd K_free = Kcf_ + P * Kpf_ + Pc * Kpf_H_;
+            SpMatcd M_free = Mcf_ + P * Mpf_ + Pc * Mpf_H_;
 
             // Add BEM potential flow added mass (precomputed, one sparse addition)
             if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()) &&
@@ -895,30 +947,35 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 config.nev = std::min(nev_target + n_extra, n_free - 1);
                 if (config.nev <= 0) return std::nullopt;
                 config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
-                // Shift near lowest eigenvalue: use small positive value
-                // (shift-invert finds eigenvalues nearest to this)
-                config.shift = 1.0;  // Standard GEP: Spectra targets smallest ω² above shift
+                // Shift for shift-invert: eigenvalues nearest sigma are found first.
+                // sigma=1.0 targets the lowest positive ω² (bending modes).
+                config.shift = 1.0;
 
                 bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
 
                 if (is_real_case) {
-                    SpMatd K_real(n_free, n_free), M_real(n_free, n_free);
-                    {
-                        std::vector<Triplet> kr, mr;
-                        for (int col = 0; col < K_free.outerSize(); ++col) {
-                            for (SpMatcd::InnerIterator it(K_free, col); it; ++it)
-                                if (std::abs(it.value().real()) > 1e-15)
-                                    kr.emplace_back(it.row(), it.col(), it.value().real());
-                        }
-                        for (int col = 0; col < M_free.outerSize(); ++col) {
+                    // Use precomputed real matrices (P8 optimization).
+                    // When BEM added mass is active, M_free already includes it
+                    // but precomputed M0_real_ does not, so extract from M_free.
+                    const SpMatd& K_real = (k == 0) ? K0_real_ : Khalf_real_;
+                    bool bem_active = bem_precomputed_ &&
+                        k < static_cast<int>(M_added_free_cache_.size()) &&
+                        M_added_free_cache_[k].nonZeros() > 0;
+                    if (bem_active) {
+                        // Extract real parts from M_free (which has BEM mass added)
+                        SpMatd M_real(n_free, n_free);
+                        std::vector<Triplet> mr;
+                        mr.reserve(M_free.nonZeros());
+                        for (int col = 0; col < M_free.outerSize(); ++col)
                             for (SpMatcd::InnerIterator it(M_free, col); it; ++it)
                                 if (std::abs(it.value().real()) > 1e-15)
                                     mr.emplace_back(it.row(), it.col(), it.value().real());
-                        }
-                        K_real.setFromTriplets(kr.begin(), kr.end());
                         M_real.setFromTriplets(mr.begin(), mr.end());
+                        std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
+                    } else {
+                        const SpMatd& M_real = (k == 0) ? M0_real_ : Mhalf_real_;
+                        std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                     }
-                    std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                 } else {
                     std::tie(result, status) = modal_solver.solve_complex_hermitian(
                         K_free, M_free, config);
@@ -1000,7 +1057,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     double bem_norm = 0.0;
                     if (bem_precomputed_ && k < static_cast<int>(M_added_free_cache_.size()))
                         bem_norm = M_added_free_cache_[k].norm();
-                    SpMatcd M_struct = Mcf + P * Mpf + std::conj(P) * Mpf_H;
+                    SpMatcd M_struct = Mcf_ + P * Mpf_ + std::conj(P) * Mpf_H_;
                     double M_struct_norm = M_struct.norm();
 
                     std::cerr << "  [residual] k=" << k

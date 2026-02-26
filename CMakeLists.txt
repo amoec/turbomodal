@@ -28,6 +28,38 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
+# --- Performance: architecture-specific SIMD & safe fast-math ---
+option(NATIVE_ARCH "Enable -march=native for local builds" OFF)
+
+if(MSVC)
+  add_compile_options(/arch:AVX2)
+  # Whole-program optimization (LTO equivalent)
+  add_compile_options(/GL)
+  add_link_options(/LTCG)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  if(NATIVE_ARCH)
+    add_compile_options(-march=native)
+  elseif(DEFINED SKBUILD)
+    # Wheel builds: target AVX2+FMA on x86_64 (covers 2015+ CPUs)
+    # ARM (Apple Silicon) already has NEON enabled by default
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+      add_compile_options(-march=x86-64-v3)
+    endif()
+  endif()
+  # Safe fast-math subset: no errno checks, no trap-on-NaN.
+  # Does NOT change numerical results (unlike full -ffast-math).
+  add_compile_options(-fno-math-errno -fno-trapping-math)
+endif()
+
+# --- LTO for Release builds ---
+if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
+  if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+  endif()
+endif()
+
 option(BUILD_PYTHON "Build Python bindings" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_VALIDATION_TESTS "Build slow validation tests (requires mesh files)" OFF)
@@ -73,6 +105,14 @@ target_include_directories(spectra INTERFACE
   "${CMAKE_SOURCE_DIR}/external/spectra/include"
 )
 
+# --- BLAS/LAPACK backend for Eigen (redirects dense ops to hardware-optimized routines) ---
+# macOS: Apple Accelerate (vecLib), Linux: OpenBLAS, Windows: OpenBLAS
+find_package(BLAS QUIET)
+find_package(LAPACK QUIET)
+if(BLAS_FOUND)
+  message(STATUS "BLAS found: ${BLAS_LIBRARIES}")
+endif()
+
 # --- OpenMP (optional) ---
 if(USE_OPENMP)
   find_package(OpenMP)
@@ -98,6 +138,16 @@ add_library(turbomodal_core STATIC
 )
 target_include_directories(turbomodal_core PUBLIC include)
 target_link_libraries(turbomodal_core PUBLIC Eigen3::Eigen spectra)
+if(BLAS_FOUND)
+  target_compile_definitions(turbomodal_core PUBLIC EIGEN_USE_BLAS)
+  target_link_libraries(turbomodal_core PUBLIC ${BLAS_LIBRARIES})
+  # LAPACKE: only enable on platforms with a C LAPACKE interface.
+  # Apple Accelerate provides LAPACK (Fortran) but not LAPACKE (C wrapper).
+  if(LAPACK_FOUND AND NOT APPLE)
+    target_compile_definitions(turbomodal_core PUBLIC EIGEN_USE_LAPACKE)
+    target_link_libraries(turbomodal_core PUBLIC ${LAPACK_LIBRARIES})
+  endif()
+endif()
 if(OpenMP_CXX_FOUND)
   target_link_libraries(turbomodal_core PUBLIC OpenMP::OpenMP_CXX)
 endif()

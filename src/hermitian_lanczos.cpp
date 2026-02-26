@@ -145,40 +145,76 @@ void HermitianLanczosEigenSolver::implicit_restart(
         shifts[i] = ritz(ritz_idx[i]);
     }
 
-    // 3. Apply implicit QR shifts to the tridiagonal T.
-    // Each shift: T - μI = QR, T' = RQ + μI = Q^T T Q.
-    // Accumulate Q_total = Q_1 * Q_2 * ... * Q_{n_shifts}.
+    // 3. Apply implicit QR shifts via Givens rotations on the tridiagonal.
+    // Each shift applies a similarity transform T' = Q^T * T * Q where Q
+    // is the orthogonal factor of QR(T - mu*I). For a tridiagonal, this is
+    // done by chasing the bulge with Givens rotations.
+    //
+    // We use a sparse representation but apply the rotations on the dense
+    // tridiagonal. The Q_total accumulation is O(ncv²) per shift, which
+    // dominates, but this is still much cheaper than the O(ncv³) Householder
+    // approach since we avoid forming full dense matrices for each QR.
     Eigen::MatrixXd Q_total = Eigen::MatrixXd::Identity(ncv, ncv);
 
     for (int s = 0; s < n_shifts; s++) {
-        // Build current T from alpha, beta
-        Eigen::MatrixXd Ts = Eigen::MatrixXd::Zero(ncv, ncv);
-        for (int i = 0; i < ncv; i++) {
-            Ts(i, i) = alpha(i);
-            if (i < ncv - 1) {
-                Ts(i, i + 1) = beta(i);
-                Ts(i + 1, i) = beta(i);
+        double mu = shifts[s];
+
+        // Implicit QR step on tridiagonal with shift mu.
+        // We work directly on alpha/beta vectors.
+        // Step 1: Givens rotation G(0,1) to zero (alpha(0)-mu, beta(0))
+        double bulge;  // fill-in element from rotation
+
+        double x = alpha(0) - mu;
+        double z = beta(0);
+
+        for (int i = 0; i < ncv - 1; i++) {
+            double r = std::hypot(x, z);
+            double c, sn;
+            if (r < 1e-300) {
+                c = 1.0; sn = 0.0;
+            } else {
+                c = x / r; sn = z / r;
+            }
+
+            // Apply similarity G(i,i+1)^T * T * G(i,i+1) to tridiagonal.
+            // Only entries involving rows/cols i and i+1 change.
+            // We need to handle 3 entries: alpha(i), alpha(i+1), beta(i),
+            // plus beta(i-1) (modified by previous rotation's right-multiply)
+            // and beta(i+1) (creates bulge for next step).
+
+            if (i > 0) {
+                // beta(i-1) was modified by right-multiply of previous rotation
+                // It should now be: r (the length computed above)
+                beta(i - 1) = r;
+            }
+
+            double a0 = alpha(i);
+            double a1 = alpha(i + 1);
+            double b0 = beta(i);
+
+            // Diagonal elements after similarity transform
+            alpha(i)     = c * c * a0 + 2.0 * c * sn * b0 + sn * sn * a1;
+            alpha(i + 1) = sn * sn * a0 - 2.0 * c * sn * b0 + c * c * a1;
+            // Off-diagonal beta(i)
+            beta(i) = c * sn * (a1 - a0) + (c * c - sn * sn) * b0;
+
+            // Bulge: rotation creates fill at (i+2, i) = sn * beta(i+1)
+            if (i + 2 < ncv) {
+                bulge = sn * beta(i + 1);
+                beta(i + 1) = c * beta(i + 1);
+                // Next iteration chases this bulge
+                x = beta(i);       // new off-diagonal (will be replaced by r)
+                z = bulge;         // bulge element to zero out
+            }
+
+            // Accumulate Q_total columns i, i+1
+            for (int row = 0; row < ncv; row++) {
+                double q0 = Q_total(row, i);
+                double q1 = Q_total(row, i + 1);
+                Q_total(row, i)     = c * q0 + sn * q1;
+                Q_total(row, i + 1) = -sn * q0 + c * q1;
             }
         }
-
-        // QR factorization of (T - μI)
-        Eigen::MatrixXd shifted = Ts - shifts[s] * Eigen::MatrixXd::Identity(ncv, ncv);
-        Eigen::HouseholderQR<Eigen::MatrixXd> qr(shifted);
-        Eigen::MatrixXd Q = qr.householderQ();
-        Eigen::MatrixXd R = qr.matrixQR().triangularView<Eigen::Upper>();
-
-        // T' = Q^T * T * Q  (equivalent to RQ + μI)
-        Eigen::MatrixXd T_new = Q.transpose() * Ts * Q;
-
-        // Extract updated alpha, beta from T_new (it's still tridiagonal)
-        for (int i = 0; i < ncv; i++) {
-            alpha(i) = T_new(i, i);
-            if (i < ncv - 1) {
-                beta(i) = T_new(i, i + 1);
-            }
-        }
-
-        Q_total = Q_total * Q;
     }
 
     // 4. Update the Lanczos basis V and MV cache.
