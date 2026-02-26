@@ -256,7 +256,7 @@ class VirtualSensorArray:
             pos = np.asarray(sensor.position, dtype=np.float64)
             direction = np.asarray(sensor.direction, dtype=np.float64)
             dir_norm = np.linalg.norm(direction)
-            if dir_norm < 1e-30:
+            if dir_norm < 1e-30:  # effectively zero; guard against degenerate direction vectors
                 raise ValueError(
                     f"Sensor {s_idx}: zero-norm direction vector {sensor.direction}"
                 )
@@ -270,7 +270,7 @@ class VirtualSensorArray:
             # DOFs for node *nearest* are at indices [3*nearest, 3*nearest+1, 3*nearest+2].
             base_dof = 3 * nearest
             for ax in range(3):
-                if abs(direction[ax]) > 1e-15:
+                if abs(direction[ax]) > 1e-15:  # skip negligible components for sparse interpolation
                     rows.append(s_idx)
                     cols.append(base_dof + ax)
                     vals.append(float(direction[ax] * sensor.sensitivity))

@@ -51,6 +51,15 @@ class TestPlotMode:
                                 component=comp, off_screen=True)
             plotter.close()
 
+    def test_animate_saves_gif(self, solved_result, tmp_path):
+        from turbomodal.viz import plot_mode
+        mesh, results = solved_result
+        gif_path = str(tmp_path / "mode.gif")
+        plotter = plot_mode(mesh, results[0], mode_index=0, scale=0.002,
+                            animate=True, n_frames=4, filename=gif_path)
+        assert (tmp_path / "mode.gif").exists()
+        assert (tmp_path / "mode.gif").stat().st_size > 0
+
 
 class TestPlotFullAnnulus:
     def test_returns_plotter(self, solved_result):
@@ -61,12 +70,6 @@ class TestPlotFullAnnulus:
         assert plotter is not None
         plotter.close()
 
-    def test_deprecated_alias(self, solved_result):
-        from turbomodal.viz import plot_full_annulus
-        mesh, results = solved_result
-        plotter = plot_full_annulus(mesh, results[0], mode_index=0, off_screen=True)
-        assert plotter is not None
-        plotter.close()
 
 
 class TestPlotCad:

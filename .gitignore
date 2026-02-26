@@ -47,6 +47,7 @@ Thumbs.db
 desktop.ini
 
 # Testing
+Testing/
 .pytest_cache/
 .coverage
 htmlcov/

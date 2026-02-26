@@ -877,7 +877,7 @@ class TreeModeIDModel:
             self._amp_reg = LGBMRegressor(n_estimators=100, verbose=-1)
             self._vel_reg = LGBMRegressor(n_estimators=100, verbose=-1)
             self._backend = "lightgbm"
-        except Exception:
+        except ImportError:
             try:
                 from xgboost import XGBClassifier, XGBRegressor
 
@@ -890,7 +890,7 @@ class TreeModeIDModel:
                 self._amp_reg = XGBRegressor(n_estimators=100)
                 self._vel_reg = XGBRegressor(n_estimators=100)
                 self._backend = "xgboost"
-            except Exception:
+            except ImportError:
                 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
                 self._mode_clf = RandomForestClassifier(n_estimators=100, n_jobs=-1)

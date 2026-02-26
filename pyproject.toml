@@ -6,9 +6,30 @@ build-backend = "scikit_build_core.build"
 name = "turbomodal"
 dynamic = ["version"]
 description = "Cyclic symmetry FEA solver for turbomachinery modal analysis"
-license = {text = "MIT"}
-authors = [{name = "Adam Moëc"}]
+license = { text = "MIT" }
+authors = [{ name = "Adam Moëc" }]
 requires-python = ">=3.9"
+keywords = [
+    "finite-element",
+    "modal-analysis",
+    "cyclic-symmetry",
+    "turbomachinery",
+    "machine-learning",
+    "vibration",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "numpy>=1.22",
     "scipy>=1.8",
@@ -17,11 +38,14 @@ dependencies = [
     "gmsh>=4.12",
     "meshio>=5.3",
     "h5py>=3.7",
+    "imageio>=2.9",
 ]
 
 [project.urls]
 Repository = "https://github.com/amoec/turbomodal"
 Documentation = "https://github.com/amoec/turbomodal/tree/main/docs"
+"Bug Tracker" = "https://github.com/amoec/turbomodal/issues"
+Changelog = "https://github.com/amoec/turbomodal/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov"]

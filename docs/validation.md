@@ -230,7 +230,7 @@ ladder stops and returns the best model seen so far.
 
 ### Overview
 
-The project has 14 C++ test suites and 14 Python test files providing
+The project has 15 C++ test suites and 13 Python test files providing
 comprehensive coverage of all four subsystems.
 
 ### C++ Test Suites
@@ -248,6 +248,7 @@ Run via `ctest --output-on-failure` from the build directory.
 | `SolverTests`            | modal_solver        | ~6    | Eigenvalue solver                                |
 | `CyclicTests`            | cyclic_solver       | ~8    | Cyclic symmetry transformation                   |
 | `AddedMassTests`         | added_mass          | ~4    | Kwak AVMI formula                                |
+| `PotentialFlowTests`     | potential_flow      | ~5    | Meridional mesh, potential flow BEM              |
 | `RotatingTests`          | rotating_effects    | ~6    | Centrifugal stiffening, spin softening           |
 | `DampingTests`           | damping             | 14    | Rayleigh, modal, aerodynamic, effective damping  |
 | `ForcedResponseTests`    | forced_response     | 18    | Modal FRF, modal forces, EO aliasing, participation factors |

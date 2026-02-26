@@ -4,8 +4,9 @@ Cyclic symmetry FEA solver with ML-based modal identification for turbomachinery
 
 **Platforms:** Linux, macOS, Windows &nbsp;|&nbsp; **Python:** 3.9+ &nbsp;|&nbsp; **C++:** C++17
 
-> **Note:** This package is not yet published to PyPI. Install from source
-> (see [Installation](#installation) below).
+> Pre-built wheels are available on the
+> [Releases](https://github.com/amoec/turbomodal/releases) page.
+> See [Installation](#installation) below for building from source.
 
 ## Overview
 
