@@ -141,12 +141,13 @@ target_link_libraries(turbomodal_core PUBLIC Eigen3::Eigen spectra)
 if(BLAS_FOUND)
   target_compile_definitions(turbomodal_core PUBLIC EIGEN_USE_BLAS)
   target_link_libraries(turbomodal_core PUBLIC ${BLAS_LIBRARIES})
-  # LAPACKE: only enable on platforms with a C LAPACKE interface.
-  # Apple Accelerate provides LAPACK (Fortran) but not LAPACKE (C wrapper).
-  if(LAPACK_FOUND AND NOT APPLE)
-    target_compile_definitions(turbomodal_core PUBLIC EIGEN_USE_LAPACKE)
+  if(LAPACK_FOUND)
     target_link_libraries(turbomodal_core PUBLIC ${LAPACK_LIBRARIES})
   endif()
+  # Note: EIGEN_USE_LAPACKE is intentionally NOT enabled.
+  # LAPACKE (the C wrapper for LAPACK) is unavailable on macOS Accelerate
+  # and often missing from libopenblas-dev on Linux (needs liblapacke-dev).
+  # EIGEN_USE_BLAS alone covers the high-value GEMM acceleration.
 endif()
 if(OpenMP_CXX_FOUND)
   target_link_libraries(turbomodal_core PUBLIC OpenMP::OpenMP_CXX)
