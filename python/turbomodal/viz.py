@@ -13,6 +13,21 @@ from turbomodal._core import Mesh, ModalResult
 _VTK_QUADRATIC_TETRA = 24
 
 
+def _save_gif(filename: str, frames: list, duration: int = 33) -> None:
+    """Save frames as an animated GIF with a shared global palette."""
+    from PIL import Image
+
+    imgs = [Image.fromarray(f) for f in frames]
+    # Quantize all frames to a single palette derived from the first frame
+    # so the colorbar gradient doesn't flicker between frames.
+    palette = imgs[0].quantize(colors=256)
+    quantized = [img.quantize(palette=palette, dither=0) for img in imgs]
+    quantized[0].save(
+        filename, save_all=True, append_images=quantized[1:],
+        duration=duration, loop=0,
+    )
+
+
 def _mesh_to_pyvista(mesh: Mesh):
     """Convert a turbomodal Mesh to a PyVista UnstructuredGrid."""
     import pyvista as pv
@@ -521,7 +536,7 @@ def plot_mode(
                 u_real = np.real(mode_3d * spatial_phase * time_phase) @ R.T
                 i = s * n_nodes
                 all_pts[i:i + n_nodes] = rotated_rest[s] + scale * u_real
-                all_scl[i:i + n_nodes] = np.sqrt(np.sum(u_real ** 2, axis=1))
+                all_scl[i:i + n_nodes] = np.sqrt(np.sum(u_real ** 2, axis=1)) * scale
             return all_pts, all_scl
 
         pts, scl = _build_annulus()
@@ -543,8 +558,12 @@ def plot_mode(
         # Full-annulus animation
         save_only = filename is not None
         plotter = pv.Plotter(off_screen=off_screen or save_only)
-        plotter.add_mesh(grid, scalars="displacement", cmap="turbo",
-                         show_edges=False, clim=clim)
+        actor = plotter.add_mesh(grid, scalars="displacement", cmap="turbo",
+                                 show_edges=False, clim=clim)
+        mapper = actor.GetMapper()
+        mapper.SetUseLookupTableScalarRange(True)
+        lut = mapper.GetLookupTable()
+        lut.SetTableRange(*clim)
         plotter.add_text(title, font_size=12)
         plotter.add_axes()
 
@@ -552,21 +571,22 @@ def plot_mode(
             phase = np.exp(2j * np.pi * frame_idx / n_frames)
             pts, scl = _build_annulus(phase)
             grid.points = pts
-            grid.point_data["displacement"] = scl
+            grid.point_data["displacement"][:] = scl
+            grid.GetPointData().Modified()
 
         if save_only:
-            import imageio
             frames = []
             for f in range(n_frames):
                 _update_annulus(f)
                 plotter.render()
                 frames.append(plotter.screenshot(return_img=True))
             plotter.close()
-            imageio.mimsave(filename, frames, duration=33, loop=0)
+            _save_gif(filename, frames)
             return plotter
 
         def _cb(step):
             _update_annulus(step % n_frames)
+            plotter.render()
 
         plotter.add_timer_event(max_steps=n_frames * 100, duration=33,
                                 callback=_cb)
@@ -589,8 +609,12 @@ def plot_mode(
         deformed_grid.points = nodes + disp
         deformed_grid.point_data["displacement"] = np.sqrt(
             np.sum(disp ** 2, axis=1))
-        plotter.add_mesh(deformed_grid, scalars="displacement",
-                         cmap="turbo", show_edges=False, clim=clim)
+        actor = plotter.add_mesh(deformed_grid, scalars="displacement",
+                                 cmap="turbo", show_edges=False, clim=clim)
+        mapper = actor.GetMapper()
+        mapper.SetUseLookupTableScalarRange(True)
+        lut = mapper.GetLookupTable()
+        lut.SetTableRange(*clim)
         plotter.add_text(title, font_size=12)
         plotter.add_axes()
 
@@ -598,22 +622,23 @@ def plot_mode(
             phase = np.exp(2j * np.pi * frame_idx / n_frames)
             disp = np.real(mode_3d * phase) * scale
             deformed_grid.points = nodes + disp
-            deformed_grid.point_data["displacement"] = np.sqrt(
+            deformed_grid.point_data["displacement"][:] = np.sqrt(
                 np.sum(disp ** 2, axis=1))
+            deformed_grid.GetPointData().Modified()
 
         if save_only:
-            import imageio
             frames = []
             for f in range(n_frames):
                 _update_sector(f)
                 plotter.render()
                 frames.append(plotter.screenshot(return_img=True))
             plotter.close()
-            imageio.mimsave(filename, frames, duration=33, loop=0)
+            _save_gif(filename, frames)
             return plotter
 
         def _cb(step):
             _update_sector(step % n_frames)
+            plotter.render()
 
         plotter.add_timer_event(max_steps=n_frames * 100, duration=33,
                                 callback=_cb)
