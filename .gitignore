@@ -73,3 +73,4 @@ env/
 logs/
 tmp/
 filestructure.txt
+build/.cmake
