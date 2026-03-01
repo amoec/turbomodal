@@ -1,11 +1,13 @@
 # turbomodal
-
+>
+> [!NOTE]
+> This is a **work in progress**, and the repository is considered in a **beta state**. The roadmap to the `v1.0.0` official release can be found [here](ROADMAP.md).
+---
 Cyclic symmetry FEA solver with ML-based modal identification for turbomachinery bladed disks.
 
 **Platforms:** Linux, macOS, Windows &nbsp;|&nbsp; **Python:** 3.9+ &nbsp;|&nbsp; **C++:** C++17
 
-> Pre-built wheels are available on the
-> [Releases](https://github.com/amoec/turbomodal/releases) page.
+> Pre-built wheels are available on the [Releases](https://github.com/amoec/turbomodal/releases) page.
 > See [Installation](#installation) below for building from source.
 
 <p align="center">
@@ -23,80 +25,25 @@ combines a C++ finite element solver that exploits cyclic symmetry with a
 Python machine learning pipeline that identifies vibration modes from sensor
 measurements.
 
-The core use case is identifying **nodal diameters**, **whirl directions**,
-**natural frequencies**, and **vibration amplitudes** from time-domain signals
-recorded by blade tip timing probes, strain gauges, or casing accelerometers.
-The project is organised around four subsystems:
+## Documentation
 
-- **Subsystem A** -- FEA and geometry (C++ with pybind11 bindings)
-- **Subsystem B** -- Signal synthesis and noise injection (Python)
-- **Subsystem C** -- ML training and inference pipeline (Python)
-- **Subsystem D** -- Sensor optimisation and model explainability (Python)
-
-## Key Features
-
-- **C++ finite element solver** with cyclic symmetry exploitation via
-  `CyclicSymmetrySolver`. Quadratic tetrahedra (TET10) for accurate
-  displacement and stress fields. Rotating effects, added mass, damping,
-  forced response, and Fundamental Mistuning Model (FMM) solvers.
-- **Signal synthesis** with configurable noise models -- Gaussian white noise,
-  harmonic interference, sensor drift, bandwidth limiting, ADC quantisation,
-  and signal dropout via `NoiseConfig` and `apply_noise`.
-- **6-tier ML complexity ladder** that trains models in order of complexity and
-  stops as soon as performance targets are met:
-  Tier 1 Linear, Tier 2 LightGBM/XGBoost/RandomForest, Tier 3 SVM,
-  Tier 4 Shallow Neural Net, Tier 5 1-D CNN, Tier 6 Conv+BiLSTM.
-- **Model variants**: Lasso regression (Tier 1), 1-D ResNet (Tier 5),
-  and Transformer encoder (Tier 6).
-- **Physics-informed feature extraction** with frequency ratios, centrifugal
-  stiffening corrections, and temperature-dependent Young's modulus scaling.
-- **Automatic hyperparameter optimization** via Optuna TPE sampling with
-  GroupKFold cross-validation.
-- **Uncertainty quantification** via MC Dropout, Deep Ensembles, and
-  heteroscedastic output heads with aleatoric/epistemic variance decomposition.
-- **Sensor placement optimisation** using Fisher Information Matrix
-  pre-screening, greedy forward selection, and Bayesian refinement via Optuna,
-  with a minimize-sensors optimization mode.
-- **Model explainability** -- SHAP values for feature importance, Grad-CAM
-  attribution for CNN-based models, four confidence calibration methods
-  (Platt, isotonic, temperature scaling, conformal prediction), model
-  selection reports, and per-prediction explanation cards.
-- **Physics consistency validation** -- six rule-based checks (including
-  epistemic uncertainty threshold) that flag anomalous predictions.
-- **HDF5 dataset management** with parametric sweeps driven by Latin Hypercube
-  Sampling via `run_parametric_sweep`.
-- **MLflow experiment tracking** integration with automatic no-op fallback
-  when mlflow is not installed.
-
-## Architecture
-
-```txt
-+---------------------------+       +-----------------------------+
-|  Subsystem A              |       |  Subsystem B                |
-|  FEA & Geometry (C++)     |       |  Signals & Noise (Python)   |
-|                           |       |                             |
-|  load_cad / load_mesh     |       |  VirtualSensorArray         |
-|  CyclicSymmetrySolver     +------>+  SignalGenerationConfig     |
-|  FMMSolver (mistuning)    | mode  |  NoiseConfig / apply_noise  |
-|  ForcedResponseSolver     | shapes|  generate_signals_for_      |
-|  identify_modes (C++)     |       |      condition              |
-+---------------------------+       +-------------+---------------+
-                                                  |
-                                         signals  |
-                                                  v
-+---------------------------+       +-------------+---------------+
-|  Subsystem D              |       |  Subsystem C                |
-|  Optimisation &           |       |  ML Pipeline (Python)       |
-|  Explainability (Python)  |       |                             |
-|                           +<------+  extract_features           |
-|  optimize_sensor_         | preds |  train_mode_id_model        |
-|      placement            |       |  TIER_MODELS (1-6)          |
-|  compute_shap_values      |       |  predict_with_uncertainty   |
-|  compute_grad_cam         |       |  evaluate_model             |
-|  physics_consistency_     |       |  build_feature_matrix       |
-|  calibrate_confidence     |       |  MLflow / Optuna            |
-+---------------------------+       +-----------------------------+
-```
+- [Installation Guide](docs/installation.md)
+- [Quick Start Tutorial](docs/quickstart.md)
+- [Architecture](docs/architecture.md)
+- API Reference:
+  [Core](docs/api/core.md) |
+  [Signals](docs/api/signals.md) |
+  [Data](docs/api/data.md) |
+  [Analysis](docs/api/analysis.md) |
+  [ML](docs/api/ml.md) |
+  [Optimization](docs/api/optimization.md)
+- [ML Guide](docs/ml-guide.md)
+- [Validation Criteria](docs/validation.md)
+- Examples:
+  [Basic FEA](examples/python_example.py) |
+  [Data Generation](examples/data_generation_pipeline.py) |
+  [ML Training](examples/ml_pipeline.py) |
+  [Visualizations](examples/generate_visualizations.py)
 
 ## Quick Start
 
@@ -123,14 +70,14 @@ sweep = tm.rpm_sweep(mesh, mat, np.linspace(0, 15000, 20), num_modes=5)
 tm.plot_campbell(sweep, engine_orders=[1, 2, 36])
 
 # Animate a mode shape and save as GIF
-tm.plot_mode(mesh, results[2], mode_index=0, scale=0.005,
-             animate=True, full_annulus=True, filename="nd2.gif")
+tm.plot_mode(mesh, results[3], mode_index=2, scale=0.005,
+             animate=True, full_annulus=False, filename="nd3_mode2_sector.gif")
 ```
 
 <p align="center">
-  <img src="docs/assets/nd2_sector.gif" width="55%" alt="Single sector mode animation">
+  <img src="docs/assets/nd3_mode2_sector.gif" width="67%" alt="Single sector mode animation">
 </p>
-<p align="center"><em>Single-sector ND=2 mode shape with wireframe reference geometry.</em></p>
+<p align="center"><em>Single-sector ND=3, mode 2 shape with wireframe reference geometry.</em></p>
 
 ### Signal Generation and ML Pipeline
 
@@ -221,62 +168,6 @@ ML extras (`pip install -e ".[ml]"`):
 
 See [docs/installation.md](docs/installation.md) for detailed platform-specific
 instructions.
-
-## Documentation
-
-- [Installation Guide](docs/installation.md)
-- [Quick Start Tutorial](docs/quickstart.md)
-- [Architecture](docs/architecture.md)
-- API Reference:
-  [Core](docs/api/core.md) |
-  [Signals](docs/api/signals.md) |
-  [Data](docs/api/data.md) |
-  [Analysis](docs/api/analysis.md) |
-  [ML](docs/api/ml.md) |
-  [Optimization](docs/api/optimization.md)
-- [ML Guide](docs/ml-guide.md)
-- [Validation Criteria](docs/validation.md)
-- Examples:
-  [Basic FEA](examples/python_example.py) |
-  [Data Generation](examples/data_generation_pipeline.py) |
-  [ML Training](examples/ml_pipeline.py) |
-  [Visualizations](examples/generate_visualizations.py)
-
-## Project Structure
-
-```txt
-turbomodal/
-  include/turbomodal/       C++ headers (mesh, element, assembler, solvers)
-  src/                      C++ implementation + pybind11 bindings
-  python/turbomodal/        Python package
-    __init__.py              Public API re-exports
-    io.py                    Mesh and CAD import (gmsh, meshio)
-    solver.py                High-level solve(), rpm_sweep(), campbell_data()
-    viz.py                   PyVista / Matplotlib visualisation
-    sensors.py               VirtualSensorArray and sensor placement
-    noise.py                 Noise models (Gaussian, drift, quantisation, ...)
-    signal_gen.py            End-to-end signal generation pipeline
-    dataset.py               HDF5 dataset export / import
-    parametric.py            Latin Hypercube parametric sweep orchestrator
-    ml/
-      __init__.py            Subsystem C public API
-      features.py            Feature extraction (STFT, mel, order tracking, TWD)
-      models.py              Tier 1-6 model implementations
-      pipeline.py            Training loop, complexity ladder, MLflow proxy
-    optimization/
-      __init__.py            Subsystem D public API
-      sensor_placement.py    FIM, greedy selection, Bayesian refinement
-      explainability.py      SHAP, Grad-CAM, physics checks, calibration
-  external/spectra/          Spectra eigenvalue library (git submodule)
-  tests/                     C++ GTest unit tests
-  python/tests/              Python pytest suite
-  examples/
-    python_example.py        Basic FEA: load, solve, visualize
-    data_generation_pipeline.py  Mesh -> solve -> sensors -> signals -> HDF5
-    ml_pipeline.py           Signals -> features -> train -> evaluate
-    generate_visualizations.py   Batch PNG export for review
-  docs/                      Documentation
-```
 
 ## Requirements
 
