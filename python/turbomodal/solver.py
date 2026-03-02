@@ -530,18 +530,18 @@ def campbell_data(
             # Check if Coriolis splitting is already present
             has_coriolis = np.any(whirl_rot != 0)
 
-            if has_coriolis and omega > 0 and k > 0:
+            if has_coriolis and abs(omega) > 0 and k > 0:
                 # Coriolis modes: each mode already has FW/BW designation.
                 # Convert to stationary frame per-mode.
-                k_omega_hz = k * omega / (2.0 * np.pi)
+                k_omega_hz = k * abs(omega) / (2.0 * np.pi)
                 stat_f = np.abs(f_rot + whirl_rot * k_omega_hz)
                 order = np.argsort(stat_f)
                 n_out = min(n_modes, nm)
                 frequencies[i, h_idx, :n_out] = stat_f[order][:n_out]
                 whirl[i, h_idx, :n_out] = whirl_rot[order][:n_out]
-            elif omega > 0 and 0 < k < max_k:
+            elif abs(omega) > 0 and 0 < k < max_k:
                 # Kinematic splitting: duplicate each mode into FW + BW
-                k_omega_hz = k * omega / (2.0 * np.pi)
+                k_omega_hz = k * abs(omega) / (2.0 * np.pi)
                 fw = f_rot + k_omega_hz
                 bw = np.abs(f_rot - k_omega_hz)
                 all_f = np.empty(2 * nm)
