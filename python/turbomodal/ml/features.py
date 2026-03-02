@@ -242,9 +242,9 @@ def extract_features(
     # Order tracking features
     # ------------------------------------------------------------------
     elif feature_type == "order_tracking":
-        if config.rpm <= 0.0:
+        if config.rpm == 0.0:
             raise ValueError(
-                "Order tracking requires config.rpm > 0, "
+                "Order tracking requires config.rpm != 0, "
                 f"got rpm={config.rpm}"
             )
         parts = []
@@ -285,9 +285,9 @@ def extract_features(
     # Physics-informed features
     # ------------------------------------------------------------------
     elif feature_type == "physics":
-        if config.rpm <= 0.0:
+        if config.rpm == 0.0:
             raise ValueError(
-                "Physics features require config.rpm > 0, "
+                "Physics features require config.rpm != 0, "
                 f"got rpm={config.rpm}"
             )
         # Base spectrogram per sensor
@@ -413,15 +413,15 @@ def compute_order_spectrum(
     Raises
     ------
     ValueError
-        If ``rpm <= 0`` or the signal is empty.
+        If ``rpm == 0`` or the signal is empty.
     """
     signal = np.asarray(signal, dtype=np.float64).ravel()
     N = len(signal)
 
     if N == 0:
         raise ValueError("Signal is empty; cannot compute order spectrum.")
-    if rpm <= 0.0:
-        raise ValueError(f"rpm must be positive, got {rpm}")
+    if rpm == 0.0:
+        raise ValueError(f"rpm must be non-zero, got {rpm}")
 
     X = np.fft.rfft(signal)  # (N//2 + 1,) complex
     df = sample_rate / N  # frequency resolution
@@ -432,7 +432,7 @@ def compute_order_spectrum(
     n_bins = len(X)
 
     for idx, n in enumerate(orders):
-        f_n = n * rpm / 60.0
+        f_n = n * abs(rpm) / 60.0
         bin_idx = int(round(f_n / df))
         if 0 <= bin_idx < n_bins:
             amplitudes[idx] = X[bin_idx] * (2.0 / N)

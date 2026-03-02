@@ -66,8 +66,8 @@ def generate_signals_for_condition(
     """
     n_sensors = len(sensor_array.config.sensors)
     duration = config.duration
-    if config.num_revolutions > 0 and rpm > 0:
-        duration = config.num_revolutions * 60.0 / rpm
+    if config.num_revolutions > 0 and rpm != 0:
+        duration = config.num_revolutions * 60.0 / abs(rpm)
 
     n_samples = int(duration * config.sample_rate)
     t = np.arange(n_samples) / config.sample_rate
@@ -76,7 +76,9 @@ def generate_signals_for_condition(
     rng = np.random.default_rng(config.seed)
 
     # Rotation rate in Hz for stationary-frame frequency conversion
-    omega_hz = rpm / 60.0
+    # Use magnitude — the sign of rotation doesn't affect the kinematic
+    # frequency splitting observed by stationary-frame sensors.
+    omega_hz = abs(rpm) / 60.0
 
     mode_count = 0
     for result in modal_results:
@@ -203,7 +205,7 @@ def generate_dataset_signals(
 
     duration = config.duration
     if config.num_revolutions > 0 and len(conditions) > 0:
-        rpm = conditions[0].rpm if conditions[0].rpm > 0 else 3000
+        rpm = abs(conditions[0].rpm) if conditions[0].rpm != 0 else 3000
         duration = config.num_revolutions * 60.0 / rpm
 
     n_samples = int(duration * config.sample_rate)

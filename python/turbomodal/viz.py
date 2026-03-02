@@ -1134,6 +1134,22 @@ def _unique_nd(pts: list[tuple]) -> list[tuple]:
     return out
 
 
+def _seg_intersect(p1, p2, p3, p4):
+    """Return the intersection point of segments *p1*-*p2* and *p3*-*p4*, or ``None``."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-12:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+    return None
+
+
 def plot_zzenf(
     results_at_rpm: list[ModalResult],
     num_sectors: int,
@@ -1141,9 +1157,11 @@ def plot_zzenf(
     figsize: tuple[float, float] = (12, 7),
     condition_label: str = "",
     connect_families: bool = True,
+    degenerate_only: bool = False,
     mode_ids: list | None = None,
     mesh: "Mesh | None" = None,
     eo_lines: bool = False,
+    crossing_markers: bool = False,
 ):
     """Plot ZZENF (zig-zag) interference diagram.
 
@@ -1156,6 +1174,10 @@ def plot_zzenf(
     condition_label : optional label appended to the plot title
     connect_families : if ``True``, draw lines connecting modes of the same
         modal family across nodal diameters
+    degenerate_only : if ``True``, family connection lines only span
+        degenerate NDs (``0 < k < N/2``).  Non-degenerate modes at
+        ``k = 0`` and ``k = N/2`` are still plotted as markers but are
+        not included in the connecting lines.
     mode_ids : optional pre-computed mode identifications, one list of
         ``ModeIdentification`` per ``ModalResult``.  Used to group modes
         by ``family_label`` (e.g. ``"1B"``, ``"2B"``).
@@ -1165,6 +1187,8 @@ def plot_zzenf(
     eo_lines : if ``True``, overlay the engine-order zig-zag excitation
         lines.  Engine order *e* excites nodal diameter ``e mod N``
         (folded into ``0 .. N/2``) at frequency ``e * RPM / 60``.
+    crossing_markers : if ``True``, mark resonance crossings where the
+        EO zig-zag intersects a family curve (implies *eo_lines=True*).
 
     Returns
     -------
@@ -1176,6 +1200,9 @@ def plot_zzenf(
 
     N = num_sectors
     half_N = N // 2
+
+    if crossing_markers:
+        eo_lines = True
 
     has_coriolis = any(
         np.any(np.asarray(r.whirl_direction) != 0) for r in results_at_rpm
@@ -1225,6 +1252,10 @@ def plot_zzenf(
     # -- Draw --
     fig, ax = plt.subplots(figsize=figsize)
 
+    # Helper: is this ND degenerate (0 < k < N/2)?
+    def _is_degen(nd):
+        return 0 < nd < half_N or (N % 2 != 0 and nd == half_N)
+
     for fi, fkey in enumerate(family_keys):
         data = families[fkey]
         col = fam_colors[fi]
@@ -1237,9 +1268,16 @@ def plot_zzenf(
                 bw_pts = [(nd, f) for nd, f, w in data if w == -1]
                 st_pts = [(nd, f) for nd, f, w in data if w == 0]
 
-                # FW/BW lines share standing anchor points at k=0 and k=N/2
-                fw_line = _unique_nd(sorted(st_pts + fw_pts))
-                bw_line = _unique_nd(sorted(st_pts + bw_pts))
+                if degenerate_only:
+                    # Lines only through degenerate NDs
+                    fw_line = _unique_nd(sorted(
+                        [(nd, f) for nd, f in fw_pts if _is_degen(nd)]))
+                    bw_line = _unique_nd(sorted(
+                        [(nd, f) for nd, f in bw_pts if _is_degen(nd)]))
+                else:
+                    # FW/BW lines share standing anchor points at k=0 and k=N/2
+                    fw_line = _unique_nd(sorted(st_pts + fw_pts))
+                    bw_line = _unique_nd(sorted(st_pts + bw_pts))
 
                 if len(fw_line) > 1:
                     nds, fs = zip(*fw_line)
@@ -1248,7 +1286,7 @@ def plot_zzenf(
                     nds, fs = zip(*bw_line)
                     ax.plot(nds, fs, "--", color=col, linewidth=1.5, zorder=2)
 
-                # Markers
+                # Markers (always plotted at every ND)
                 for nd, f, w in data:
                     mk = {1: "^", -1: "v"}.get(w, "o")
                     ax.plot(
@@ -1258,17 +1296,21 @@ def plot_zzenf(
             else:
                 # No Coriolis — single line per family.
                 # Degenerate NDs produce duplicate (nd, freq) pairs; remove them.
-                pts = _unique_nd(sorted(set((nd, f) for nd, f, _ in data)))
-                if len(pts) > 1:
-                    nds, fs = zip(*pts)
+                all_pts = _unique_nd(sorted(set((nd, f) for nd, f, _ in data)))
+                if degenerate_only:
+                    line_pts = [(nd, f) for nd, f in all_pts if _is_degen(nd)]
+                else:
+                    line_pts = all_pts
+
+                if len(line_pts) > 1:
+                    nds, fs = zip(*line_pts)
                     ax.plot(
-                        nds, fs, "-o", color=col, linewidth=1.5,
-                        markersize=6, markeredgecolor="white",
-                        markeredgewidth=0.5, zorder=3,
+                        nds, fs, "-", color=col, linewidth=1.5, zorder=2,
                     )
-                elif pts:
+                # Markers at all NDs
+                for nd, f in all_pts:
                     ax.plot(
-                        pts[0][0], pts[0][1], "o", color=col, markersize=6,
+                        nd, f, "o", color=col, markersize=6,
                         markeredgecolor="white", markeredgewidth=0.5, zorder=3,
                     )
 
@@ -1296,7 +1338,7 @@ def plot_zzenf(
     ax.set_xlabel("Nodal Diameter", fontsize=11)
     ax.set_ylabel("Frequency (Hz)", fontsize=11)
 
-    rpm = results_at_rpm[0].rpm if results_at_rpm else 0
+    rpm = abs(results_at_rpm[0].rpm) if results_at_rpm else 0
     title = "ZZENF Diagram"
     if rpm > 0:
         title += f" @ {rpm:.0f} RPM"
@@ -1347,6 +1389,65 @@ def plot_zzenf(
                     va="bottom",
                 )
 
+    # -- Crossing markers (EO zig-zag × family curves) --
+    if crossing_markers and rpm > 0:
+        f1 = rpm / 60.0
+        y_top = ax.get_ylim()[1]
+        max_eo = int(y_top / f1) + 1
+
+        # Build zig-zag path
+        zz: list[tuple[float, float]] = []
+        for e in range(max_eo + 1):
+            nd_raw = e % N
+            nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
+            zz.append((float(nd_fold), e * f1))
+
+        # Build piecewise-linear family curves (same logic as drawing)
+        fam_curves: list[list[tuple[float, float]]] = []
+        for fkey in family_keys:
+            data = families[fkey]
+            if has_coriolis:
+                fw_pts = [(nd, f) for nd, f, w in data if w == 1]
+                bw_pts = [(nd, f) for nd, f, w in data if w == -1]
+                st_pts = [(nd, f) for nd, f, w in data if w == 0]
+                if degenerate_only:
+                    fw_line = _unique_nd(sorted(
+                        [(nd, f) for nd, f in fw_pts if _is_degen(nd)]))
+                    bw_line = _unique_nd(sorted(
+                        [(nd, f) for nd, f in bw_pts if _is_degen(nd)]))
+                else:
+                    fw_line = _unique_nd(sorted(st_pts + fw_pts))
+                    bw_line = _unique_nd(sorted(st_pts + bw_pts))
+                for line in (fw_line, bw_line):
+                    if len(line) > 1:
+                        fam_curves.append([(float(n), f) for n, f in line])
+            else:
+                all_pts = _unique_nd(sorted(set((nd, f) for nd, f, _ in data)))
+                if degenerate_only:
+                    pts = [(nd, f) for nd, f in all_pts if _is_degen(nd)]
+                else:
+                    pts = all_pts
+                if len(pts) > 1:
+                    fam_curves.append([(float(n), f) for n, f in pts])
+
+        # Find all segment–segment intersections
+        crossings = []
+        for curve in fam_curves:
+            for ci in range(len(curve) - 1):
+                p1, p2 = curve[ci], curve[ci + 1]
+                for zi in range(len(zz) - 1):
+                    p3, p4 = zz[zi], zz[zi + 1]
+                    hit = _seg_intersect(p1, p2, p3, p4)
+                    if hit is not None:
+                        crossings.append(hit)
+
+        if crossings:
+            cx, cy = zip(*crossings)
+            ax.plot(
+                cx, cy, "x", color="red", markersize=8,
+                markeredgewidth=2, zorder=5,
+            )
+
     ax.grid(True, which="major", alpha=0.3, linewidth=0.8)
     ax.grid(True, which="minor", alpha=0.15, linewidth=0.5)
     ax.minorticks_on()
@@ -1375,6 +1476,11 @@ def plot_zzenf(
         handles.append(
             Line2D([0], [0], color="gray", linewidth=0.8, alpha=0.45,
                    label="EO zig-zag"),
+        )
+    if crossing_markers:
+        handles.append(
+            Line2D([0], [0], marker="x", color="red", linestyle="None",
+                   markersize=8, markeredgewidth=2, label="Resonance crossing"),
         )
     if not handles:
         handles.append(

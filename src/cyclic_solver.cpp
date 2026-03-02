@@ -307,10 +307,10 @@ StationaryFrameResult CyclicSymmetrySolver::compute_stationary_frame(
         }
     }
 
-    if (has_coriolis && omega > 0.0 && k > 0) {
+    if (has_coriolis && std::abs(omega) > 0.0 && k > 0) {
         // Coriolis modes: each mode already has FW/BW designation.
         // Convert to stationary frame: FW adds k*Omega/(2pi), BW subtracts.
-        double k_omega_hz = k * omega / (2.0 * PI);
+        double k_omega_hz = k * std::abs(omega) / (2.0 * PI);
         sf.frequencies.resize(num_modes);
         sf.whirl_direction.resize(num_modes);
 
@@ -335,9 +335,9 @@ StationaryFrameResult CyclicSymmetrySolver::compute_stationary_frame(
         }
         sf.frequencies = sorted_f;
         sf.whirl_direction = sorted_w;
-    } else if (omega > 0.0 && k > 0 && k < max_k) {
+    } else if (std::abs(omega) > 0.0 && k > 0 && k < max_k) {
         // Kinematic splitting: each rotating-frame mode produces FW + BW pair
-        double k_omega_hz = k * omega / (2.0 * PI);
+        double k_omega_hz = k * std::abs(omega) / (2.0 * PI);
 
         Eigen::VectorXd all_freqs(2 * num_modes);
         Eigen::VectorXi all_whirl(2 * num_modes);
@@ -665,10 +665,10 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     // Step 2: Rotating effects
     SpMatd K_eff = K_sector;
 
-    if (omega > 0.0) {
+    if (std::abs(omega) > 0.0) {
         // 2a: Spin softening — pure kinematic effect of rotating frame,
         //     K_omega = rho * omega^2 * N^T * (I - a*a^T) * N.
-        //     Always applied when omega > 0, regardless of hub constraint.
+        //     Always applied when spinning, regardless of hub constraint.
         assembler_.assemble_rotating_effects(mesh_, mat_, omega);
         SpMatd K_omega = assembler_.K_omega();
         K_eff = K_sector - K_omega;
@@ -769,7 +769,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
     // Gyroscopic matrix projection (same pipeline as K/M)
     SpMatcd Gcf, Gpf, Gpf_H;
-    bool coriolis_active = include_coriolis && omega > 0.0;
+    bool coriolis_active = include_coriolis && std::abs(omega) > 0.0;
     if (coriolis_active) {
         int ndof_full = mesh_.num_dof();
         SpMatd G_global = assembler_.G();
@@ -1288,7 +1288,7 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_parametric(
         // Build K_eff for this condition
         SpMatd K_eff = E_scale * K_base_;
 
-        if (omega > 0.0) {
+        if (std::abs(omega) > 0.0) {
             // Spin softening: K_omega = omega^2 * K_omega_unit
             SpMatd K_omega = omega * omega * K_omega_unit_;
             K_eff -= K_omega;

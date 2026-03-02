@@ -361,9 +361,9 @@ def physics_consistency_check(
 
     # ------------------------------------------------------------------
     # Check 4: whirl ordering (forward freq >= backward freq per ND)
-    # Only applies when RPM > 0 and we have frequency data.
+    # Only applies when RPM != 0 and we have frequency data.
     # ------------------------------------------------------------------
-    if rpm > 0:
+    if abs(rpm) > 0:
         # Build groups: ND value -> list of (index, whirl, frequency)
         nd_groups: dict[int, list[tuple[int, int, float]]] = {}
         for i in range(n):
