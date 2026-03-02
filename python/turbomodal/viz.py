@@ -28,6 +28,50 @@ def _save_gif(filename: str, frames: list, duration: int = 33) -> None:
     )
 
 
+def _apply_camera(plotter, camera_position, rotation_axis: int = 2) -> None:
+    """Set the camera on *plotter* according to *camera_position*.
+
+    Parameters
+    ----------
+    plotter : pyvista.Plotter
+    camera_position : 'auto', 'xy', 'xz', 'yz', 'iso', tuple, or None
+    rotation_axis : 0 (X), 1 (Y), or 2 (Z)
+    """
+    if camera_position is None:
+        return
+
+    if isinstance(camera_position, tuple):
+        plotter.camera_position = camera_position
+        return
+
+    if camera_position == "auto":
+        # Look from an elevated angle with the rotation axis pointing up.
+        up = [0, 0, 0]
+        up[rotation_axis] = 1
+        # Camera position: offset in the two non-axis directions
+        axes = [i for i in range(3) if i != rotation_axis]
+        pos = [0, 0, 0]
+        pos[axes[0]] = 1
+        pos[axes[1]] = -0.5
+        pos[rotation_axis] = 0.6
+        plotter.camera_position = [pos, [0, 0, 0], up]
+        plotter.reset_camera()
+        return
+
+    view_map = {"xy": "xy", "xz": "xz", "yz": "yz", "iso": "iso"}
+    if camera_position in view_map:
+        plotter.view_vector(
+            *{
+                "xy": ([0, 0, 1], [0, 1, 0]),
+                "xz": ([0, -1, 0], [0, 0, 1]),
+                "yz": ([1, 0, 0], [0, 0, 1]),
+                "iso": ([1, -1, 0.5], [0, 0, 1]),
+            }[camera_position]
+        )
+        plotter.reset_camera()
+        return
+
+
 def _mesh_to_pyvista(mesh: Mesh):
     """Convert a turbomodal Mesh to a PyVista UnstructuredGrid."""
     import pyvista as pv
@@ -462,6 +506,7 @@ def plot_mode(
     animate: bool = False,
     n_frames: int = 60,
     filename: str | None = None,
+    camera_position: str | tuple | None = "auto",
 ):
     """Plot or animate a mode shape on the sector or full-annulus mesh.
 
@@ -481,6 +526,12 @@ def plot_mode(
         ``u(t) = Re(mode * exp(i * 2*pi*t/T))``
     n_frames : number of animation frames (only used when ``animate=True``)
     filename : if given with ``animate=True``, save the animation as a GIF
+    camera_position : camera view specification.
+        ``'auto'`` (default) orients the view so the rotation axis points up.
+        ``'xy'``, ``'xz'``, ``'yz'``, ``'iso'`` for standard views.
+        A tuple ``((cx,cy,cz), (fx,fy,fz), (ux,uy,uz))`` for full control
+        (camera position, focal point, view-up vector).
+        ``None`` to use PyVista's default.
 
     Returns
     -------
@@ -553,6 +604,7 @@ def plot_mode(
                              show_edges=False)
             plotter.add_text(title, font_size=12)
             plotter.add_axes()
+            _apply_camera(plotter, camera_position, mesh.rotation_axis)
             return plotter
 
         # Full-annulus animation
@@ -573,6 +625,8 @@ def plot_mode(
             grid.points = pts
             grid.point_data["displacement"][:] = scl
             grid.GetPointData().Modified()
+
+        _apply_camera(plotter, camera_position, mesh.rotation_axis)
 
         if save_only:
             frames = []
@@ -626,6 +680,8 @@ def plot_mode(
                 np.sum(disp ** 2, axis=1))
             deformed_grid.GetPointData().Modified()
 
+        _apply_camera(plotter, camera_position, mesh.rotation_axis)
+
         if save_only:
             frames = []
             for f in range(n_frames):
@@ -678,6 +734,7 @@ def plot_mode(
                      show_edges=False)
     plotter.add_text(title, font_size=12)
     plotter.add_axes()
+    _apply_camera(plotter, camera_position, mesh.rotation_axis)
     return plotter
 
 
@@ -1065,14 +1122,28 @@ def plot_campbell(
     return fig
 
 
+def _unique_nd(pts: list[tuple]) -> list[tuple]:
+    """Keep one ``(nd, freq)`` per nodal diameter (first occurrence wins)."""
+    seen: set[int] = set()
+    out: list[tuple] = []
+    for item in pts:
+        nd = item[0]
+        if nd not in seen:
+            seen.add(nd)
+            out.append(item)
+    return out
+
+
 def plot_zzenf(
     results_at_rpm: list[ModalResult],
     num_sectors: int,
     max_freq: float | None = None,
-    figsize: tuple[float, float] = (10, 8),
-    confidence_bands: dict | None = None,
-    crossing_markers: bool = False,
+    figsize: tuple[float, float] = (12, 7),
     condition_label: str = "",
+    connect_families: bool = True,
+    mode_ids: list | None = None,
+    mesh: "Mesh | None" = None,
+    eo_lines: bool = False,
 ):
     """Plot ZZENF (zig-zag) interference diagram.
 
@@ -1080,16 +1151,28 @@ def plot_zzenf(
     ----------
     results_at_rpm : list of ModalResult (one per harmonic index) at a single RPM
     num_sectors : number of sectors in the full annulus
-    max_freq : max frequency for y-axis
+    max_freq : max frequency for y-axis (``None`` = auto)
     figsize : figure size
+    condition_label : optional label appended to the plot title
+    connect_families : if ``True``, draw lines connecting modes of the same
+        modal family across nodal diameters
+    mode_ids : optional pre-computed mode identifications, one list of
+        ``ModeIdentification`` per ``ModalResult``.  Used to group modes
+        by ``family_label`` (e.g. ``"1B"``, ``"2B"``).
+    mesh : optional ``Mesh``.  If *mode_ids* is not provided and a mesh is
+        given, ``identify_modes`` is called automatically to obtain
+        family labels.
+    eo_lines : if ``True``, overlay the engine-order zig-zag excitation
+        lines.  Engine order *e* excites nodal diameter ``e mod N``
+        (folded into ``0 .. N/2``) at frequency ``e * RPM / 60``.
 
     Returns
     -------
     matplotlib Figure
     """
     import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=figsize)
+    from matplotlib.lines import Line2D
+    from collections import defaultdict
 
     N = num_sectors
     half_N = N // 2
@@ -1098,51 +1181,209 @@ def plot_zzenf(
         np.any(np.asarray(r.whirl_direction) != 0) for r in results_at_rpm
     )
 
-    for result in results_at_rpm:
+    # -- Compute mode_ids if mesh is available but mode_ids not provided --
+    if mode_ids is None and mesh is not None and connect_families:
+        from turbomodal._core import identify_modes as _id_modes
+        mode_ids = [_id_modes(r, mesh) for r in results_at_rpm]
+
+    # -- Build family data: families[key] -> [(nd_folded, freq, whirl)] --
+    families: dict = defaultdict(list)
+
+    for r_idx, result in enumerate(results_at_rpm):
         nd = result.harmonic_index
-        # Fold: for nd > N/2, fold back as N - nd
         nd_folded = nd if nd <= half_N else N - nd
+        is_nondegen = (nd == 0) or (N % 2 == 0 and nd == half_N)
         whirl_arr = np.asarray(result.whirl_direction)
+        n_modes = len(result.frequencies)
 
-        for m_idx in range(len(result.frequencies)):
-            freq = result.frequencies[m_idx]
-            w = int(whirl_arr[m_idx]) if m_idx < len(whirl_arr) else 0
-            if has_coriolis and w == 1:
-                ax.plot(nd_folded, freq, "^", color="tab:red", markersize=5)
-            elif has_coriolis and w == -1:
-                ax.plot(nd_folded, freq, "v", color="tab:blue", markersize=5)
+        if mode_ids is not None:
+            ids = mode_ids[r_idx]
+            for i in range(min(n_modes, len(ids))):
+                freq = float(result.frequencies[i])
+                w = int(whirl_arr[i]) if i < len(whirl_arr) else 0
+                families[ids[i].family_label].append((nd_folded, freq, w))
+        else:
+            # Fallback: at degenerate NDs the solver duplicates eigenvalues
+            # in pairs so mode_index // 2 recovers the family index.
+            for i in range(n_modes):
+                freq = float(result.frequencies[i])
+                w = int(whirl_arr[i]) if i < len(whirl_arr) else 0
+                fkey = i // 2 if not is_nondegen else i
+                families[fkey].append((nd_folded, freq, w))
+
+    # -- Sort families by their lowest frequency --
+    family_keys = sorted(
+        families.keys(),
+        key=lambda k: min(f for _, f, _ in families[k]),
+    )
+    n_families = len(family_keys)
+
+    # -- Colour palette --
+    cmap = plt.colormaps["tab10"]
+    fam_colors = [cmap(i % 10) for i in range(n_families)]
+
+    # -- Draw --
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for fi, fkey in enumerate(family_keys):
+        data = families[fkey]
+        col = fam_colors[fi]
+        fam_label = str(fkey) if mode_ids is not None else f"Family {fi + 1}"
+
+        if connect_families:
+            if has_coriolis:
+                # Separate FW, BW, and standing (non-degenerate) points
+                fw_pts = [(nd, f) for nd, f, w in data if w == 1]
+                bw_pts = [(nd, f) for nd, f, w in data if w == -1]
+                st_pts = [(nd, f) for nd, f, w in data if w == 0]
+
+                # FW/BW lines share standing anchor points at k=0 and k=N/2
+                fw_line = _unique_nd(sorted(st_pts + fw_pts))
+                bw_line = _unique_nd(sorted(st_pts + bw_pts))
+
+                if len(fw_line) > 1:
+                    nds, fs = zip(*fw_line)
+                    ax.plot(nds, fs, "-", color=col, linewidth=1.5, zorder=2)
+                if len(bw_line) > 1:
+                    nds, fs = zip(*bw_line)
+                    ax.plot(nds, fs, "--", color=col, linewidth=1.5, zorder=2)
+
+                # Markers
+                for nd, f, w in data:
+                    mk = {1: "^", -1: "v"}.get(w, "o")
+                    ax.plot(
+                        nd, f, mk, color=col, markersize=6,
+                        markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                    )
             else:
-                ax.plot(nd_folded, freq, "o", color="tab:blue", markersize=6)
+                # No Coriolis — single line per family.
+                # Degenerate NDs produce duplicate (nd, freq) pairs; remove them.
+                pts = _unique_nd(sorted(set((nd, f) for nd, f, _ in data)))
+                if len(pts) > 1:
+                    nds, fs = zip(*pts)
+                    ax.plot(
+                        nds, fs, "-o", color=col, linewidth=1.5,
+                        markersize=6, markeredgecolor="white",
+                        markeredgewidth=0.5, zorder=3,
+                    )
+                elif pts:
+                    ax.plot(
+                        pts[0][0], pts[0][1], "o", color=col, markersize=6,
+                        markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                    )
 
-    ax.set_xlabel("Nodal Diameter")
-    ax.set_ylabel("Frequency (Hz)")
+            # Annotate family label at the rightmost ND
+            if mode_ids is not None:
+                rightmost = max(data, key=lambda p: (p[0], p[1]))
+                ax.annotate(
+                    fam_label, (rightmost[0], rightmost[1]),
+                    textcoords="offset points", xytext=(8, 0),
+                    fontsize=8, color=col, fontweight="bold", va="center",
+                )
+        else:
+            # No family connection — improved individual markers
+            for nd, f, w in data:
+                if has_coriolis:
+                    mk = {1: "^", -1: "v"}.get(w, "o")
+                else:
+                    mk = "o"
+                ax.plot(
+                    nd, f, mk, color=col, markersize=6,
+                    markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                )
+
+    # -- Axes and styling --
+    ax.set_xlabel("Nodal Diameter", fontsize=11)
+    ax.set_ylabel("Frequency (Hz)", fontsize=11)
+
     rpm = results_at_rpm[0].rpm if results_at_rpm else 0
-    title = f"ZZENF Diagram @ {rpm:.0f} RPM"
+    title = "ZZENF Diagram"
+    if rpm > 0:
+        title += f" @ {rpm:.0f} RPM"
     if condition_label:
         title += f"  ({condition_label})"
-    ax.set_title(title)
+    ax.set_title(title, fontsize=13, fontweight="bold")
+
     ax.set_xticks(range(half_N + 1))
+    right_pad = 1.5 if (connect_families and mode_ids is not None) else 0.3
+    ax.set_xlim(-0.3, half_N + right_pad)
     if max_freq:
         ax.set_ylim(0, max_freq)
-    ax.grid(True, alpha=0.3)
-
-    # Legend
-    from matplotlib.lines import Line2D
-    if has_coriolis:
-        legend_elements = [
-            Line2D([0], [0], marker="^", color="tab:red", linestyle="None",
-                   markersize=8, label="FW (rotating frame)"),
-            Line2D([0], [0], marker="v", color="tab:blue", linestyle="None",
-                   markersize=8, label="BW (rotating frame)"),
-            Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
-                   markersize=8, label="Standing (k=0)"),
-        ]
     else:
-        legend_elements = [
-            Line2D([0], [0], marker="o", color="tab:blue", linestyle="None",
-                   markersize=8, label="Rotating frame"),
-        ]
-    ax.legend(handles=legend_elements, loc="upper right")
+        all_freqs = [f for pts in families.values() for _, f, _ in pts]
+        if all_freqs:
+            ax.set_ylim(0, max(all_freqs) * 1.08)
+
+    # -- Engine-order zig-zag lines --
+    if eo_lines and rpm > 0:
+        f1 = rpm / 60.0  # frequency per engine order
+        y_top = ax.get_ylim()[1]
+        max_eo = int(y_top / f1) + 1
+        eo_nds = []
+        eo_freqs = []
+        for e in range(max_eo + 1):
+            nd_raw = e % N
+            nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
+            eo_nds.append(nd_fold)
+            eo_freqs.append(e * f1)
+        ax.plot(
+            eo_nds, eo_freqs, "-", color="gray", linewidth=0.8,
+            alpha=0.45, zorder=1,
+        )
+        # Label a few EO numbers at the zig-zag peaks/troughs
+        for e in range(max_eo + 1):
+            nd_raw = e % N
+            nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
+            freq_e = e * f1
+            if freq_e > y_top:
+                break
+            # Annotate at turning points (ND=0 or ND=N/2)
+            if nd_fold == 0 or nd_fold == half_N:
+                ax.annotate(
+                    str(e), (nd_fold, freq_e),
+                    fontsize=6, color="gray", alpha=0.7,
+                    textcoords="offset points",
+                    xytext=(-8 if nd_fold == half_N else 4, 2),
+                    va="bottom",
+                )
+
+    ax.grid(True, which="major", alpha=0.3, linewidth=0.8)
+    ax.grid(True, which="minor", alpha=0.15, linewidth=0.5)
+    ax.minorticks_on()
+    ax.tick_params(axis="both", which="major", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+
+    # -- Legend --
+    handles = []
+    if has_coriolis:
+        handles.extend([
+            Line2D([0], [0], marker="^", color="gray", linestyle="-",
+                   linewidth=1.5, markersize=7, label="Forward (FW)"),
+            Line2D([0], [0], marker="v", color="gray", linestyle="--",
+                   linewidth=1.5, markersize=7, label="Backward (BW)"),
+            Line2D([0], [0], marker="o", color="gray", linestyle="None",
+                   markersize=7, label="Standing (k=0, N/2)"),
+        ])
+    if connect_families and n_families <= 12:
+        for fi, fkey in enumerate(family_keys):
+            lbl = str(fkey) if mode_ids is not None else f"Family {fi + 1}"
+            handles.append(
+                Line2D([0], [0], color=fam_colors[fi], linewidth=2, label=lbl),
+            )
+    if eo_lines and rpm > 0:
+        handles.append(
+            Line2D([0], [0], color="gray", linewidth=0.8, alpha=0.45,
+                   label="EO zig-zag"),
+        )
+    if not handles:
+        handles.append(
+            Line2D([0], [0], marker="o", color="gray", linestyle="None",
+                   markersize=7, label="Natural frequency"),
+        )
+    ax.legend(handles=handles, loc="upper left", fontsize=9,
+              framealpha=0.9, edgecolor="gray")
+
     fig.tight_layout()
     return fig
 
