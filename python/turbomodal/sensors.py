@@ -24,6 +24,7 @@ class SensorType(Enum):
     STRAIN_GAUGE = "strain_gauge"
     BTT_PROBE = "btt_probe"
     CASING_ACCELEROMETER = "casing_accelerometer"
+    DISPLACEMENT = "displacement"
 
 
 @dataclass
@@ -177,6 +178,94 @@ class SensorArrayConfig:
                     sensitivity=1.0,
                     noise_floor=1e-9,
                 ))
+
+        return SensorArrayConfig(
+            sensors=sensors,
+            sample_rate=sample_rate,
+            duration=duration,
+        )
+
+    @staticmethod
+    def default_displacement_array(
+        positions: Sequence[Sequence[float]] | NDArray,
+        direction: str | Sequence[float] | NDArray = "axial",
+        sample_rate: float = 50_000.0,
+        duration: float = 1.0,
+        bandwidth: float = 10_000.0,
+        sensitivity: float = 1.0,
+        noise_floor: float = 1e-7,
+    ) -> SensorArrayConfig:
+        """Create a displacement sensor array at specified locations.
+
+        Models non-contact displacement probes (e.g. eddy-current,
+        capacitive, or laser vibrometer) that directly measure
+        displacement at given points on the structure.
+
+        Parameters
+        ----------
+        positions : (N, 3) array-like of sensor positions in world
+            coordinates.
+        direction : Measurement direction.  One of:
+
+            * ``"axial"`` — z-direction ``[0, 0, 1]`` (default, typical
+              for disk-face probes).
+            * ``"radial"`` — outward radial from the rotation axis,
+              computed per sensor from its (x, y) position.
+            * ``(3,)`` array-like — a single direction vector shared
+              by all sensors (will be normalised internally).
+
+        sample_rate : Acquisition sampling rate in Hz.
+        duration : Acquisition duration in seconds.
+        bandwidth : Sensor bandwidth in Hz.
+        sensitivity : Output per unit displacement.
+        noise_floor : Minimum detectable displacement in metres.
+
+        Returns
+        -------
+        Populated :class:`SensorArrayConfig`.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.ndim == 1:
+            positions = positions.reshape(1, -1)
+        if positions.shape[1] != 3:
+            raise ValueError(
+                f"positions must have 3 columns (x, y, z), got {positions.shape[1]}"
+            )
+
+        sensors: list[SensorLocation] = []
+
+        for idx, pos in enumerate(positions):
+            if isinstance(direction, str):
+                if direction == "axial":
+                    d = np.array([0.0, 0.0, 1.0])
+                elif direction == "radial":
+                    r_xy = np.linalg.norm(pos[:2])
+                    if r_xy < 1e-12:
+                        # On-axis: fall back to x-direction
+                        d = np.array([1.0, 0.0, 0.0])
+                    else:
+                        d = np.array([pos[0] / r_xy, pos[1] / r_xy, 0.0])
+                else:
+                    raise ValueError(
+                        f"direction must be 'axial', 'radial', or a "
+                        f"(3,) vector, got '{direction}'"
+                    )
+            else:
+                d = np.asarray(direction, dtype=np.float64).ravel()
+                if len(d) != 3:
+                    raise ValueError(
+                        f"direction vector must have 3 components, got {len(d)}"
+                    )
+
+            sensors.append(SensorLocation(
+                sensor_type=SensorType.DISPLACEMENT,
+                position=pos,
+                direction=d,
+                label=f"DISP_{idx:03d}",
+                bandwidth=bandwidth,
+                sensitivity=sensitivity,
+                noise_floor=noise_floor,
+            ))
 
         return SensorArrayConfig(
             sensors=sensors,

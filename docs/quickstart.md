@@ -183,8 +183,17 @@ sweep_results = tm.rpm_sweep(mesh, mat, rpm_values, num_modes=10, verbose=1)
 campbell = tm.campbell_data(sweep_results)
 # campbell['frequencies'] shape: (N_rpm, N_harmonics, N_modes)
 
-fig = tm.plot_campbell(sweep_results, engine_orders=[1, 2, 36])
-fig = tm.plot_zzenf(sweep_results[-1], num_sectors=36)
+style = tm.DiagramStyle(eo_linewidth=2.0, family_marker_size=8)
+fig = tm.plot_campbell(sweep_results, engine_orders=[1, 2, 36],
+                       stator_vanes=44, style=style)
+fig = tm.plot_zzenf(sweep_results[-1], num_sectors=36,
+                    engine_orders=[1, 2, 36], stator_vanes=44,
+                    crossing_markers=True, style=style)
+
+# Compare against ground truth (rows=NDs, cols=modes)
+gt = np.array([[...], [...], ...])  # shape (N/2+1, n_modes)
+diag = tm.diagnose_frequencies(sweep_results, gt, num_sectors=36)
+print(diag["summary"])
 ```
 
 ---
@@ -216,6 +225,24 @@ noise_config = NoiseConfig(
     ],
 )
 noisy_signal = apply_noise(clean_signal, noise_config, sample_rate=500_000.0)
+```
+
+Alternatively, use displacement sensors to read displacement directly at
+points on the disk:
+
+```python
+import numpy as np
+from turbomodal import SensorArrayConfig, VirtualSensorArray
+
+disp_config = SensorArrayConfig.default_displacement_array(
+    positions=[[0.05, 0, 0], [0.08, 0, 0], [0.1, 0, 0]],
+    direction="axial",         # "axial", "radial", or a (3,) vector
+    sample_rate=50_000.0,
+    bandwidth=10_000.0,        # eddy-current probe bandwidth
+    noise_floor=1e-7,          # 0.1 µm resolution
+)
+disp_array = VirtualSensorArray(mesh, disp_config)
+disp_signal = disp_array.generate_time_signal(modal_results=results, rpm=3000.0)
 ```
 
 Or use the end-to-end pipeline with `SignalGenerationConfig`:
@@ -421,7 +448,7 @@ from turbomodal.optimization import (
 
 opt_config = SensorOptimizationConfig(
     max_sensors=16, min_sensors=4,
-    sensor_type="btt_probe",
+    sensor_type="btt_probe",       # "btt_probe", "strain_gauge", "displacement"
     optimization_method="greedy",    # "greedy", "bayesian", "exhaustive"
     objective="fisher_info",         # "fisher_info", "mac_conditioning", "mutual_info"
     min_angular_spacing=5.0,

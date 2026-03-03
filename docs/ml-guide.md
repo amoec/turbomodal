@@ -2,8 +2,9 @@
 
 ## Overview
 
-The turbomodal ML pipeline transforms raw blade-tip timing or casing
-accelerometer signals into calibrated modal identification predictions.
+The turbomodal ML pipeline transforms raw sensor signals (blade-tip timing,
+casing accelerometer, or displacement probe) into calibrated modal
+identification predictions.
 The pipeline consists of three stages:
 
 1. **Feature extraction** -- time-domain signals are converted to spectral,
@@ -260,7 +261,7 @@ When `feature_type="order_tracking"`, the real and imaginary parts of these
 amplitudes are concatenated for each sensor. Output shape:
 `(n_sensors * max_engine_order * 2,)`.
 
-Raises `ValueError` if `rpm <= 0`.
+Raises `ValueError` if `rpm == 0`.
 
 ### Traveling Wave Decomposition (TWD)
 

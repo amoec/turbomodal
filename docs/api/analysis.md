@@ -198,6 +198,56 @@ tm.plot_mode(mesh, results[3], mode_index=0, scale=50.0,
 
 ---
 
+## DiagramStyle
+
+`DiagramStyle` is a dataclass controlling the visual properties of both
+Campbell and ZZENF diagrams. All fields have sensible defaults; pass an
+instance to `plot_campbell` or `plot_zzenf` to override any subset.
+
+```python
+from turbomodal import DiagramStyle
+
+style = DiagramStyle(
+    eo_linewidth=2.5,
+    eo_alpha=0.6,
+    stator_color="green",
+    family_linewidth=2.0,
+    colormap="viridis",
+)
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `mode_linewidth_fw` | `1.5` | FW mode line width (Campbell) |
+| `mode_linewidth_bw` | `1.2` | BW mode line width (Campbell) |
+| `mode_marker_size_fw` | `4.0` | FW mode marker size (Campbell) |
+| `mode_marker_size_bw` | `3.0` | BW mode marker size (Campbell) |
+| `eo_linewidth` | `1.5` | EO line width |
+| `eo_alpha` | `0.55` | EO line opacity |
+| `eo_color` | `"gray"` | EO line color |
+| `eo_linestyle` | `":"` | EO line style (Campbell) |
+| `eo_label_fontsize` | `7.0` | EO/NPF label font size |
+| `stator_linewidth` | `1.2` | Stator NPF line width |
+| `stator_alpha` | `0.5` | Stator NPF line opacity |
+| `stator_color` | `"#1f77b4"` | Stator NPF line color |
+| `stator_linestyle` | `"-."` | Stator NPF line style |
+| `crossing_marker` | `"x"` | Crossing marker shape |
+| `crossing_color` | `"red"` | Crossing marker color |
+| `crossing_markersize` | `10.0` | Crossing marker size |
+| `crossing_markeredgewidth` | `2.0` | Crossing marker edge width |
+| `confidence_alpha` | `0.15` | Confidence band fill opacity |
+| `family_linewidth` | `1.5` | Family curve width (ZZENF) |
+| `family_marker_size` | `6.0` | Family marker size (ZZENF) |
+| `family_marker_edge_color` | `"white"` | Family marker edge color |
+| `family_marker_edge_width` | `0.5` | Family marker edge width |
+| `title_fontsize` | `13.0` | Title font size |
+| `axis_label_fontsize` | `11.0` | Axis label font size |
+| `legend_fontsize` | `9.0` | Legend font size |
+| `grid_alpha` | `0.3` | Grid opacity |
+| `colormap` | `None` | Override colormap (None = auto) |
+
+---
+
 ## Campbell Diagram
 
 ### plot_campbell
@@ -210,6 +260,12 @@ def plot_campbell(
     engine_orders: Sequence[int] | None = None,
     max_freq: float | None = None,
     figsize: tuple[float, float] = (12, 8),
+    confidence_bands: dict | None = None,
+    crossing_markers: bool = False,
+    num_sectors: int = 0,
+    condition_label: str = "",
+    stator_vanes: int | None = None,
+    style: DiagramStyle | None = None,
 ) -> matplotlib.figure.Figure
 ```
 
@@ -223,6 +279,10 @@ def plot_campbell(
 | `figsize` | `tuple[float, float]` | `(12, 8)` | Matplotlib figure size |
 | `confidence_bands` | `dict \| None` | `None` | Dict with `"upper"` and `"lower"` keys mapping `(nd, track_id)` to frequency arrays for uncertainty bands |
 | `crossing_markers` | `bool` | `False` | Overlay markers at engine-order crossing points |
+| `num_sectors` | `int` | `0` | Number of sectors (0 = infer from max harmonic index) |
+| `condition_label` | `str` | `""` | Optional label appended to title |
+| `stator_vanes` | `int \| None` | `None` | Stator vane count — overlays NPF lines at `f = n * V * RPM / 60` |
+| `style` | `DiagramStyle \| None` | `None` | Visual style configuration |
 
 **Returns:** `matplotlib.figure.Figure`
 
@@ -234,8 +294,9 @@ consecutive RPM points based on the highest MAC value.
 **Visual conventions:**
 - Each nodal diameter gets a distinct color (tab10/tab20/turbo colormap).
 - Solid lines = forward whirl (FW), dashed lines = backward whirl (BW).
-- Engine order lines are drawn as dotted black lines with `EO=<n>` labels.
-- Legend includes both ND labels and FW/BW indicators.
+- Engine order lines are drawn as dotted lines with `EO=<n>` labels.
+- NPF lines (stator vanes) are drawn as dash-dot lines labeled `nxNPF`.
+- Legend includes ND labels, FW/BW indicators, and NPF entry.
 
 **Example:**
 
@@ -245,12 +306,15 @@ import turbomodal as tm
 
 rpms = np.linspace(0, 15000, 30)
 sweep = tm.rpm_sweep(mesh, mat, rpms, num_modes=10, verbose=1)
-fig = tm.plot_campbell(sweep, engine_orders=[1, 2, 24, 48], max_freq=5000)
+
+style = tm.DiagramStyle(eo_linewidth=2.0, stator_color="green")
+fig = tm.plot_campbell(sweep, engine_orders=[1, 2, 24, 48],
+                       stator_vanes=36, max_freq=5000, style=style)
 fig.savefig("campbell.png", dpi=150)
 ```
 
 **Expected output:** A frequency-vs-RPM plot with colored mode family lines,
-engine order crossing lines, and a legend.
+engine order crossing lines, NPF diagonal lines, and a legend.
 
 ---
 
@@ -265,7 +329,18 @@ def plot_zzenf(
     results_at_rpm: list[ModalResult],
     num_sectors: int,
     max_freq: float | None = None,
-    figsize: tuple[float, float] = (10, 8),
+    figsize: tuple[float, float] = (12, 7),
+    condition_label: str = "",
+    connect_families: bool = True,
+    degenerate_only: bool = False,
+    mode_ids: list | None = None,
+    mesh: Mesh | None = None,
+    eo_lines: bool = False,           # deprecated
+    engine_orders: Sequence[int] | None = None,
+    crossing_markers: bool = False,
+    stator_vanes: int | None = None,
+    confidence_bands: dict | None = None,
+    style: DiagramStyle | None = None,
 ) -> matplotlib.figure.Figure
 ```
 
@@ -276,9 +351,17 @@ def plot_zzenf(
 | `results_at_rpm` | `list[ModalResult]` | required | One ModalResult per harmonic index at a single RPM |
 | `num_sectors` | `int` | required | Number of sectors in the full annulus |
 | `max_freq` | `float \| None` | `None` | Max frequency for y-axis |
-| `figsize` | `tuple[float, float]` | `(10, 8)` | Figure size |
-| `confidence_bands` | `dict \| None` | `None` | Confidence band data for uncertainty visualization |
-| `crossing_markers` | `bool` | `False` | Mark engine-order crossings |
+| `figsize` | `tuple[float, float]` | `(12, 7)` | Figure size |
+| `condition_label` | `str` | `""` | Optional label appended to title |
+| `connect_families` | `bool` | `True` | Draw lines connecting modes of the same family |
+| `degenerate_only` | `bool` | `False` | Family lines only span degenerate NDs |
+| `mode_ids` | `list \| None` | `None` | Pre-computed mode identifications for family grouping |
+| `mesh` | `Mesh \| None` | `None` | If provided, auto-identifies mode families |
+| `engine_orders` | `Sequence[int] \| None` | `None` | Specific EOs to label on the zig-zag |
+| `crossing_markers` | `bool` | `False` | Mark EO zig-zag × family curve resonance crossings |
+| `stator_vanes` | `int \| None` | `None` | Stator vane count — overlays horizontal NPF lines with excited ND diamonds |
+| `confidence_bands` | `dict \| None` | `None` | Per-family confidence band data |
+| `style` | `DiagramStyle \| None` | `None` | Visual style configuration |
 
 **Returns:** `matplotlib.figure.Figure`
 
@@ -286,23 +369,96 @@ The diagram plots frequency vs. nodal diameter with mode aliasing folded
 at N/2. Nodal diameters greater than N/2 are folded back as N - ND.
 
 **Visual conventions:**
-- Up triangles (blue) = forward whirl
-- Down triangles (red) = backward whirl
-- Circles (gray) = standing wave
-- X-axis ticks from 0 to N/2
+- Up triangles = forward whirl (FW), down triangles = backward whirl (BW)
+- Circles = standing wave (k=0, k=N/2)
+- Mode families are color-coded and connected by lines
+- EO zig-zag line traces all engine orders across the ND axis
+- NPF horizontal lines show stator excitation frequencies with diamond
+  markers at excited NDs (Tyler-Sofrin relation)
 
 **Example:**
 
 ```python
-# Single RPM solution
 results_10k = tm.solve(mesh, mat, rpm=10000, num_modes=10)
-fig = tm.plot_zzenf(results_10k, num_sectors=24, max_freq=5000)
+style = tm.DiagramStyle(eo_linewidth=2.0, family_marker_size=8)
+fig = tm.plot_zzenf(results_10k, num_sectors=24,
+                    engine_orders=[1, 2, 24], stator_vanes=36,
+                    crossing_markers=True, max_freq=5000, style=style)
 fig.savefig("zzenf_10000rpm.png", dpi=150)
 ```
 
-**Expected output:** A scatter plot of frequency vs. nodal diameter with
-triangular markers indicating whirl direction. Title reads
-`ZZENF Diagram @ 10000 RPM`.
+---
+
+## Frequency Diagnostics
+
+### diagnose_frequencies
+
+Compare solver frequencies against ground truth values and generate
+diagnostic reports with error heatmaps and parity plots.
+
+```python
+def diagnose_frequencies(
+    results: list[ModalResult] | list[list[ModalResult]],
+    ground_truth: np.ndarray,
+    num_sectors: int,
+    rpm_index: int | None = None,
+    figsize: tuple[float, float] = (10, 7),
+    style: DiagramStyle | None = None,
+    return_figures: bool = True,
+) -> dict
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `results` | list | required | Flat list (single RPM) or nested list (RPM sweep) of ModalResult |
+| `ground_truth` | `np.ndarray` | required | `(n_nd, n_modes_per_nd)` — rows = NDs, cols = modes ascending. NaN for missing. |
+| `num_sectors` | `int` | required | Number of sectors in the full annulus |
+| `rpm_index` | `int \| None` | `None` | RPM slice for sweep input (None = last) |
+| `figsize` | `tuple[float, float]` | `(10, 7)` | Base figure size |
+| `style` | `DiagramStyle \| None` | `None` | Visual style configuration |
+| `return_figures` | `bool` | `True` | Whether to generate diagnostic figures |
+
+**Returns:** dict with keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `computed_matrix` | `np.ndarray` | Solver frequencies `(n_nd, n_modes)` |
+| `error_matrix` | `np.ndarray` | Relative error `\|comp - gt\| / \|gt\|` |
+| `abs_error_matrix` | `np.ndarray` | Absolute error `\|comp - gt\|` |
+| `worst_mode` | `tuple` | `(nd, mode_idx, rel_error_pct)` |
+| `per_nd_stats` | `dict` | Per-ND mean/max/std of relative error |
+| `summary` | `str` | Human-readable summary |
+| `figures` | `list[Figure]` | 3 figures (if `return_figures=True`) |
+
+**Figures generated:**
+1. **Error heatmap** — ND (rows) x mode index (cols), colored by relative error %
+2. **Per-ND bar chart** — mean error per ND with std error bars
+3. **Parity scatter** — ground truth vs computed, colored by error, worst mode circled
+
+**Example:**
+
+```python
+import numpy as np
+import turbomodal as tm
+
+results = tm.solve(mesh, mat, rpm=5000, num_modes=6)
+# Ground truth: 5 NDs x 3 modes each
+gt = np.array([
+    [150.0, 310.0, 520.0],
+    [160.0, 330.0, 540.0],
+    [180.0, 370.0, 590.0],
+    [210.0, 420.0, 660.0],
+    [250.0, 480.0, 740.0],
+])
+diag = tm.diagnose_frequencies(results, gt, num_sectors=8)
+print(diag["summary"])
+for fig in diag["figures"]:
+    fig.savefig(f"diag_{diag['figures'].index(fig)}.png", dpi=150)
+```
+
+---
 
 ### plot_sensor_contribution
 

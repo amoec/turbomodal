@@ -223,17 +223,20 @@ using a sparse interpolation matrix. Key operations:
   `(n_sensors, n_samples)` time-domain signal by superposing all modal
   contributions.
 
-Three sensor types are supported via the `SensorType` enum:
+Four sensor types are supported via the `SensorType` enum:
 
-| Type                   | Typical Use                         |
-|------------------------|-------------------------------------|
-| `BTT_PROBE`            | Blade tip timing (radial direction) |
-| `STRAIN_GAUGE`         | On-blade strain (tangential)        |
-| `CASING_ACCELEROMETER` | Casing vibration monitoring         |
+| Type                   | Typical Use                                      |
+|------------------------|--------------------------------------------------|
+| `BTT_PROBE`            | Blade tip timing (radial direction)              |
+| `STRAIN_GAUGE`         | On-blade strain (tangential)                     |
+| `CASING_ACCELEROMETER` | Casing vibration monitoring                      |
+| `DISPLACEMENT`         | Direct displacement measurement (any direction)  |
 
 Convenience constructors `SensorArrayConfig.default_btt_array()` and
 `SensorArrayConfig.default_strain_gauge_array()` generate uniformly spaced
-circumferential sensor rings.
+circumferential sensor rings. `SensorArrayConfig.default_displacement_array()`
+places displacement probes at user-specified positions with a configurable
+measurement direction (`"axial"`, `"radial"`, or an arbitrary vector).
 
 ### Noise Model
 
@@ -508,9 +511,12 @@ confidence intervals from uncertainty, and a human-readable summary.
   and full-disk views with dimension annotations.
 - `plot_full_mesh(mesh)` renders the full 360-degree mesh by replicating
   the single sector, without requiring a solved `ModalResult`.
-- `plot_campbell` and `plot_zzenf` accept `confidence_bands` (dict with
-  `upper`/`lower` keys) and `crossing_markers=True` to overlay uncertainty
-  bands and engine-order crossing annotations.
+- `plot_campbell` and `plot_zzenf` accept `confidence_bands`, `crossing_markers`,
+  `stator_vanes` (NPF line overlay), and `style` (`DiagramStyle` dataclass) to
+  control all visual properties. Both functions share a unified parameter set.
+- `diagnose_frequencies(results, ground_truth, num_sectors)` compares solver
+  output against a 2-D ground truth matrix and produces error heatmaps,
+  per-ND bar charts, and parity scatter plots.
 - `plot_sensor_contribution(shap_values, sensor_names, mode_names)` renders
   a heatmap of per-sensor SHAP contributions across mode families.
 

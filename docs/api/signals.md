@@ -17,6 +17,7 @@ class SensorType(Enum):
     STRAIN_GAUGE = "strain_gauge"
     BTT_PROBE = "btt_probe"
     CASING_ACCELEROMETER = "casing_accelerometer"
+    DISPLACEMENT = "displacement"
 ```
 
 ### SensorLocation
@@ -118,6 +119,39 @@ def default_strain_gauge_array(
 | `duration` | `float` | `1.0` | Duration in seconds |
 
 **Returns:** `SensorArrayConfig` with strain gauges measuring tangential displacement.
+
+#### SensorArrayConfig.default_displacement_array (static method)
+
+Create a displacement sensor array at specified locations on the structure.
+Models non-contact displacement probes (e.g. eddy-current, capacitive, or
+laser vibrometer) that directly measure displacement at given points.
+
+```python
+@staticmethod
+def default_displacement_array(
+    positions: Sequence[Sequence[float]] | NDArray,
+    direction: str | Sequence[float] | NDArray = "axial",
+    sample_rate: float = 50_000.0,
+    duration: float = 1.0,
+    bandwidth: float = 10_000.0,
+    sensitivity: float = 1.0,
+    noise_floor: float = 1e-7,
+) -> SensorArrayConfig
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `positions` | `(N,3) array-like` | required | World-space coordinates of each sensor |
+| `direction` | `str \| (3,) array-like` | `"axial"` | Measurement direction: `"axial"` (z), `"radial"` (outward from axis), or a custom `(3,)` vector |
+| `sample_rate` | `float` | `50000.0` | Sampling rate in Hz |
+| `duration` | `float` | `1.0` | Duration in seconds |
+| `bandwidth` | `float` | `10000.0` | Sensor bandwidth in Hz |
+| `sensitivity` | `float` | `1.0` | Output per unit displacement |
+| `noise_floor` | `float` | `1e-7` | Minimum detectable displacement in metres |
+
+**Returns:** `SensorArrayConfig` with displacement sensors at the specified positions.
 
 ### VirtualSensorArray
 

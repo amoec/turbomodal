@@ -17,6 +17,7 @@ def test_sensor_type_enum():
     assert SensorType.STRAIN_GAUGE.value == "strain_gauge"
     assert SensorType.BTT_PROBE.value == "btt_probe"
     assert SensorType.CASING_ACCELEROMETER.value == "casing_accelerometer"
+    assert SensorType.DISPLACEMENT.value == "displacement"
 
 
 # ---- SensorLocation defaults ----
@@ -94,6 +95,75 @@ def test_default_btt_array_directions():
             dir_radial = s.direction[:2]
             # Dot product of direction with outward radial should be negative
             assert np.dot(dir_radial, radial) < 0
+
+
+# ---- default_displacement_array ----
+
+def test_default_displacement_array_axial():
+    positions = [[0.05, 0.0, 0.0], [0.0, 0.05, 0.0], [0.05, 0.05, 0.01]]
+    cfg = SensorArrayConfig.default_displacement_array(positions)
+    assert len(cfg.sensors) == 3
+    for s in cfg.sensors:
+        assert s.sensor_type == SensorType.DISPLACEMENT
+        np.testing.assert_allclose(s.direction, [0, 0, 1])
+        assert s.label.startswith("DISP_")
+
+
+def test_default_displacement_array_radial():
+    positions = [[0.1, 0.0, 0.0], [0.0, 0.1, 0.0]]
+    cfg = SensorArrayConfig.default_displacement_array(positions, direction="radial")
+    assert len(cfg.sensors) == 2
+    # First sensor at (0.1,0,0): radial direction should be [1,0,0]
+    np.testing.assert_allclose(cfg.sensors[0].direction, [1, 0, 0], atol=1e-12)
+    # Second sensor at (0,0.1,0): radial direction should be [0,1,0]
+    np.testing.assert_allclose(cfg.sensors[1].direction, [0, 1, 0], atol=1e-12)
+
+
+def test_default_displacement_array_custom_direction():
+    positions = [[0.05, 0.0, 0.01]]
+    d = [1.0, 1.0, 0.0]
+    cfg = SensorArrayConfig.default_displacement_array(positions, direction=d)
+    assert len(cfg.sensors) == 1
+    np.testing.assert_allclose(cfg.sensors[0].direction, d)
+
+
+def test_default_displacement_array_bandwidth_and_noise():
+    positions = [[0.05, 0.0, 0.0]]
+    cfg = SensorArrayConfig.default_displacement_array(
+        positions, bandwidth=20_000.0, noise_floor=5e-8,
+    )
+    assert cfg.sensors[0].bandwidth == 20_000.0
+    assert cfg.sensors[0].noise_floor == 5e-8
+
+
+def test_displacement_array_with_mesh(wedge_mesh_path):
+    """Displacement sensors should work with VirtualSensorArray end-to-end."""
+    from turbomodal._core import Mesh
+    mesh = Mesh()
+    mesh.num_sectors = 24
+    mesh.load_from_gmsh(wedge_mesh_path)
+    mesh.identify_cyclic_boundaries()
+    mesh.match_boundary_nodes()
+
+    # Place sensors at a few node positions
+    nodes = np.asarray(mesh.nodes)
+    pick = [0, nodes.shape[0] // 2, nodes.shape[0] - 1]
+    positions = nodes[pick]
+
+    cfg = SensorArrayConfig.default_displacement_array(
+        positions, direction="axial", sample_rate=100_000.0, duration=0.1,
+    )
+    vsa = VirtualSensorArray(mesh, cfg)
+    assert vsa.n_sensors == 3
+
+    rng = np.random.default_rng(99)
+    mode = rng.standard_normal(3 * mesh.num_nodes())
+    sampled = vsa.sample_mode_shape(mode)
+    assert sampled.shape == (3,)
+    # Axial sensor at a node should read the z-displacement at that node
+    for i, node_idx in enumerate(pick):
+        expected = mode[3 * node_idx + 2]  # z-DOF
+        np.testing.assert_allclose(sampled[i], expected, atol=1e-10)
 
 
 # ---- VirtualSensorArray (requires mesh) ----

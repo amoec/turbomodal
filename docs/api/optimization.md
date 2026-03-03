@@ -41,7 +41,7 @@ class SensorOptimizationConfig:
 |-------|------|---------|-------------|
 | `max_sensors` | `int` | `16` | Maximum number of sensors |
 | `min_sensors` | `int` | `4` | Minimum number of sensors |
-| `sensor_type` | `str` | `"btt_probe"` | Sensor type: `"btt_probe"`, `"strain_gauge"`, `"casing_accel"` |
+| `sensor_type` | `str` | `"btt_probe"` | Sensor type: `"btt_probe"`, `"strain_gauge"`, `"casing_accel"`, `"displacement"` |
 | `optimization_method` | `str` | `"greedy"` | Method: `"greedy"`, `"bayesian"`, `"exhaustive"` |
 | `objective` | `str` | `"fisher_info"` | Objective function: `"fisher_info"`, `"mac_conditioning"`, `"mutual_info"` |
 | `bayesian_iterations` | `int` | `100` | Bayesian optimization iterations (Optuna TPE sampler) |
