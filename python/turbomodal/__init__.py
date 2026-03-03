@@ -35,12 +35,14 @@ from turbomodal._core import (
 from turbomodal.io import load_mesh, load_cad, inspect_cad, CadInfo
 from turbomodal.solver import solve, rpm_sweep, campbell_data, BoundaryCondition
 from turbomodal.viz import (
+    DiagramStyle,
     plot_mesh,
     plot_mode,
     plot_full_mesh,
     plot_cad,
     plot_campbell,
     plot_zzenf,
+    diagnose_frequencies,
     format_condition_label,
     interactive_plane_selector,
     bc_editor,
@@ -118,12 +120,14 @@ __all__ = [
     "rpm_sweep",
     "campbell_data",
     # Visualization
+    "DiagramStyle",
     "plot_mesh",
     "plot_mode",
     "plot_full_mesh",
     "plot_cad",
     "plot_campbell",
     "plot_zzenf",
+    "diagnose_frequencies",
     "format_condition_label",
     "interactive_plane_selector",
     "bc_editor",

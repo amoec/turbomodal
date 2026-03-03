@@ -36,8 +36,8 @@ Initial production release.
 
 **
 
-- Virtual sensor array with BTT probes, strain gauges, and accelerometers
-  (`_RemovedClass`, `_RemovedClass`).
+- Virtual sensor array with BTT probes, strain gauges, accelerometers, and
+  displacement sensors (`_RemovedClass`, `_RemovedClass`).
 - Signal synthesis pipeline (`_removed`).
 - Noise models: Gaussian, harmonic interference, signal drift, bandwidth
   limiting, ADC quantisation, and signal dropout (`_RemovedClass`, `_removed`).
@@ -71,8 +71,14 @@ Initial production release.
 - Mesh and full-annulus mesh plotting (`plot_mesh`, `plot_full_mesh`).
 - Mode shape visualization with full annulus reconstruction and animation
   (`plot_mode`).
-- Campbell diagram with MAC-based mode tracking (`plot_campbell`).
-- ZZENF interference diagram (`plot_zzenf`).
+- Campbell diagram with MAC-based mode tracking, stator vane NPF lines,
+  and `DiagramStyle` configuration (`plot_campbell`).
+- ZZENF interference diagram with EO zig-zag, stator vane horizontal
+  lines, crossing markers, confidence bands, and `DiagramStyle`
+  configuration (`plot_zzenf`).
+- Frequency diagnostic comparison against ground truth with error
+  heatmaps, per-ND bar charts, and parity scatter plots
+  (`diagnose_frequencies`).
 - Contribution analysis heatmap (`_removed_func`).
 
 **Testing**

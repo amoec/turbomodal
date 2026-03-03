@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
@@ -740,6 +741,61 @@ def plot_mode(
 
 
 # ---------------------------------------------------------------------------
+# Diagram style configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DiagramStyle:
+    """Appearance configuration for Campbell and ZZENF diagrams.
+
+    All fields have sensible defaults.  Pass an instance to
+    ``plot_campbell`` or ``plot_zzenf`` to override any subset.
+    """
+
+    # -- Mode lines --
+    mode_linewidth_fw: float = 1.5
+    mode_linewidth_bw: float = 1.2
+    mode_marker_size_fw: float = 4.0
+    mode_marker_size_bw: float = 3.0
+
+    # -- EO / zig-zag lines --
+    eo_linewidth: float = 1.5
+    eo_alpha: float = 0.55
+    eo_color: str = "gray"
+    eo_linestyle: str = ":"
+    eo_label_fontsize: float = 7.0
+
+    # -- Stator vane NPF lines --
+    stator_linewidth: float = 1.2
+    stator_alpha: float = 0.5
+    stator_color: str = "#1f77b4"
+    stator_linestyle: str = "-."
+
+    # -- Crossing markers --
+    crossing_marker: str = "x"
+    crossing_color: str = "red"
+    crossing_markersize: float = 10.0
+    crossing_markeredgewidth: float = 2.0
+
+    # -- Confidence bands --
+    confidence_alpha: float = 0.15
+
+    # -- Family curves (ZZENF) --
+    family_linewidth: float = 1.5
+    family_marker_size: float = 6.0
+    family_marker_edge_color: str = "white"
+    family_marker_edge_width: float = 0.5
+
+    # -- General --
+    title_fontsize: float = 13.0
+    axis_label_fontsize: float = 11.0
+    legend_fontsize: float = 9.0
+    grid_alpha: float = 0.3
+    colormap: str | None = None  # None = auto-select
+
+
+# ---------------------------------------------------------------------------
 # Mode tracking for Campbell diagrams
 # ---------------------------------------------------------------------------
 
@@ -859,6 +915,8 @@ def plot_campbell(
     crossing_markers: bool = False,
     num_sectors: int = 0,
     condition_label: str = "",
+    stator_vanes: int | None = None,
+    style: DiagramStyle | None = None,
 ):
     """Plot Campbell diagram from RPM sweep results.
 
@@ -874,6 +932,9 @@ def plot_campbell(
     max_freq : maximum frequency for y-axis (None = auto)
     figsize : matplotlib figure size
     num_sectors : number of sectors (0 = infer from max harmonic index)
+    stator_vanes : if set, overlay nozzle-passing-frequency lines at
+        ``f = n * V * RPM / 60`` for each harmonic *n*
+    style : :class:`DiagramStyle` controlling visual properties
 
     Returns
     -------
@@ -881,6 +942,9 @@ def plot_campbell(
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
+
+    if style is None:
+        style = DiagramStyle()
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -903,7 +967,9 @@ def plot_campbell(
     n_harmonics = len(all_nds)
 
     # Use a colormap with enough distinct colors
-    if n_harmonics <= 10:
+    if style.colormap is not None:
+        cmap = plt.colormaps[style.colormap]
+    elif n_harmonics <= 10:
         cmap = plt.cm.tab10
     elif n_harmonics <= 20:
         cmap = plt.cm.tab20
@@ -986,8 +1052,8 @@ def plot_campbell(
                 valid_whirl = track_whirl[valid]
                 is_fw = np.sum(valid_whirl == 1) >= np.sum(valid_whirl == -1)
                 ls = "-" if is_fw else "--"
-                lw = 1.2 if is_fw else 1.0
-                ms = 3 if is_fw else 2
+                lw = style.mode_linewidth_fw if is_fw else style.mode_linewidth_bw
+                ms = style.mode_marker_size_fw if is_fw else style.mode_marker_size_bw
 
                 label = f"ND={nd}" if track_id == 0 else None
                 ax.plot(track_rpms[valid], stat_freqs[valid], ls,
@@ -1001,17 +1067,19 @@ def plot_campbell(
 
                 label_fw = f"ND={nd}" if track_id == 0 else None
                 ax.plot(track_rpms[valid], fw_freqs[valid], "-",
-                        color=color, linewidth=1.2, label=label_fw,
-                        marker=".", markersize=3)
+                        color=color, linewidth=style.mode_linewidth_fw,
+                        label=label_fw,
+                        marker=".", markersize=style.mode_marker_size_fw)
                 ax.plot(track_rpms[valid], bw_freqs[valid], "--",
-                        color=color, linewidth=1.0,
-                        marker=".", markersize=2)
+                        color=color, linewidth=style.mode_linewidth_bw,
+                        marker=".", markersize=style.mode_marker_size_bw)
             else:
                 # k=0: standing waves, plot single line
                 label = f"ND={nd}" if track_id == 0 else None
                 ax.plot(track_rpms[valid], track_rot_freqs[valid], "-",
-                        color=color, linewidth=1.2, label=label,
-                        marker=".", markersize=3)
+                        color=color, linewidth=style.mode_linewidth_fw,
+                        label=label,
+                        marker=".", markersize=style.mode_marker_size_fw)
 
             # D11: Confidence bands
             if confidence_bands is not None:
@@ -1024,7 +1092,7 @@ def plot_campbell(
                     if len(u) == len(track_rpms):
                         ax.fill_between(
                             track_rpms[valid], l[valid], u[valid],
-                            alpha=0.15, color=color,
+                            alpha=style.confidence_alpha, color=color,
                         )
 
     # D11: Crossing markers — detect where mode tracks cross EO lines
@@ -1064,14 +1132,20 @@ def plot_campbell(
                         frac = abs(diff[j]) / (abs(diff[j]) + abs(diff[j + 1]))
                         cross_rpm = tr_rpms[j] + frac * (tr_rpms[j + 1] - tr_rpms[j])
                         cross_freq = eo * cross_rpm / 60.0
-                        ax.plot(cross_rpm, cross_freq, "rx", markersize=10,
-                                markeredgewidth=2, zorder=5)
+                        ax.plot(cross_rpm, cross_freq,
+                                marker=style.crossing_marker,
+                                color=style.crossing_color,
+                                markersize=style.crossing_markersize,
+                                markeredgewidth=style.crossing_markeredgewidth,
+                                linestyle="none", zorder=5)
 
     # Engine order lines
     if engine_orders:
         for eo in engine_orders:
             eo_freq = eo * rpms / 60.0
-            ax.plot(rpms, eo_freq, "k:", linewidth=0.8, alpha=0.4)
+            ax.plot(rpms, eo_freq, linestyle=style.eo_linestyle,
+                    color=style.eo_color, linewidth=style.eo_linewidth,
+                    alpha=style.eo_alpha)
             y_pos = eo_freq[-1]
             if max_freq and y_pos > max_freq:
                 # Find where EO line intersects max_freq
@@ -1080,17 +1154,45 @@ def plot_campbell(
                     idx = cross[-1]
                     y_pos = eo_freq[idx]
                     ax.text(rpms[idx], y_pos, f" EO={eo}",
-                            fontsize=8, va="bottom", alpha=0.6)
+                            fontsize=style.eo_label_fontsize,
+                            va="bottom", alpha=0.6)
             else:
                 ax.text(rpms[-1], y_pos, f" EO={eo}",
-                        fontsize=8, va="center", alpha=0.6)
+                        fontsize=style.eo_label_fontsize,
+                        va="center", alpha=0.6)
 
-    ax.set_xlabel("RPM", fontsize=11)
-    ax.set_ylabel("Frequency (Hz)", fontsize=11)
+    # Stator vane NPF lines
+    if stator_vanes is not None and stator_vanes > 0:
+        V = stator_vanes
+        y_top = max_freq if max_freq else ax.get_ylim()[1]
+        for n in range(1, 20):
+            npf_freqs = n * V * rpms / 60.0
+            if np.min(npf_freqs) > y_top:
+                break
+            ax.plot(rpms, npf_freqs,
+                    color=style.stator_color,
+                    linewidth=style.stator_linewidth,
+                    linestyle=style.stator_linestyle,
+                    alpha=style.stator_alpha, zorder=1)
+            y_pos = npf_freqs[-1]
+            if max_freq and y_pos > max_freq:
+                cross = np.where(npf_freqs <= max_freq)[0]
+                if len(cross) > 0:
+                    idx = cross[-1]
+                    ax.text(rpms[idx], npf_freqs[idx], f" {n}xNPF",
+                            fontsize=style.eo_label_fontsize,
+                            color=style.stator_color, va="bottom", alpha=0.7)
+            else:
+                ax.text(rpms[-1], y_pos, f" {n}xNPF",
+                        fontsize=style.eo_label_fontsize,
+                        color=style.stator_color, va="center", alpha=0.7)
+
+    ax.set_xlabel("RPM", fontsize=style.axis_label_fontsize)
+    ax.set_ylabel("Frequency (Hz)", fontsize=style.axis_label_fontsize)
     title = "Campbell Diagram"
     if condition_label:
         title += f"  ({condition_label})"
-    ax.set_title(title, fontsize=13)
+    ax.set_title(title, fontsize=style.title_fontsize)
     ax.set_xlim(rpms[0], rpms[-1])
     if max_freq:
         ax.set_ylim(0, max_freq)
@@ -1110,14 +1212,23 @@ def plot_campbell(
             unique_labels.append(lbl)
     # Add whirl direction legend entries
     unique_handles.extend([
-        Line2D([0], [0], color="gray", linestyle="-", linewidth=1.5, label="FW"),
-        Line2D([0], [0], color="gray", linestyle="--", linewidth=1.5, label="BW"),
+        Line2D([0], [0], color="gray", linestyle="-",
+               linewidth=style.mode_linewidth_fw, label="FW"),
+        Line2D([0], [0], color="gray", linestyle="--",
+               linewidth=style.mode_linewidth_bw, label="BW"),
     ])
     unique_labels.extend(["FW", "BW"])
+    if stator_vanes is not None and stator_vanes > 0:
+        unique_handles.append(
+            Line2D([0], [0], color=style.stator_color,
+                   linewidth=style.stator_linewidth,
+                   linestyle=style.stator_linestyle,
+                   alpha=style.stator_alpha, label="NPF"))
+        unique_labels.append("NPF")
 
-    ax.legend(unique_handles, unique_labels, loc="upper left", fontsize=7,
-              ncol=3, framealpha=0.8)
-    ax.grid(True, alpha=0.3)
+    ax.legend(unique_handles, unique_labels, loc="upper left",
+              fontsize=style.legend_fontsize, ncol=3, framealpha=0.8)
+    ax.grid(True, alpha=style.grid_alpha)
     fig.tight_layout()
     return fig
 
@@ -1161,7 +1272,11 @@ def plot_zzenf(
     mode_ids: list | None = None,
     mesh: "Mesh | None" = None,
     eo_lines: bool = False,
+    engine_orders: Sequence[int] | None = None,
     crossing_markers: bool = False,
+    stator_vanes: int | None = None,
+    confidence_bands: dict | None = None,
+    style: DiagramStyle | None = None,
 ):
     """Plot ZZENF (zig-zag) interference diagram.
 
@@ -1184,11 +1299,19 @@ def plot_zzenf(
     mesh : optional ``Mesh``.  If *mode_ids* is not provided and a mesh is
         given, ``identify_modes`` is called automatically to obtain
         family labels.
-    eo_lines : if ``True``, overlay the engine-order zig-zag excitation
-        lines.  Engine order *e* excites nodal diameter ``e mod N``
+    eo_lines : deprecated, use *engine_orders* instead.  If ``True``,
+        overlay all engine-order zig-zag excitation lines.
+    engine_orders : specific engine orders to overlay and label on the
+        zig-zag.  Engine order *e* excites nodal diameter ``e mod N``
         (folded into ``0 .. N/2``) at frequency ``e * RPM / 60``.
     crossing_markers : if ``True``, mark resonance crossings where the
-        EO zig-zag intersects a family curve (implies *eo_lines=True*).
+        EO zig-zag intersects a family curve (implies EO zig-zag drawing).
+    stator_vanes : if set, overlay horizontal nozzle-passing-frequency
+        lines at ``f = n * V * RPM / 60`` with diamond markers at the
+        excited nodal diameters via Tyler-Sofrin relation.
+    confidence_bands : ``{"upper": {family_key: array}, "lower": ...}``
+        to shade per-family frequency ranges.
+    style : :class:`DiagramStyle` controlling visual properties
 
     Returns
     -------
@@ -1197,12 +1320,29 @@ def plot_zzenf(
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
     from collections import defaultdict
+    import warnings
+
+    if style is None:
+        style = DiagramStyle()
 
     N = num_sectors
     half_N = N // 2
 
+    # -- Handle eo_lines deprecation --
+    _draw_eo = False
+    _label_eos: set[int] | None = None  # None = label at peaks/troughs only
+    if eo_lines:
+        warnings.warn(
+            "eo_lines is deprecated, use engine_orders instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _draw_eo = True
+    if engine_orders is not None:
+        _draw_eo = True
+        _label_eos = set(engine_orders)
     if crossing_markers:
-        eo_lines = True
+        _draw_eo = True
 
     has_coriolis = any(
         np.any(np.asarray(r.whirl_direction) != 0) for r in results_at_rpm
@@ -1246,8 +1386,19 @@ def plot_zzenf(
     n_families = len(family_keys)
 
     # -- Colour palette --
-    cmap = plt.colormaps["tab10"]
-    fam_colors = [cmap(i % 10) for i in range(n_families)]
+    if style.colormap is not None:
+        cmap = plt.colormaps[style.colormap]
+    elif n_families <= 10:
+        cmap = plt.colormaps["tab10"]
+    elif n_families <= 20:
+        cmap = plt.colormaps["tab20"]
+    else:
+        cmap = plt.colormaps["turbo"]
+    fam_colors = [
+        cmap(i / max(n_families - 1, 1)) if n_families > 20
+        else cmap(i % cmap.N)
+        for i in range(n_families)
+    ]
 
     # -- Draw --
     fig, ax = plt.subplots(figsize=figsize)
@@ -1281,17 +1432,22 @@ def plot_zzenf(
 
                 if len(fw_line) > 1:
                     nds, fs = zip(*fw_line)
-                    ax.plot(nds, fs, "-", color=col, linewidth=1.5, zorder=2)
+                    ax.plot(nds, fs, "-", color=col,
+                            linewidth=style.family_linewidth, zorder=2)
                 if len(bw_line) > 1:
                     nds, fs = zip(*bw_line)
-                    ax.plot(nds, fs, "--", color=col, linewidth=1.5, zorder=2)
+                    ax.plot(nds, fs, "--", color=col,
+                            linewidth=style.family_linewidth, zorder=2)
 
                 # Markers (always plotted at every ND)
                 for nd, f, w in data:
                     mk = {1: "^", -1: "v"}.get(w, "o")
                     ax.plot(
-                        nd, f, mk, color=col, markersize=6,
-                        markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                        nd, f, mk, color=col,
+                        markersize=style.family_marker_size,
+                        markeredgecolor=style.family_marker_edge_color,
+                        markeredgewidth=style.family_marker_edge_width,
+                        zorder=3,
                     )
             else:
                 # No Coriolis — single line per family.
@@ -1305,13 +1461,17 @@ def plot_zzenf(
                 if len(line_pts) > 1:
                     nds, fs = zip(*line_pts)
                     ax.plot(
-                        nds, fs, "-", color=col, linewidth=1.5, zorder=2,
+                        nds, fs, "-", color=col,
+                        linewidth=style.family_linewidth, zorder=2,
                     )
                 # Markers at all NDs
                 for nd, f in all_pts:
                     ax.plot(
-                        nd, f, "o", color=col, markersize=6,
-                        markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                        nd, f, "o", color=col,
+                        markersize=style.family_marker_size,
+                        markeredgecolor=style.family_marker_edge_color,
+                        markeredgewidth=style.family_marker_edge_width,
+                        zorder=3,
                     )
 
             # Annotate family label at the rightmost ND
@@ -1330,13 +1490,31 @@ def plot_zzenf(
                 else:
                     mk = "o"
                 ax.plot(
-                    nd, f, mk, color=col, markersize=6,
-                    markeredgecolor="white", markeredgewidth=0.5, zorder=3,
+                    nd, f, mk, color=col,
+                    markersize=style.family_marker_size,
+                    markeredgecolor=style.family_marker_edge_color,
+                    markeredgewidth=style.family_marker_edge_width,
+                    zorder=3,
                 )
 
+        # -- Confidence bands per family --
+        if confidence_bands is not None:
+            upper = confidence_bands.get("upper", {})
+            lower = confidence_bands.get("lower", {})
+            if fkey in upper and fkey in lower:
+                u_pts = sorted(upper[fkey])   # list of (nd, freq)
+                l_pts = sorted(lower[fkey])
+                if len(u_pts) == len(l_pts):
+                    u_nds, u_fs = zip(*u_pts) if u_pts else ([], [])
+                    _, l_fs = zip(*l_pts) if l_pts else ([], [])
+                    ax.fill_between(
+                        u_nds, l_fs, u_fs,
+                        alpha=style.confidence_alpha, color=col,
+                    )
+
     # -- Axes and styling --
-    ax.set_xlabel("Nodal Diameter", fontsize=11)
-    ax.set_ylabel("Frequency (Hz)", fontsize=11)
+    ax.set_xlabel("Nodal Diameter", fontsize=style.axis_label_fontsize)
+    ax.set_ylabel("Frequency (Hz)", fontsize=style.axis_label_fontsize)
 
     rpm = abs(results_at_rpm[0].rpm) if results_at_rpm else 0
     title = "ZZENF Diagram"
@@ -1344,7 +1522,7 @@ def plot_zzenf(
         title += f" @ {rpm:.0f} RPM"
     if condition_label:
         title += f"  ({condition_label})"
-    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.set_title(title, fontsize=style.title_fontsize, fontweight="bold")
 
     ax.set_xticks(range(half_N + 1))
     right_pad = 1.5 if (connect_families and mode_ids is not None) else 0.3
@@ -1357,7 +1535,7 @@ def plot_zzenf(
             ax.set_ylim(0, max(all_freqs) * 1.08)
 
     # -- Engine-order zig-zag lines --
-    if eo_lines and rpm > 0:
+    if _draw_eo and rpm > 0:
         f1 = rpm / 60.0  # frequency per engine order
         y_top = ax.get_ylim()[1]
         max_eo = int(y_top / f1) + 1
@@ -1369,28 +1547,72 @@ def plot_zzenf(
             eo_nds.append(nd_fold)
             eo_freqs.append(e * f1)
         ax.plot(
-            eo_nds, eo_freqs, "-", color="gray", linewidth=0.8,
-            alpha=0.45, zorder=1,
+            eo_nds, eo_freqs, "-", color=style.eo_color,
+            linewidth=style.eo_linewidth, alpha=style.eo_alpha, zorder=1,
         )
-        # Label a few EO numbers at the zig-zag peaks/troughs
+        # Label EO numbers at zig-zag turning points
         for e in range(max_eo + 1):
             nd_raw = e % N
             nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
             freq_e = e * f1
             if freq_e > y_top:
                 break
-            # Annotate at turning points (ND=0 or ND=N/2)
-            if nd_fold == 0 or nd_fold == half_N:
+            # When engine_orders is specified, only label those EOs;
+            # otherwise label at peaks/troughs (ND=0 or ND=N/2)
+            should_label = (
+                (_label_eos is not None and e in _label_eos) or
+                (_label_eos is None and (nd_fold == 0 or nd_fold == half_N))
+            )
+            if should_label:
                 ax.annotate(
-                    str(e), (nd_fold, freq_e),
-                    fontsize=6, color="gray", alpha=0.7,
+                    f"EO{e}" if _label_eos is not None else str(e),
+                    (nd_fold, freq_e),
+                    fontsize=style.eo_label_fontsize,
+                    color=style.eo_color, alpha=0.7,
                     textcoords="offset points",
                     xytext=(-8 if nd_fold == half_N else 4, 2),
-                    va="bottom",
+                    va="bottom", fontweight="bold",
+                )
+
+    # -- Stator vane NPF horizontal lines --
+    if stator_vanes is not None and stator_vanes > 0 and rpm > 0:
+        V = stator_vanes
+        y_top = ax.get_ylim()[1]
+        for n in range(1, 20):
+            npf_freq = n * V * rpm / 60.0
+            if npf_freq > y_top:
+                break
+            ax.axhline(
+                y=npf_freq, color=style.stator_color,
+                linewidth=style.stator_linewidth,
+                linestyle=style.stator_linestyle,
+                alpha=style.stator_alpha, zorder=1,
+            )
+            ax.text(
+                half_N + 0.15, npf_freq, f" {n}xNPF",
+                fontsize=style.eo_label_fontsize,
+                color=style.stator_color, va="bottom", alpha=0.7,
+            )
+            # Diamond markers at excited NDs (Tyler-Sofrin relation)
+            excited_nds: set[int] = set()
+            for m in range(-50, 51):
+                nd_exc = abs(n * V - m * N)
+                nd_fold = nd_exc if nd_exc <= half_N else N - (nd_exc % N)
+                if nd_fold > half_N:
+                    nd_fold = N - nd_fold
+                if 0 <= nd_fold <= half_N:
+                    excited_nds.add(nd_fold)
+            for nd_exc in sorted(excited_nds):
+                ax.plot(
+                    nd_exc, npf_freq, "D",
+                    color=style.stator_color,
+                    markersize=style.family_marker_size * 0.8,
+                    markeredgecolor="white", markeredgewidth=0.5,
+                    alpha=style.stator_alpha + 0.2, zorder=4,
                 )
 
     # -- Crossing markers (EO zig-zag × family curves) --
-    if crossing_markers and rpm > 0:
+    if crossing_markers and _draw_eo and rpm > 0:
         f1 = rpm / 60.0
         y_top = ax.get_ylim()[1]
         max_eo = int(y_top / f1) + 1
@@ -1444,12 +1666,15 @@ def plot_zzenf(
         if crossings:
             cx, cy = zip(*crossings)
             ax.plot(
-                cx, cy, "x", color="red", markersize=8,
-                markeredgewidth=2, zorder=5,
+                cx, cy, style.crossing_marker,
+                color=style.crossing_color,
+                markersize=style.crossing_markersize,
+                markeredgewidth=style.crossing_markeredgewidth,
+                zorder=5,
             )
 
-    ax.grid(True, which="major", alpha=0.3, linewidth=0.8)
-    ax.grid(True, which="minor", alpha=0.15, linewidth=0.5)
+    ax.grid(True, which="major", alpha=style.grid_alpha, linewidth=0.8)
+    ax.grid(True, which="minor", alpha=style.grid_alpha * 0.5, linewidth=0.5)
     ax.minorticks_on()
     ax.tick_params(axis="both", which="major", labelsize=10)
     for spine in ax.spines.values():
@@ -1460,34 +1685,53 @@ def plot_zzenf(
     if has_coriolis:
         handles.extend([
             Line2D([0], [0], marker="^", color="gray", linestyle="-",
-                   linewidth=1.5, markersize=7, label="Forward (FW)"),
+                   linewidth=style.family_linewidth,
+                   markersize=style.family_marker_size + 1,
+                   label="Forward (FW)"),
             Line2D([0], [0], marker="v", color="gray", linestyle="--",
-                   linewidth=1.5, markersize=7, label="Backward (BW)"),
+                   linewidth=style.family_linewidth,
+                   markersize=style.family_marker_size + 1,
+                   label="Backward (BW)"),
             Line2D([0], [0], marker="o", color="gray", linestyle="None",
-                   markersize=7, label="Standing (k=0, N/2)"),
+                   markersize=style.family_marker_size + 1,
+                   label="Standing (k=0, N/2)"),
         ])
     if connect_families and n_families <= 12:
         for fi, fkey in enumerate(family_keys):
             lbl = str(fkey) if mode_ids is not None else f"Family {fi + 1}"
             handles.append(
-                Line2D([0], [0], color=fam_colors[fi], linewidth=2, label=lbl),
+                Line2D([0], [0], color=fam_colors[fi],
+                       linewidth=style.family_linewidth + 0.5, label=lbl),
             )
-    if eo_lines and rpm > 0:
+    if _draw_eo and rpm > 0:
         handles.append(
-            Line2D([0], [0], color="gray", linewidth=0.8, alpha=0.45,
+            Line2D([0], [0], color=style.eo_color,
+                   linewidth=style.eo_linewidth, alpha=style.eo_alpha,
                    label="EO zig-zag"),
+        )
+    if stator_vanes is not None and stator_vanes > 0:
+        handles.append(
+            Line2D([0], [0], color=style.stator_color,
+                   linewidth=style.stator_linewidth,
+                   linestyle=style.stator_linestyle,
+                   alpha=style.stator_alpha, label="NPF"),
         )
     if crossing_markers:
         handles.append(
-            Line2D([0], [0], marker="x", color="red", linestyle="None",
-                   markersize=8, markeredgewidth=2, label="Resonance crossing"),
+            Line2D([0], [0], marker=style.crossing_marker,
+                   color=style.crossing_color, linestyle="None",
+                   markersize=style.crossing_markersize,
+                   markeredgewidth=style.crossing_markeredgewidth,
+                   label="Resonance crossing"),
         )
     if not handles:
         handles.append(
             Line2D([0], [0], marker="o", color="gray", linestyle="None",
-                   markersize=7, label="Natural frequency"),
+                   markersize=style.family_marker_size + 1,
+                   label="Natural frequency"),
         )
-    ax.legend(handles=handles, loc="upper left", fontsize=9,
+    ax.legend(handles=handles, loc="upper left",
+              fontsize=style.legend_fontsize,
               framealpha=0.9, edgecolor="gray")
 
     fig.tight_layout()
@@ -1546,6 +1790,239 @@ def _removed_func(
     fig.colorbar(im, ax=ax, label="Mean |SHAP_REMOVEDvalue|")
     fig.tight_layout()
     return fig
+
+
+def diagnose_frequencies(
+    results: "list[ModalResult] | list[list[ModalResult]]",
+    ground_truth: np.ndarray,
+    num_sectors: int,
+    rpm_index: int | None = None,
+    figsize: tuple[float, float] = (10, 7),
+    style: DiagramStyle | None = None,
+    return_figures: bool = True,
+) -> dict:
+    """Compare solver frequencies against ground truth and generate diagnostics.
+
+    Parameters
+    ----------
+    results : solver output — either a flat list of ``ModalResult`` (one RPM)
+        or a nested ``list[list[ModalResult]]`` from an RPM sweep.
+    ground_truth : 2-D array of shape ``(n_nd, n_modes_per_nd)``.
+        Rows = nodal diameters (0 … N/2), columns = modes sorted ascending.
+        Use ``NaN`` for missing/unknown entries.
+    num_sectors : number of sectors in the full annulus
+    rpm_index : which RPM point to diagnose when *results* is a sweep.
+        ``None`` selects the last RPM point.
+    figsize : base figure size (individual figures may adjust width)
+    style : :class:`DiagramStyle` controlling visual properties
+    return_figures : if ``True``, generate and return matplotlib figures
+
+    Returns
+    -------
+    dict with keys:
+        ``computed_matrix`` — ``(n_nd, n_modes)`` array of solver frequencies
+        ``error_matrix`` — relative error ``|comp - gt| / |gt|``
+        ``abs_error_matrix`` — absolute error ``|comp - gt|``
+        ``worst_mode`` — ``(nd, mode_idx, rel_error_pct)``
+        ``per_nd_stats`` — dict per ND with mean/max/std of relative error
+        ``summary`` — human-readable summary string
+        ``figures`` — list of Figures (if *return_figures* is True)
+    """
+    import matplotlib.pyplot as plt
+
+    if style is None:
+        style = DiagramStyle()
+
+    gt = np.asarray(ground_truth, dtype=float)
+    if gt.ndim == 1:
+        gt = gt.reshape(-1, 1)
+    n_nd_gt, n_modes_gt = gt.shape
+
+    N = num_sectors
+    half_N = N // 2
+
+    # -- Normalize input: extract single-RPM slice --
+    if results and isinstance(results[0], list):
+        # RPM sweep: list[list[ModalResult]]
+        idx = rpm_index if rpm_index is not None else len(results) - 1
+        results_at_rpm: list[ModalResult] = results[idx]
+    else:
+        results_at_rpm = results  # type: ignore[assignment]
+
+    # -- Build computed frequency matrix: (n_nd, n_modes) --
+    freq_by_nd: dict[int, list[float]] = {}
+    for r in results_at_rpm:
+        nd = r.harmonic_index
+        nd_folded = nd if nd <= half_N else N - nd
+        freqs = sorted(float(f) for f in r.frequencies)
+        if nd_folded not in freq_by_nd:
+            freq_by_nd[nd_folded] = []
+        freq_by_nd[nd_folded].extend(freqs)
+
+    # Deduplicate near-identical degenerate pairs and sort
+    for nd in freq_by_nd:
+        fs = sorted(freq_by_nd[nd])
+        deduped: list[float] = []
+        for f in fs:
+            if not deduped or abs(f - deduped[-1]) > 1e-6 * max(abs(f), 1.0):
+                deduped.append(f)
+        freq_by_nd[nd] = deduped
+
+    # Build matrix matching GT dimensions
+    computed = np.full_like(gt, np.nan)
+    for nd in range(min(n_nd_gt, half_N + 1)):
+        if nd in freq_by_nd:
+            fs = freq_by_nd[nd]
+            n_fill = min(len(fs), n_modes_gt)
+            for j in range(n_fill):
+                computed[nd, j] = fs[j]
+
+    # -- Error matrices --
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel_error = np.where(
+            np.isnan(gt) | np.isnan(computed) | (np.abs(gt) < 1e-12),
+            np.nan,
+            np.abs(computed - gt) / np.abs(gt),
+        )
+    abs_error = np.where(
+        np.isnan(gt) | np.isnan(computed), np.nan, np.abs(computed - gt)
+    )
+
+    # -- Statistics --
+    # Worst mode
+    rel_flat = rel_error.copy()
+    rel_flat[np.isnan(rel_flat)] = -1.0
+    worst_idx = np.unravel_index(np.argmax(rel_flat), rel_flat.shape)
+    worst_val = rel_error[worst_idx]
+    worst_mode = (int(worst_idx[0]), int(worst_idx[1]),
+                  float(worst_val * 100) if not np.isnan(worst_val) else 0.0)
+
+    # Per-ND stats
+    per_nd_stats: dict[int, dict] = {}
+    for nd in range(n_nd_gt):
+        row = rel_error[nd]
+        valid = row[~np.isnan(row)]
+        if len(valid) > 0:
+            per_nd_stats[nd] = {
+                "mean": float(np.mean(valid) * 100),
+                "max": float(np.max(valid) * 100),
+                "std": float(np.std(valid) * 100),
+                "n_modes": int(len(valid)),
+            }
+        else:
+            per_nd_stats[nd] = {"mean": 0.0, "max": 0.0, "std": 0.0, "n_modes": 0}
+
+    # Summary text
+    valid_all = rel_error[~np.isnan(rel_error)]
+    if len(valid_all) > 0:
+        mean_pct = float(np.mean(valid_all) * 100)
+        max_pct = float(np.max(valid_all) * 100)
+    else:
+        mean_pct = max_pct = 0.0
+    summary_lines = [
+        f"Frequency Diagnostic Summary ({n_nd_gt} NDs x {n_modes_gt} modes)",
+        f"  Mean relative error:  {mean_pct:.4f}%",
+        f"  Max  relative error:  {max_pct:.4f}%",
+        f"  Worst mode: ND={worst_mode[0]}, mode={worst_mode[1]} "
+        f"({worst_mode[2]:.4f}%)",
+    ]
+    for nd in range(n_nd_gt):
+        s = per_nd_stats[nd]
+        summary_lines.append(
+            f"  ND {nd:>2d}: mean={s['mean']:.4f}%  max={s['max']:.4f}%  "
+            f"std={s['std']:.4f}%  ({s['n_modes']} modes)"
+        )
+    summary = "\n".join(summary_lines)
+
+    result: dict = {
+        "computed_matrix": computed,
+        "error_matrix": rel_error,
+        "abs_error_matrix": abs_error,
+        "worst_mode": worst_mode,
+        "per_nd_stats": per_nd_stats,
+        "summary": summary,
+    }
+
+    # -- Figures --
+    if return_figures:
+        figures: list = []
+
+        # Fig 1: Error heatmap
+        fig1, ax1 = plt.subplots(figsize=figsize)
+        display_err = rel_error * 100  # convert to %
+        masked = np.ma.masked_invalid(display_err)
+        im = ax1.imshow(masked, aspect="auto", cmap="RdYlGn_r", origin="lower")
+        ax1.set_xlabel("Mode Index", fontsize=style.axis_label_fontsize)
+        ax1.set_ylabel("Nodal Diameter", fontsize=style.axis_label_fontsize)
+        ax1.set_title("Relative Error (%)", fontsize=style.title_fontsize)
+        ax1.set_xticks(range(n_modes_gt))
+        ax1.set_yticks(range(n_nd_gt))
+        # Annotate cells
+        for i in range(n_nd_gt):
+            for j in range(n_modes_gt):
+                val = display_err[i, j]
+                if not np.isnan(val):
+                    ax1.text(j, i, f"{val:.2f}", ha="center", va="center",
+                             fontsize=7, color="black" if val < 5 else "white")
+        fig1.colorbar(im, ax=ax1, label="Relative Error (%)")
+        fig1.tight_layout()
+        figures.append(fig1)
+
+        # Fig 2: Per-ND bar chart
+        fig2, ax2 = plt.subplots(figsize=(figsize[0], figsize[1] * 0.7))
+        nds = list(range(n_nd_gt))
+        means = [per_nd_stats[nd]["mean"] for nd in nds]
+        stds = [per_nd_stats[nd]["std"] for nd in nds]
+        bars = ax2.bar(nds, means, yerr=stds, capsize=4,
+                       color="#4c72b0", alpha=0.8, edgecolor="white")
+        ax2.set_xlabel("Nodal Diameter", fontsize=style.axis_label_fontsize)
+        ax2.set_ylabel("Mean Relative Error (%)",
+                        fontsize=style.axis_label_fontsize)
+        ax2.set_title("Per-ND Error Distribution",
+                       fontsize=style.title_fontsize)
+        ax2.set_xticks(nds)
+        ax2.grid(True, axis="y", alpha=style.grid_alpha)
+        fig2.tight_layout()
+        figures.append(fig2)
+
+        # Fig 3: Parity scatter (GT vs computed)
+        fig3, ax3 = plt.subplots(figsize=(figsize[1], figsize[1]))
+        valid_mask = ~np.isnan(gt) & ~np.isnan(computed)
+        gt_valid = gt[valid_mask]
+        comp_valid = computed[valid_mask]
+        err_valid = rel_error[valid_mask] * 100
+        sc = ax3.scatter(gt_valid, comp_valid, c=err_valid, cmap="RdYlGn_r",
+                         s=40, edgecolors="gray", linewidth=0.5, zorder=3)
+        # y=x reference
+        lims = [
+            min(gt_valid.min(), comp_valid.min()) * 0.95,
+            max(gt_valid.max(), comp_valid.max()) * 1.05,
+        ] if len(gt_valid) > 0 else [0, 1]
+        ax3.plot(lims, lims, "--", color="gray", linewidth=1, alpha=0.6,
+                 zorder=1)
+        ax3.set_xlim(lims)
+        ax3.set_ylim(lims)
+        ax3.set_xlabel("Ground Truth (Hz)",
+                        fontsize=style.axis_label_fontsize)
+        ax3.set_ylabel("Computed (Hz)", fontsize=style.axis_label_fontsize)
+        ax3.set_title("Parity Plot", fontsize=style.title_fontsize)
+        fig3.colorbar(sc, ax=ax3, label="Relative Error (%)")
+        ax3.set_aspect("equal")
+        # Circle worst mode
+        if worst_mode[2] > 0 and valid_mask[worst_idx]:
+            ax3.plot(
+                gt[worst_idx], computed[worst_idx], "o",
+                markersize=style.crossing_markersize + 4,
+                markeredgecolor="red", markeredgewidth=2,
+                markerfacecolor="none", zorder=5,
+            )
+        ax3.grid(True, alpha=style.grid_alpha)
+        fig3.tight_layout()
+        figures.append(fig3)
+
+        result["figures"] = figures
+
+    return result
 
 
 def interactive_plane_selector(mesh: Mesh):

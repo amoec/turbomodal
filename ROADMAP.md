@@ -51,7 +51,7 @@
 
 | Feature | Files | Status |
 |---------|-------|:------:|
-| _RemovedClass (BTT, strain, accelerometer) | Signal synthesis from modal superposition | Gaussian noise, harmonic interference | Sensor drift (linear, random-walk) | Bandwidth limiting (Butterworth LP) | ADC quantisation, signal dropout | HDF5 dataset export / import | Latin Hypercube parametric sweeps 
+| _RemovedClass (BTT, strain, accelerometer, displacement) | Signal synthesis from modal superposition | Gaussian noise, harmonic interference | Sensor drift (linear, random-walk) | Bandwidth limiting (Butterworth LP) | ADC quantisation, signal dropout | HDF5 dataset export / import | Latin Hypercube parametric sweeps 
 ### 
 
 | Feature | Files | Status |
@@ -69,8 +69,9 @@
 | Sector mesh + full annulus mesh plotting | `viz.py` | :white_check_mark: |
 | Mode shape (static, animated, GIF export) | `viz.py` | :white_check_mark: |
 | Full annulus mode animation | `viz.py` | :white_check_mark: |
-| Campbell diagram (MAC tracking, EO lines) | `viz.py` | :white_check_mark: |
-| ZZENF interference diagram | `viz.py` | :white_check_mark: |
+| Campbell diagram (MAC tracking, EO lines, NPF, DiagramStyle) | `viz.py` | :white_check_mark: |
+| ZZENF interference diagram (EO zig-zag, NPF, crossings, DiagramStyle) | `viz.py` | :white_check_mark: |
+| Frequency diagnostics vs ground truth (`diagnose_frequencies`) | `viz.py` | :white_check_mark: |
 | CAD geometry preview | `viz.py` | :white_check_mark: |
 | Interactive BC editor | `viz.py` | :white_check_mark: |
 | Contribution analysis heatmap | `viz.py` | :white_check_mark: |
