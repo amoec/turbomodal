@@ -1095,9 +1095,13 @@ def plot_campbell(
                             alpha=style.confidence_alpha, color=color,
                         )
 
-    # D11: Crossing markers — detect where mode tracks cross EO lines
+    # Crossing markers — detect where mode tracks cross EO and NPF lines
     all_track_data: list[tuple[np.ndarray, np.ndarray]] = []
-    if crossing_markers and engine_orders:
+    _need_tracks = (
+        (crossing_markers and engine_orders) or
+        (crossing_markers and stator_vanes is not None and stator_vanes > 0)
+    )
+    if _need_tracks:
         # Collect all valid track data for crossing detection
         for nd in all_nds:
             perm = _track_modes_for_harmonic(results, nd)
@@ -1122,22 +1126,34 @@ def plot_campbell(
                 if len(tr) > 1:
                     all_track_data.append((np.array(tr), np.array(tf)))
 
+    # Helper to find and plot crossings between mode tracks and a reference line
+    def _plot_crossings(ref_multiplier, color, marker_style=None):
         for tr_rpms, tr_freqs in all_track_data:
-            for eo in engine_orders:
-                eo_freqs = eo * tr_rpms / 60.0
-                diff = tr_freqs - eo_freqs
-                for j in range(len(diff) - 1):
-                    if diff[j] * diff[j + 1] < 0:
-                        # Linear interpolation
-                        frac = abs(diff[j]) / (abs(diff[j]) + abs(diff[j + 1]))
-                        cross_rpm = tr_rpms[j] + frac * (tr_rpms[j + 1] - tr_rpms[j])
-                        cross_freq = eo * cross_rpm / 60.0
-                        ax.plot(cross_rpm, cross_freq,
-                                marker=style.crossing_marker,
-                                color=style.crossing_color,
-                                markersize=style.crossing_markersize,
-                                markeredgewidth=style.crossing_markeredgewidth,
-                                linestyle="none", zorder=5)
+            ref_freqs = ref_multiplier * tr_rpms / 60.0
+            diff = tr_freqs - ref_freqs
+            for j in range(len(diff) - 1):
+                if diff[j] * diff[j + 1] < 0:
+                    frac = abs(diff[j]) / (abs(diff[j]) + abs(diff[j + 1]))
+                    cross_rpm = tr_rpms[j] + frac * (tr_rpms[j + 1] - tr_rpms[j])
+                    cross_freq = ref_multiplier * cross_rpm / 60.0
+                    ax.plot(cross_rpm, cross_freq,
+                            marker=style.crossing_marker,
+                            color=color,
+                            markersize=style.crossing_markersize,
+                            markeredgewidth=style.crossing_markeredgewidth,
+                            linestyle="none", zorder=5)
+
+    if crossing_markers and engine_orders:
+        for eo in engine_orders:
+            _plot_crossings(eo, style.crossing_color)
+
+    if crossing_markers and stator_vanes is not None and stator_vanes > 0:
+        V = stator_vanes
+        y_top = max_freq if max_freq else ax.get_ylim()[1]
+        for n in range(1, 20):
+            if n * V * rpms[0] / 60.0 > y_top and n * V * rpms[-1] / 60.0 > y_top:
+                break
+            _plot_crossings(n * V, style.stator_color)
 
     # Engine order lines
     if engine_orders:
@@ -1611,19 +1627,11 @@ def plot_zzenf(
                     alpha=style.stator_alpha + 0.2, zorder=4,
                 )
 
-    # -- Crossing markers (EO zig-zag × family curves) --
-    if crossing_markers and _draw_eo and rpm > 0:
-        f1 = rpm / 60.0
-        y_top = ax.get_ylim()[1]
-        max_eo = int(y_top / f1) + 1
-
-        # Build zig-zag path
-        zz: list[tuple[float, float]] = []
-        for e in range(max_eo + 1):
-            nd_raw = e % N
-            nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
-            zz.append((float(nd_fold), e * f1))
-
+    # -- Crossing markers (EO zig-zag and/or NPF × family curves) --
+    _need_crossings = crossing_markers and rpm > 0 and (
+        _draw_eo or (stator_vanes is not None and stator_vanes > 0)
+    )
+    if _need_crossings:
         # Build piecewise-linear family curves (same logic as drawing)
         fam_curves: list[list[tuple[float, float]]] = []
         for fkey in family_keys:
@@ -1652,22 +1660,60 @@ def plot_zzenf(
                 if len(pts) > 1:
                     fam_curves.append([(float(n), f) for n, f in pts])
 
-        # Find all segment–segment intersections
-        crossings = []
-        for curve in fam_curves:
-            for ci in range(len(curve) - 1):
-                p1, p2 = curve[ci], curve[ci + 1]
-                for zi in range(len(zz) - 1):
-                    p3, p4 = zz[zi], zz[zi + 1]
-                    hit = _seg_intersect(p1, p2, p3, p4)
-                    if hit is not None:
-                        crossings.append(hit)
+        crossings: list[tuple[float, float]] = []
+        npf_crossings: list[tuple[float, float]] = []
+
+        # EO zig-zag crossings
+        if _draw_eo:
+            f1 = rpm / 60.0
+            y_top = ax.get_ylim()[1]
+            max_eo = int(y_top / f1) + 1
+            zz: list[tuple[float, float]] = []
+            for e in range(max_eo + 1):
+                nd_raw = e % N
+                nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
+                zz.append((float(nd_fold), e * f1))
+            for curve in fam_curves:
+                for ci in range(len(curve) - 1):
+                    p1, p2 = curve[ci], curve[ci + 1]
+                    for zi in range(len(zz) - 1):
+                        p3, p4 = zz[zi], zz[zi + 1]
+                        hit = _seg_intersect(p1, p2, p3, p4)
+                        if hit is not None:
+                            crossings.append(hit)
+
+        # NPF horizontal line crossings
+        if stator_vanes is not None and stator_vanes > 0:
+            V = stator_vanes
+            y_top = ax.get_ylim()[1]
+            for nh in range(1, 20):
+                npf_freq = nh * V * rpm / 60.0
+                if npf_freq > y_top:
+                    break
+                # Horizontal line at y=npf_freq from x=0 to x=half_N
+                p3 = (0.0, npf_freq)
+                p4 = (float(half_N), npf_freq)
+                for curve in fam_curves:
+                    for ci in range(len(curve) - 1):
+                        p1, p2 = curve[ci], curve[ci + 1]
+                        hit = _seg_intersect(p1, p2, p3, p4)
+                        if hit is not None:
+                            npf_crossings.append(hit)
 
         if crossings:
             cx, cy = zip(*crossings)
             ax.plot(
                 cx, cy, style.crossing_marker,
                 color=style.crossing_color,
+                markersize=style.crossing_markersize,
+                markeredgewidth=style.crossing_markeredgewidth,
+                zorder=5,
+            )
+        if npf_crossings:
+            nx, ny = zip(*npf_crossings)
+            ax.plot(
+                nx, ny, style.crossing_marker,
+                color=style.stator_color,
                 markersize=style.crossing_markersize,
                 markeredgewidth=style.crossing_markeredgewidth,
                 zorder=5,
@@ -1859,14 +1905,9 @@ def diagnose_frequencies(
             freq_by_nd[nd_folded] = []
         freq_by_nd[nd_folded].extend(freqs)
 
-    # Deduplicate near-identical degenerate pairs and sort
+    # Sort frequencies per ND (keep all including degenerate FW/BW pairs)
     for nd in freq_by_nd:
-        fs = sorted(freq_by_nd[nd])
-        deduped: list[float] = []
-        for f in fs:
-            if not deduped or abs(f - deduped[-1]) > 1e-6 * max(abs(f), 1.0):
-                deduped.append(f)
-        freq_by_nd[nd] = deduped
+        freq_by_nd[nd] = sorted(freq_by_nd[nd])
 
     # Build matrix matching GT dimensions
     computed = np.full_like(gt, np.nan)
