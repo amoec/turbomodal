@@ -138,6 +138,93 @@ class TestPlotFullMesh:
         plotter.close()
 
 
+class TestPlotSensors:
+    @pytest.fixture
+    def mesh_and_sensors(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.sensors import SensorArrayConfig, VirtualSensorArray
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        mesh.identify_cyclic_boundaries()
+        mesh.match_boundary_nodes()
+
+        btt_cfg = SensorArrayConfig.default_btt_array(
+            num_probes=4, casing_radius=0.15,
+            axial_positions=[0.005], sample_rate=100_000.0, duration=0.01,
+        )
+        btt_vsa = VirtualSensorArray(mesh, btt_cfg)
+        return mesh, btt_vsa
+
+    def test_returns_plotter(self, mesh_and_sensors):
+        from turbomodal.viz import plot_sensors
+        mesh, vsa = mesh_and_sensors
+        plotter = plot_sensors(mesh, vsa, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_no_mesh_background(self, mesh_and_sensors):
+        from turbomodal.viz import plot_sensors
+        mesh, vsa = mesh_and_sensors
+        plotter = plot_sensors(mesh, vsa, show_mesh=False, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_no_directions(self, mesh_and_sensors):
+        from turbomodal.viz import plot_sensors
+        mesh, vsa = mesh_and_sensors
+        plotter = plot_sensors(mesh, vsa, show_directions=False, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_full_annulus(self, mesh_and_sensors):
+        from turbomodal.viz import plot_sensors
+        mesh, vsa = mesh_and_sensors
+        plotter = plot_sensors(mesh, vsa, full_annulus=True, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_uniform_color(self, mesh_and_sensors):
+        from turbomodal.viz import plot_sensors
+        mesh, vsa = mesh_and_sensors
+        plotter = plot_sensors(mesh, vsa, color_by="uniform", off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+    def test_mixed_sensor_types(self, wedge_mesh_path):
+        from turbomodal._core import Mesh
+        from turbomodal.sensors import (
+            SensorArrayConfig, SensorLocation, SensorType, VirtualSensorArray,
+        )
+        from turbomodal.viz import plot_sensors
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        mesh.identify_cyclic_boundaries()
+        mesh.match_boundary_nodes()
+
+        cfg = SensorArrayConfig(sensors=[
+            SensorLocation(
+                sensor_type=SensorType.BTT_PROBE,
+                position=np.array([0.15, 0.0, 0.005]),
+                direction=np.array([-1.0, 0.0, 0.0]),
+                label="BTT_0",
+            ),
+            SensorLocation(
+                sensor_type=SensorType.DISPLACEMENT,
+                position=np.array([0.08, 0.0, 0.005]),
+                direction=np.array([0.0, 0.0, -1.0]),
+                label="Disp_0",
+            ),
+        ])
+        vsa = VirtualSensorArray(mesh, cfg)
+        plotter = plot_sensors(mesh, vsa, off_screen=True)
+        assert plotter is not None
+        plotter.close()
+
+
 class TestPlotCampbell:
     def test_with_mock_data(self):
         from turbomodal._core import ModalResult

@@ -350,6 +350,151 @@ def plot_full_mesh(
     return plotter
 
 
+def plot_sensors(
+    mesh: Mesh,
+    sensor_array,
+    show_mesh: bool = True,
+    show_directions: bool = True,
+    direction_scale: float = 1.0,
+    color_by: str = "type",
+    full_annulus: bool = False,
+    off_screen: bool = False,
+    camera_position=None,
+):
+    """Plot sensor positions and measurement directions on the mesh in 3D.
+
+    Parameters
+    ----------
+    mesh : Mesh object (single sector)
+    sensor_array : VirtualSensorArray
+    show_mesh : if True, render the mesh surface as a semi-transparent background
+    show_directions : if True, draw arrows along each sensor's measurement direction
+    direction_scale : scaling factor for arrow length (1.0 = auto-scaled from mesh size)
+    color_by : ``"type"`` colours sensors by SensorType, ``"uniform"`` uses a single colour
+    full_annulus : if True, replicate the mesh across all sectors
+    off_screen : render off-screen (for testing)
+    camera_position : ``"auto"``, ``"xy"``, ``"xz"``, ``"yz"``, ``"iso"``, tuple, or None
+
+    Returns
+    -------
+    pyvista.Plotter
+    """
+    import pyvista as pv
+    from turbomodal.sensors import SensorType
+
+    sensors = sensor_array.config.sensors
+    n_sensors = len(sensors)
+
+    # --- Colour mapping by sensor type ---
+    _type_colors = {
+        SensorType.BTT_PROBE: "#2166ac",             # blue
+        SensorType.DISPLACEMENT: "#9467bd",           # purple
+        SensorType.STRAIN_GAUGE: "#2ca02c",           # green
+        SensorType.CASING_ACCELEROMETER: "#ff7f0e",   # orange
+    }
+
+    plotter = pv.Plotter(off_screen=off_screen)
+
+    # --- Mesh background ---
+    if show_mesh:
+        if full_annulus:
+            nodes = np.asarray(mesh.nodes)
+            elements = np.asarray(mesh.elements)
+            n_elem = elements.shape[0]
+            cells = np.empty((n_elem, 11), dtype=np.int64)
+            cells[:, 0] = 10
+            cells[:, 1:] = elements
+            celltypes = np.full(n_elem, _VTK_QUADRATIC_TETRA, dtype=np.uint8)
+            all_nodes, all_cells, all_celltypes = _replicate_sectors(
+                nodes, cells, mesh.num_sectors, celltypes,
+                rotation_axis=mesh.rotation_axis,
+            )
+            grid = pv.UnstructuredGrid(
+                all_cells.ravel(), all_celltypes, all_nodes,
+            )
+        else:
+            grid = _mesh_to_pyvista(mesh)
+
+        plotter.add_mesh(
+            grid, color="lightgray", opacity=0.3,
+            show_edges=True, edge_color="gray", line_width=0.5,
+        )
+
+    # --- Compute glyph sizes from mesh bounds ---
+    bounds = np.asarray(mesh.nodes)
+    diag = np.linalg.norm(bounds.max(axis=0) - bounds.min(axis=0))
+    sphere_r = diag * 0.012
+    arrow_len = diag * 0.06 * direction_scale
+
+    # --- Group sensors by type for colouring ---
+    if color_by == "type":
+        groups: dict[SensorType, list[int]] = {}
+        for i, s in enumerate(sensors):
+            groups.setdefault(s.sensor_type, []).append(i)
+    else:
+        groups = {SensorType.BTT_PROBE: list(range(n_sensors))}
+        _type_colors[SensorType.BTT_PROBE] = "#d62728"  # uniform red
+
+    for stype, indices in groups.items():
+        color = _type_colors.get(stype, "white")
+        positions = np.array([sensors[i].position for i in indices])
+        directions = np.array([sensors[i].direction for i in indices])
+        type_label = stype.value.replace("_", " ").title()
+
+        # Sphere glyphs at sensor positions
+        pts = pv.PolyData(positions)
+        sphere_glyphs = pts.glyph(
+            geom=pv.Sphere(radius=sphere_r), scale=False, orient=False,
+        )
+        plotter.add_mesh(sphere_glyphs, color=color, label=type_label)
+
+        # Arrow glyphs along measurement directions
+        if show_directions and arrow_len > 0:
+            pts_arrow = pv.PolyData(positions)
+            pts_arrow["vectors"] = directions * arrow_len
+            arrow_glyphs = pts_arrow.glyph(
+                orient="vectors", scale="vectors",
+                geom=pv.Arrow(
+                    tip_length=0.3, tip_radius=0.12,
+                    shaft_radius=0.04, shaft_resolution=12,
+                ),
+            )
+            plotter.add_mesh(arrow_glyphs, color=color)
+
+    # --- Labels ---
+    labels = [s.label for s in sensors if s.label]
+    if labels:
+        label_positions = np.array([
+            s.position for s in sensors if s.label
+        ])
+        plotter.add_point_labels(
+            label_positions, labels, font_size=10,
+            point_color="black", point_size=0,
+            render_points_as_spheres=False,
+            always_visible=True, shape_opacity=0.6,
+        )
+
+    # --- Type count summary ---
+    type_counts = {}
+    for s in sensors:
+        name = s.sensor_type.value.replace("_", " ")
+        type_counts[name] = type_counts.get(name, 0) + 1
+    summary_parts = [f"{v} {k}" for k, v in type_counts.items()]
+    plotter.add_text(
+        f"Sensors: {', '.join(summary_parts)}",
+        font_size=11,
+    )
+
+    plotter.add_axes()
+    plotter.add_legend(loc="lower right")
+    _apply_camera(
+        plotter,
+        camera_position if camera_position is not None else "auto",
+        mesh.rotation_axis,
+    )
+    return plotter
+
+
 def plot_mesh(
     mesh: Mesh,
     show_boundaries: bool = True,
