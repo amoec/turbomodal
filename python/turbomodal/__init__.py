@@ -60,6 +60,7 @@ from turbomodal.viz import (
     _RemovedClass,
     _removed,
     _removed,
+    filter_modal_results,
 )
 
 # Subsystem A extensions: dataset & parametric sweep
@@ -135,6 +136,8 @@ __all__ = [
     "interactive_plane_selector",
     "bc_editor",
     "plot_boundary_conditions",
+    "_removed_func",
+    "_removed_func",
     # Sensors & noise
     "_RemovedEnum",
     "_RemovedClass",
@@ -146,6 +149,7 @@ __all__ = [
     "_RemovedClass",
     "_removed",
     "_removed",
+    "filter_modal_results",
     # Dataset & parametric
     "_RemovedClass",
     "_RemovedClass",
