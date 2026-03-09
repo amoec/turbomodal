@@ -48,9 +48,7 @@ def test_solve_zero_rpm_standing_waves(wedge_mesh, steel_material):
 
 def test_solve_nonzero_rpm_whirl_split(wedge_mesh, steel_material):
     # With include_coriolis=True, the QEP solver assigns per-mode FW/BW labels
-    # based on the gyroscopic matrix. Without Coriolis, whirl_direction stays
-    # zero on the ModalResult (kinematic splitting is applied downstream by
-    # campbell_data).
+    # based on the gyroscopic matrix with Coriolis frequency splitting.
     results = solve(wedge_mesh, steel_material, rpm=3000.0, num_modes=3,
                     include_coriolis=True)
     found_fw = False
@@ -68,18 +66,28 @@ def test_solve_nonzero_rpm_whirl_split(wedge_mesh, steel_material):
 
 
 def test_solve_nonzero_rpm_no_coriolis(wedge_mesh, steel_material):
-    # Without Coriolis, whirl_direction should be zero (standing) for all modes.
-    # Kinematic FW/BW splitting is deferred to campbell_data.
+    # Without Coriolis, degenerate harmonics (0 < k < N/2) still carry FW/BW
+    # labels on their expanded mode pairs.  Standing-wave harmonics (k=0,
+    # k=N/2) should have whirl=0.
     results = solve(wedge_mesh, steel_material, rpm=3000.0, num_modes=3,
                     include_coriolis=False)
     assert len(results) > 0
+    max_k = wedge_mesh.num_sectors // 2
     for r in results:
         assert len(r.frequencies) > 0
+        k = r.harmonic_index
+        is_standing = (k == 0) or (wedge_mesh.num_sectors % 2 == 0 and k == max_k)
         for m in range(len(r.whirl_direction)):
-            assert r.whirl_direction[m] == 0, (
-                f"ND={r.harmonic_index} mode {m}: expected whirl=0 without "
-                f"Coriolis, got {r.whirl_direction[m]}"
-            )
+            if is_standing:
+                assert r.whirl_direction[m] == 0, (
+                    f"ND={k} mode {m}: expected whirl=0 (standing), "
+                    f"got {r.whirl_direction[m]}"
+                )
+            else:
+                assert r.whirl_direction[m] in (-1, 1), (
+                    f"ND={k} mode {m}: expected whirl=±1 (FW/BW), "
+                    f"got {r.whirl_direction[m]}"
+                )
         # Frequencies should be positive (rotating frame)
         for m in range(len(r.frequencies)):
             assert r.frequencies[m] > 0
