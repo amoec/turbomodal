@@ -48,7 +48,7 @@ class SensorLocation:
 | `bandwidth` | `float` | `50000.0` | Sensor bandwidth in Hz |
 | `sensitivity` | `float` | `1.0` | Output per unit displacement |
 | `noise_floor` | `float` | `1e-9` | Minimum detectable signal level |
-| `is_stationary` | `bool \| None` | `None` | Whether the sensor is casing-mounted (stationary frame). `None` = infer from `sensor_type`: BTT probes and casing accelerometers are stationary; strain gauges and displacement sensors rotate with the disk. |
+| `is_stationary` | `bool \| None` | `None` | Whether the sensor is casing-mounted (stationary frame). `None` = infer from `sensor_type`: only strain gauges rotate with the disk; all other types (BTT probes, casing accelerometers, displacement sensors) are stationary. |
 
 ### SensorArrayConfig
 
@@ -435,27 +435,30 @@ where *theta* is the sensor's circumferential angle and *w* is the whirl directi
 | `"btt_deflections"` | `{sensor_idx: ndarray}` | Deflection at each arrival (BTT only) |
 | `"btt_blade_indices"` | `{sensor_idx: ndarray}` | Which blade produced each arrival (BTT only) |
 
-**Example -- two BTT probes identifying nodal diameters:**
+**Example -- displacement probes along the blade span:**
 
 ```python
 import turbomodal as tm
 
-# 4 BTT probes at 0, 90, 180, 270 degrees
-btt_cfg = tm.SensorArrayConfig.default_btt_array(
-    num_probes=4, casing_radius=0.25, axial_positions=[0.01]
+# Three axial displacement probes at different radii
+disp_cfg = tm.SensorArrayConfig.default_displacement_array(
+    positions=[[0.05, 0, 0.005], [0.08, 0, 0.005], [0.10, 0, 0.005]],
+    direction="axial",
+    sample_rate=50_000.0,
+    duration=0.1,
 )
-vsa = tm.VirtualSensorArray(mesh, btt_cfg)
+vsa = tm.VirtualSensorArray(mesh, disp_cfg)
 
 cfg = tm.SignalGenerationConfig(
-    sample_rate=500_000, num_revolutions=10,
-    damping_ratio=0.01,
+    sample_rate=50_000.0, duration=0.1,
+    amplitude_mode="projection",   # amplitude from mode shape projection
+    damping_ratio=0.005,
 )
-out = tm.generate_signals_for_condition(vsa, results, 6000.0, cfg)
+out = tm.generate_signals_for_condition(vsa, results, 3000.0, cfg)
 
-# Phase difference between probes 0 and 1 is k * pi/2
-# Use this to identify the nodal diameter k
-arrivals_0 = out["btt_arrival_times"][0]
-arrivals_1 = out["btt_arrival_times"][1]
+# Visualise specific modes by nodal diameter and whirl direction
+fig = tm.plot_sensor_signals(vsa, results, rpm=3000.0, nd=3, whirl=1)
+fig.savefig("nd3_fw_signals.png")
 ```
 
 ### generate_dataset_signals
@@ -475,6 +478,81 @@ def generate_dataset_signals(
 
 **Returns:** dict with keys `"signals"` `(n_cond, n_sensors, n_samples)`,
 `"clean_signals"`, `"conditions"`, `"sample_rate"`, `"time"`.
+
+### filter_modal_results
+
+Filter modal results by nodal diameter, nodal circles, and/or whirl direction.
+
+```python
+def filter_modal_results(
+    modal_results: list,
+    mesh=None,
+    nd: int | list[int] | None = None,
+    nc: int | list[int] | None = None,
+    whirl: int | list[int] | None = None,
+) -> list
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `modal_results` | `list[ModalResult]` | required | Results across all harmonic indices |
+| `mesh` | `Mesh \| None` | `None` | Required when filtering by `nc` (needs mode identification) |
+| `nd` | `int \| list[int] \| None` | `None` | Nodal diameter(s) to keep. `None` keeps all. |
+| `nc` | `int \| list[int] \| None` | `None` | Nodal circle(s) to keep. `None` keeps all. |
+| `whirl` | `int \| list[int] \| None` | `None` | Whirl direction(s): `+1` (FW), `-1` (BW), `0` (standing). `None` keeps all. |
+
+**Returns:** Filtered list of `ModalResult`. When `nc` or `whirl` is specified,
+individual results may contain fewer modes than the originals.
+
+---
+
+## turbomodal.viz -- Signal Visualization
+
+### plot_sensor_signals
+
+Generate time-domain waveform plots for selected modes at a given operating
+condition. Internally calls `filter_modal_results` then
+`generate_signals_for_condition`.
+
+```python
+def plot_sensor_signals(
+    sensor_array,
+    modal_results: list[ModalResult],
+    rpm: float,
+    mesh=None,
+    nd: int | list[int] | None = None,
+    nc: int | list[int] | None = None,
+    whirl: int | list[int] | None = None,
+    config: SignalGenerationConfig | None = None,
+    noise_config: NoiseConfig | None = None,
+    sensors: list[int] | None = None,
+    figsize: tuple[float, float] = (14, 8),
+    style: DiagramStyle | None = None,
+) -> matplotlib.figure.Figure
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sensor_array` | `VirtualSensorArray` | required | Sensor array for signal synthesis |
+| `modal_results` | `list[ModalResult]` | required | All results across harmonic indices |
+| `rpm` | `float` | required | Rotational speed in RPM |
+| `mesh` | `Mesh \| None` | `None` | Required when filtering by `nc` |
+| `nd` | `int \| list[int] \| None` | `None` | Nodal diameter filter |
+| `nc` | `int \| list[int] \| None` | `None` | Nodal circle filter |
+| `whirl` | `int \| list[int] \| None` | `None` | Whirl direction filter: `+1` FW, `-1` BW, `0` standing |
+| `config` | `SignalGenerationConfig \| None` | `None` | Signal config (default built from sensor array) |
+| `noise_config` | `NoiseConfig \| None` | `None` | Optional noise |
+| `sensors` | `list[int] \| None` | `None` | Subset of sensor indices to plot (`None` = all) |
+| `figsize` | `tuple` | `(14, 8)` | Figure size |
+| `style` | `DiagramStyle \| None` | `None` | Plot styling |
+
+**Returns:** `matplotlib.figure.Figure` with stacked subplots (one per sensor),
+shared x-axis (time in ms). Title auto-describes the selected modes (ND, NC,
+whirl, family labels).
 
 ---
 
