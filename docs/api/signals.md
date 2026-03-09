@@ -34,6 +34,7 @@ class SensorLocation:
     bandwidth: float = 50_000.0
     sensitivity: float = 1.0
     noise_floor: float = 1e-9
+    is_stationary: bool | None = None
 ```
 
 **Fields:**
@@ -47,6 +48,7 @@ class SensorLocation:
 | `bandwidth` | `float` | `50000.0` | Sensor bandwidth in Hz |
 | `sensitivity` | `float` | `1.0` | Output per unit displacement |
 | `noise_floor` | `float` | `1e-9` | Minimum detectable signal level |
+| `is_stationary` | `bool \| None` | `None` | Whether the sensor is casing-mounted (stationary frame). `None` = infer from `sensor_type`: BTT probes and casing accelerometers are stationary; strain gauges and displacement sensors rotate with the disk. |
 
 ### SensorArrayConfig
 
@@ -167,10 +169,36 @@ class VirtualSensorArray(mesh, config: SensorArrayConfig)
 | Property | Type | Description |
 |----------|------|-------------|
 | `config` | `SensorArrayConfig` | The sensor array configuration |
+| `mesh` | `Mesh` | The underlying mesh object |
 | `n_sensors` | `int` | Number of sensors in the array |
 | `interpolation_matrix` | `csr_matrix (n_sensors, n_dof)` | Sparse interpolation matrix (built lazily) |
 
 **Methods:**
+
+#### sensor_circumferential_angles
+
+```python
+def sensor_circumferential_angles(self) -> NDArray
+```
+
+Compute the circumferential angle (radians) of each sensor in the plane
+perpendicular to the mesh rotation axis.  For `rotation_axis=2` (Z), this
+is `atan2(y, x)`.
+
+**Returns:** `(n_sensors,)` float64 array of angles in `[0, 2*pi)`.
+
+#### blade_tip_profile
+
+```python
+def blade_tip_profile(self, radius_tol: float = 0.02) -> tuple[float, float]
+```
+
+Determine the angular extent of the blade tip from the mesh geometry.
+Finds nodes at the outer radius (within `radius_tol` fraction of the
+maximum) and returns the angular span within one sector `[0, 2*pi/N)`.
+
+**Returns:** `(blade_start_angle, blade_end_angle)` in radians.  The gap
+between sectors spans `[blade_end_angle, 2*pi/N)`.
 
 #### build_interpolation_matrix
 
@@ -342,6 +370,10 @@ class SignalGenerationConfig:
     amplitude_scale: float = 1e-6
     max_frequency: float = 0.0
     max_modes_per_harmonic: int = 0
+    time: np.ndarray | None = None
+    t_start: float = 0.0
+    t_end: float = 0.0
+    damping_ratio: float = 0.0
 ```
 
 **Fields:**
@@ -356,6 +388,12 @@ class SignalGenerationConfig:
 | `amplitude_scale` | `float` | `1e-6` | Base amplitude in metres |
 | `max_frequency` | `float` | `0.0` | Max frequency filter (0 = all modes) |
 | `max_modes_per_harmonic` | `int` | `0` | Max modes per harmonic (0 = all) |
+| `time` | `ndarray \| None` | `None` | Custom time array; overrides all other time parameters |
+| `t_start` | `float` | `0.0` | Start time in seconds |
+| `t_end` | `float` | `0.0` | End time in seconds (0 = use `duration` or `num_revolutions`) |
+| `damping_ratio` | `float` | `0.0` | Modal damping ratio zeta (0 = undamped) |
+
+**Time vector priority:** `time` > `t_start`/`t_end` > `num_revolutions` > `duration`.
 
 ### generate_signals_for_condition
 
@@ -367,10 +405,58 @@ def generate_signals_for_condition(
     config: SignalGenerationConfig,
     noise_config=None,
     forced_response_result=None,
+    condition=None,
 ) -> dict
 ```
 
-**Returns:** dict with keys `"signals"`, `"time"`, `"clean_signals"`.
+Uses a **full-annulus virtual probe** model.  For each mode the displacement
+field is `u(r, theta, z, t) = Re[phi_k(r,z) * exp(-j*w*k*theta) * exp(j*omega*t)]`,
+where *theta* is the sensor's circumferential angle and *w* is the whirl direction.
+
+- **Stationary sensors** (BTT probes, casing accelerometers) observe the
+  Doppler-shifted stationary-frame frequency with circumferential phase `k*theta`.
+- **Rotating sensors** (strain gauges) observe the rotating-frame frequency.
+- **Blade passage gating** uses ray tracing against the full-annulus surface
+  mesh.  For each stationary sensor a ray is cast along its measurement
+  direction; if the ray hits the surface the displacement is read, if it
+  misses (gap between blades) the signal is zero.  The hit pattern is
+  pre-computed once per sector (cyclic symmetry) and tiled across the time
+  series.  Works for any sensor type and orientation.
+
+**Returns:** dict with keys:
+
+| Key | Shape | Description |
+|-----|-------|-------------|
+| `"signals"` | `(n_sensors, n_samples)` | Final signal (with noise if configured) |
+| `"time"` | `(n_samples,)` | Time vector |
+| `"clean_signals"` | `(n_sensors, n_samples)` | Signal before noise |
+| `"condition"` | `OperatingCondition` | Operating condition (if provided) |
+| `"btt_arrival_times"` | `{sensor_idx: ndarray}` | Discrete blade arrival times (BTT only) |
+| `"btt_deflections"` | `{sensor_idx: ndarray}` | Deflection at each arrival (BTT only) |
+| `"btt_blade_indices"` | `{sensor_idx: ndarray}` | Which blade produced each arrival (BTT only) |
+
+**Example -- two BTT probes identifying nodal diameters:**
+
+```python
+import turbomodal as tm
+
+# 4 BTT probes at 0, 90, 180, 270 degrees
+btt_cfg = tm.SensorArrayConfig.default_btt_array(
+    num_probes=4, casing_radius=0.25, axial_positions=[0.01]
+)
+vsa = tm.VirtualSensorArray(mesh, btt_cfg)
+
+cfg = tm.SignalGenerationConfig(
+    sample_rate=500_000, num_revolutions=10,
+    damping_ratio=0.01,
+)
+out = tm.generate_signals_for_condition(vsa, results, 6000.0, cfg)
+
+# Phase difference between probes 0 and 1 is k * pi/2
+# Use this to identify the nodal diameter k
+arrivals_0 = out["btt_arrival_times"][0]
+arrivals_1 = out["btt_arrival_times"][1]
+```
 
 ### generate_dataset_signals
 

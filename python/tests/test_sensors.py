@@ -223,3 +223,55 @@ def test_sample_mode_shape_complex(sensor_array_with_mesh):
     sampled = vsa.sample_mode_shape(mode)
     assert sampled.shape == (vsa.n_sensors,)
     assert np.iscomplexobj(sampled)
+
+
+# ---- sensor_circumferential_angles ----
+
+def test_sensor_circumferential_angles(sensor_array_with_mesh):
+    """BTT probes at 0°, 90°, 180°, 270° should have correct angles."""
+    vsa, mesh = sensor_array_with_mesh
+    angles = vsa.sensor_circumferential_angles()
+    assert angles.shape == (4,)
+    expected = np.array([0, np.pi / 2, np.pi, 3 * np.pi / 2])
+    np.testing.assert_allclose(angles, expected, atol=1e-10)
+
+
+# ---- mesh property ----
+
+def test_mesh_property(sensor_array_with_mesh):
+    vsa, mesh = sensor_array_with_mesh
+    assert vsa.mesh is mesh
+
+
+# ---- blade_tip_profile ----
+
+def test_blade_tip_profile(sensor_array_with_mesh):
+    """blade_tip_profile should return angles within [0, sector_angle)."""
+    vsa, mesh = sensor_array_with_mesh
+    start, end = vsa.blade_tip_profile()
+    sector_angle = 2 * np.pi / mesh.num_sectors
+    assert 0 <= start < sector_angle
+    assert start <= end <= sector_angle
+
+
+# ---- is_stationary field ----
+
+def test_is_stationary_default():
+    """is_stationary defaults to None."""
+    loc = SensorLocation(
+        sensor_type=SensorType.BTT_PROBE,
+        position=np.zeros(3),
+        direction=np.array([1, 0, 0.0]),
+    )
+    assert loc.is_stationary is None
+
+
+def test_is_stationary_explicit():
+    """is_stationary can be set explicitly."""
+    loc = SensorLocation(
+        sensor_type=SensorType.DISPLACEMENT,
+        position=np.zeros(3),
+        direction=np.array([0, 0, 1.0]),
+        is_stationary=True,
+    )
+    assert loc.is_stationary is True

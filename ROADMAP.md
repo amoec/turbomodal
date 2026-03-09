@@ -53,6 +53,10 @@
 |---------|-------|:------:|
 | VirtualSensorArray (BTT, strain, accelerometer, displacement) | `sensors.py` | :white_check_mark: |
 | Signal synthesis from modal superposition | `signal_gen.py` | :white_check_mark: |
+| Full-annulus virtual probe model (circumferential phase, rotating/stationary) | `signal_gen.py` | :white_check_mark: |
+| BTT blade passage gating and discrete arrival output | `signal_gen.py`, `sensors.py` | :white_check_mark: |
+| Time vector control (custom array, t_start/t_end, damping) | `signal_gen.py` | :white_check_mark: |
+| Sensor circumferential angles and blade tip profile from mesh | `sensors.py` | :white_check_mark: |
 | Gaussian noise, harmonic interference | `noise.py` | :white_check_mark: |
 | Sensor drift (linear, random-walk) | `noise.py` | :white_check_mark: |
 | Bandwidth limiting (Butterworth LP) | `noise.py` | :white_check_mark: |

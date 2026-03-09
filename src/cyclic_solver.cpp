@@ -1063,8 +1063,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             // Expand degenerate modes: duplicate each eigenvalue/eigenvector
             // pair for 0 < k < N/2.  The conjugate eigenvector represents
             // the opposite traveling wave (same frequency, opposite phase).
-            // This matches the ANSYS convention where degenerate harmonics
-            // report 2M modes (M cosine + M sine standing wave pairs).
+            // The original eigenvector has circumferential phase exp(+ikθ),
+            // which is forward whirl (+1); the conjugate has exp(-ikθ),
+            // which is backward whirl (-1).  This labelling is always
+            // applied for degenerate harmonics, regardless of whether the
+            // Coriolis QEP was used — the physics of FW/BW travelling waves
+            // exists even when the rotating-frame frequencies are degenerate.
             if (is_degenerate && !used_qep) {
                 int n_unique = static_cast<int>(result.frequencies.size());
                 int n_expanded = std::min(2 * n_unique, num_modes_per_harmonic);
@@ -1076,11 +1080,11 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     exp_f(m) = result.frequencies(src);
                     if (m % 2 == 0) {
                         exp_s.col(m) = result.mode_shapes.col(src);
-                        exp_w(m) = used_qep ? result.whirl_direction(src) : 0;
+                        exp_w(m) = 1;   // Forward whirl: exp(+ikθ)
                     } else {
                         // Conjugate eigenvector: opposite traveling wave
                         exp_s.col(m) = result.mode_shapes.col(src).conjugate();
-                        exp_w(m) = used_qep ? -result.whirl_direction(src) : 0;
+                        exp_w(m) = -1;  // Backward whirl: exp(-ikθ)
                     }
                 }
                 result.frequencies = exp_f;

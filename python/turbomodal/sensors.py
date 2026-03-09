@@ -50,6 +50,7 @@ class SensorLocation:
     bandwidth: float = 50_000.0
     sensitivity: float = 1.0
     noise_floor: float = 1e-9
+    is_stationary: bool | None = None  # None = infer from sensor_type
 
 
 @dataclass
@@ -292,6 +293,10 @@ class VirtualSensorArray:
         # Lazily built sparse interpolation matrix
         self._interp_matrix: sparse.csr_matrix | None = None
 
+        # Lazily built ray-tracing cache (geometry-only, RPM-independent)
+        self._annulus_surface = None       # PyVista PolyData
+        self._ray_hit_cache: dict | None = None  # {sensor_idx: bool_array}
+
     # ------------------------------------------------------------------
     # Public properties
     # ------------------------------------------------------------------
@@ -300,6 +305,11 @@ class VirtualSensorArray:
     def config(self) -> SensorArrayConfig:
         """Return the sensor array configuration."""
         return self._config
+
+    @property
+    def mesh(self):
+        """Return the underlying mesh object."""
+        return self._mesh
 
     @property
     def n_sensors(self) -> int:
@@ -312,6 +322,112 @@ class VirtualSensorArray:
         if self._interp_matrix is None:
             self._interp_matrix = self.build_interpolation_matrix()
         return self._interp_matrix
+
+    def sensor_circumferential_angles(self) -> NDArray:
+        """Compute circumferential angle (radians) of each sensor.
+
+        The angle is measured in the plane perpendicular to the mesh
+        rotation axis.  For ``rotation_axis=2`` (Z) this is
+        ``atan2(y, x)``.
+
+        Returns
+        -------
+        ``(n_sensors,)`` float64 array of angles in ``[0, 2*pi)``.
+        """
+        axis = self._mesh.rotation_axis
+        c1 = (axis + 1) % 3
+        c2 = (axis + 2) % 3
+        angles = np.empty(self.n_sensors, dtype=np.float64)
+        for i, sensor in enumerate(self._config.sensors):
+            pos = np.asarray(sensor.position, dtype=np.float64)
+            angles[i] = np.arctan2(pos[c2], pos[c1]) % (2.0 * np.pi)
+        return angles
+
+    def blade_tip_profile(self, radius_tol: float = 0.02) -> tuple[float, float]:
+        """Determine the angular extent of the blade tip from mesh geometry.
+
+        Finds nodes at the outer radius (within *radius_tol* fraction of
+        the maximum radius) and returns the angular span of those nodes
+        within one sector ``[0, 2*pi/N)``.
+
+        Parameters
+        ----------
+        radius_tol : Fractional tolerance for identifying tip nodes.
+            A node is considered a tip node if its radius is within
+            ``radius_tol * max_radius`` of the maximum.
+
+        Returns
+        -------
+        ``(blade_start_angle, blade_end_angle)`` in radians within
+        the sector.  The gap between sectors spans
+        ``[blade_end_angle, 2*pi/N)``.
+        """
+        axis = self._mesh.rotation_axis
+        c1 = (axis + 1) % 3
+        c2 = (axis + 2) % 3
+        nodes = np.asarray(self._mesh.nodes)
+        N = self._mesh.num_sectors
+        sector_angle = 2.0 * np.pi / N
+
+        # Compute radial distances in the rotation plane
+        radii = np.sqrt(nodes[:, c1] ** 2 + nodes[:, c2] ** 2)
+        max_r = radii.max()
+        tip_mask = radii >= max_r * (1.0 - radius_tol)
+
+        if not np.any(tip_mask):
+            # Fallback: full sector
+            return (0.0, sector_angle)
+
+        # Angular positions of tip nodes within the sector
+        tip_angles = np.arctan2(nodes[tip_mask, c2], nodes[tip_mask, c1])
+        tip_angles = tip_angles % sector_angle  # fold into [0, sector_angle)
+
+        return (float(tip_angles.min()), float(tip_angles.max()))
+
+    # ------------------------------------------------------------------
+    # Ray-tracing cache
+    # ------------------------------------------------------------------
+
+    @property
+    def annulus_surface(self):
+        """Full-annulus surface mesh (PyVista PolyData), built on first access.
+
+        The surface depends only on mesh geometry and is reused across
+        all calls to :func:`~turbomodal.signal_gen.generate_signals_for_condition`.
+        """
+        if self._annulus_surface is None:
+            from turbomodal.signal_gen import _build_annulus_surface
+            self._annulus_surface = _build_annulus_surface(self._mesh)
+        return self._annulus_surface
+
+    def ray_hit_pattern(self, n_steps: int = 256) -> dict[int, np.ndarray]:
+        """Pre-computed ray hit masks for stationary sensors, built on first access.
+
+        Returns ``{sensor_idx: bool_array(n_steps)}`` indicating where
+        a ray from each stationary sensor hits the blade surface during
+        one sector of rotation.  The result is cached because it depends
+        only on mesh geometry and sensor placement.
+        """
+        if self._ray_hit_cache is None:
+            from turbomodal.signal_gen import (
+                _precompute_ray_hits, _sensor_is_stationary,
+            )
+            sensors = self._config.sensors
+            is_stat = np.array([_sensor_is_stationary(s) for s in sensors])
+            sector_angle = 2.0 * np.pi / self._mesh.num_sectors
+            self._ray_hit_cache = _precompute_ray_hits(
+                self.annulus_surface, sensors, is_stat, self._mesh,
+                sector_angle, n_steps=n_steps,
+            )
+        return self._ray_hit_cache
+
+    def invalidate_ray_cache(self) -> None:
+        """Clear the cached annulus surface and ray hit patterns.
+
+        Call this if the mesh or sensor positions have changed.
+        """
+        self._annulus_surface = None
+        self._ray_hit_cache = None
 
     # ------------------------------------------------------------------
     # Interpolation

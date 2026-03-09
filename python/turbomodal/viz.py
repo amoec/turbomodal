@@ -1838,6 +1838,150 @@ def plot_sensor_contribution(
     return fig
 
 
+def plot_sensor_signals(
+    sensor_array,
+    modal_results: list[ModalResult],
+    rpm: float,
+    mesh: "Mesh | None" = None,
+    nd: "int | list[int] | None" = None,
+    nc: "int | list[int] | None" = None,
+    whirl: "int | list[int] | None" = None,
+    config=None,
+    noise_config=None,
+    sensors: "list[int] | None" = None,
+    figsize: tuple[float, float] = (14, 8),
+    style: DiagramStyle | None = None,
+):
+    """Plot time-domain sensor signals for selected modes.
+
+    Generates synthetic signals via
+    :func:`~turbomodal.signal_gen.generate_signals_for_condition` for a
+    subset of modes filtered by nodal diameter (*nd*), nodal circles
+    (*nc*), and/or whirl direction (*whirl*), then renders stacked
+    waveform subplots — one per sensor.
+
+    Parameters
+    ----------
+    sensor_array : VirtualSensorArray
+    modal_results : list of ModalResult (one per harmonic index,
+        typically the full set returned by ``solve_at_rpm``).
+    rpm : rotational speed in RPM.
+    mesh : Mesh (required when filtering by *nc*).
+    nd : Nodal diameter(s) to include.  ``None`` = all.
+    nc : Nodal circle count(s) to include.  ``None`` = all.
+        Requires *mesh* for mode identification.
+    whirl : Whirl direction(s) to include: ``+1`` (FW), ``-1`` (BW),
+        ``0`` (degenerate).  ``None`` = all.
+    config : :class:`~turbomodal.signal_gen.SignalGenerationConfig`.
+        Uses sensible defaults if ``None``.
+    noise_config : Optional :class:`~turbomodal.noise.NoiseConfig`.
+    sensors : Indices of sensors to plot.  ``None`` = all.
+    figsize : Matplotlib figure size.
+    style : :class:`DiagramStyle` for title/label font sizes.
+
+    Returns
+    -------
+    matplotlib Figure
+    """
+    import matplotlib.pyplot as plt
+    from turbomodal.signal_gen import (
+        SignalGenerationConfig,
+        filter_modal_results,
+        generate_signals_for_condition,
+    )
+
+    if style is None:
+        style = DiagramStyle()
+    if config is None:
+        config = SignalGenerationConfig()
+
+    # --- Filter modes ---
+    filtered = filter_modal_results(
+        modal_results, mesh=mesh, nd=nd, nc=nc, whirl=whirl,
+    )
+
+    # --- Build title describing the selection ---
+    title_parts: list[str] = []
+    if nd is not None:
+        nd_list = [nd] if isinstance(nd, int) else list(nd)
+        title_parts.append("ND=" + ",".join(str(n) for n in nd_list))
+    if nc is not None:
+        nc_list = [nc] if isinstance(nc, int) else list(nc)
+        title_parts.append("NC=" + ",".join(str(n) for n in nc_list))
+    if whirl is not None:
+        _wmap = {1: "FW", -1: "BW", 0: "degen"}
+        wl = [whirl] if isinstance(whirl, int) else list(whirl)
+        title_parts.append(",".join(_wmap.get(w, str(w)) for w in wl))
+
+    # Add family labels if mesh is available
+    if mesh is not None and filtered:
+        from turbomodal._core import identify_modes
+        families: set[str] = set()
+        for r in filtered:
+            for mid in identify_modes(r, mesh):
+                families.add(mid.family_label)
+        if families:
+            title_parts.append("(" + ", ".join(sorted(families)) + ")")
+
+    n_modes_total = sum(len(r.frequencies) for r in filtered)
+    title_parts.append(f"{n_modes_total} mode{'s' if n_modes_total != 1 else ''}")
+    title_parts.append(f"{rpm:.0f} RPM")
+    title = "Sensor Signals: " + "  |  ".join(title_parts)
+
+    # --- Generate signals ---
+    out = generate_signals_for_condition(
+        sensor_array, filtered, rpm, config,
+        noise_config=noise_config,
+    )
+    signals = out["signals"]
+    t = out["time"]
+
+    # --- Select sensors to plot ---
+    n_sensors = signals.shape[0]
+    if sensors is not None:
+        plot_indices = [i for i in sensors if 0 <= i < n_sensors]
+    else:
+        plot_indices = list(range(n_sensors))
+    n_plots = len(plot_indices)
+    if n_plots == 0:
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "No sensors to plot", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    # --- Time units ---
+    t_max = t[-1] - t[0]
+    if t_max < 0.1:
+        t_plot = (t - t[0]) * 1e3
+        t_label = "Time (ms)"
+    else:
+        t_plot = t - t[0]
+        t_label = "Time (s)"
+
+    # --- Plot ---
+    fig, axes = plt.subplots(
+        n_plots, 1, figsize=figsize, sharex=True, squeeze=False,
+    )
+    axes = axes.ravel()
+
+    sensor_list = sensor_array.config.sensors
+    for ax_idx, s_idx in enumerate(plot_indices):
+        ax = axes[ax_idx]
+        sig = signals[s_idx]
+        ax.plot(t_plot, sig, linewidth=0.6, color="C0")
+        label = sensor_list[s_idx].label or f"Sensor {s_idx}"
+        stype = sensor_list[s_idx].sensor_type.value.replace("_", " ")
+        ax.set_ylabel(f"{label}\n({stype})", fontsize=style.axis_label_fontsize - 1,
+                       rotation=0, ha="right", va="center", labelpad=10)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.grid(True, alpha=style.grid_alpha)
+
+    axes[-1].set_xlabel(t_label, fontsize=style.axis_label_fontsize)
+    fig.suptitle(title, fontsize=style.title_fontsize)
+    fig.tight_layout()
+    return fig
+
+
 def diagnose_frequencies(
     results: "list[ModalResult] | list[list[ModalResult]]",
     ground_truth: np.ndarray,

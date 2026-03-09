@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Full-annulus virtual probe signal generation model with correct
+  circumferential phase factor (`-w·k·θ_s`) for stationary-frame
+  sensors (`generate_signals_for_condition`).
+- Rotating vs stationary sensor distinction: strain gauges observe
+  rotating-frame frequency; BTT probes and casing accelerometers
+  observe Doppler-shifted stationary-frame frequency.
+- Blade passage gating via ray tracing against the full-annulus
+  surface mesh — works for any stationary sensor and orientation,
+  no tolerance heuristics required.
+- BTT discrete output: `btt_arrival_times`, `btt_deflections`, and
+  `btt_blade_indices` in signal generation result dict.
+- `is_stationary` field on `SensorLocation` for explicit rotating/
+  stationary classification (inferred from `sensor_type` by default).
+- `mesh` property on `VirtualSensorArray`.
+- `sensor_circumferential_angles()` method on `VirtualSensorArray`.
+- `blade_tip_profile()` method on `VirtualSensorArray`.
+- Time vector control on `SignalGenerationConfig`: `time` (custom
+  array), `t_start`, `t_end`, and `damping_ratio` fields.
+
+---
+
 ## [0.1.0] - 2026-02-26
 
 Initial production release.

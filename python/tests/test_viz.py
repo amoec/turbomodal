@@ -365,3 +365,67 @@ class TestDiagnoseFrequencies:
         assert "figures" not in diag
         assert "summary" in diag
         assert "computed_matrix" in diag
+
+
+class TestPlotSensorSignals:
+    @pytest.fixture
+    def signal_setup(self, wedge_mesh_path):
+        from turbomodal._core import Mesh, Material, CyclicSymmetrySolver
+        from turbomodal.sensors import SensorArrayConfig, VirtualSensorArray
+
+        mesh = Mesh()
+        mesh.num_sectors = 24
+        mesh.load_from_gmsh(wedge_mesh_path)
+        mesh.identify_cyclic_boundaries()
+        mesh.match_boundary_nodes()
+
+        mat = Material(200e9, 0.3, 7800)
+        solver = CyclicSymmetrySolver(mesh, mat)
+        results = solver.solve_at_rpm(3000.0, 3)
+
+        cfg = SensorArrayConfig.default_btt_array(
+            num_probes=4, casing_radius=0.15,
+            axial_positions=[0.005], sample_rate=100_000.0, duration=0.01,
+        )
+        vsa = VirtualSensorArray(mesh, cfg)
+        return mesh, vsa, results
+
+    def test_returns_figure(self, signal_setup):
+        import matplotlib
+        import matplotlib.pyplot as plt
+        from turbomodal.viz import plot_sensor_signals
+
+        mesh, vsa, results = signal_setup
+        fig = plot_sensor_signals(vsa, results, 3000.0)
+        assert isinstance(fig, matplotlib.figure.Figure)
+        plt.close(fig)
+
+    def test_filter_by_nd(self, signal_setup):
+        import matplotlib.pyplot as plt
+        from turbomodal.viz import plot_sensor_signals
+
+        mesh, vsa, results = signal_setup
+        fig = plot_sensor_signals(vsa, results, 3000.0, nd=1)
+        axes = fig.get_axes()
+        assert len(axes) == vsa.n_sensors
+        plt.close(fig)
+
+    def test_filter_by_nd_and_nc(self, signal_setup):
+        import matplotlib.pyplot as plt
+        from turbomodal.viz import plot_sensor_signals
+
+        mesh, vsa, results = signal_setup
+        fig = plot_sensor_signals(vsa, results, 3000.0, mesh=mesh, nd=1, nc=0)
+        assert "ND=1" in fig.texts[0].get_text()
+        assert "NC=0" in fig.texts[0].get_text()
+        plt.close(fig)
+
+    def test_sensor_subset(self, signal_setup):
+        import matplotlib.pyplot as plt
+        from turbomodal.viz import plot_sensor_signals
+
+        mesh, vsa, results = signal_setup
+        fig = plot_sensor_signals(vsa, results, 3000.0, sensors=[0, 2])
+        axes = fig.get_axes()
+        assert len(axes) == 2
+        plt.close(fig)

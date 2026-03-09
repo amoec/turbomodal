@@ -440,15 +440,33 @@ TEST(Rotating, FWBWSplittingAtNonzeroRPM) {
     CyclicSymmetrySolver solver(mesh, mat);
     auto results = solver.solve_at_rpm(5000.0, 3);
 
-    // Rotating-frame result should have whirl_direction = 0
+    // k=0 modes should be standing waves (whirl=0).
+    // Degenerate harmonics (0 < k < N/2) should already have FW (+1) and BW (-1)
+    // labels on the expanded pairs, even without Coriolis.
+    bool found_labeled = false;
     for (const auto& r : results) {
-        for (int m = 0; m < r.whirl_direction.size(); m++) {
-            EXPECT_EQ(r.whirl_direction(m), 0);
+        if (r.harmonic_index == 0) {
+            for (int m = 0; m < r.whirl_direction.size(); m++) {
+                EXPECT_EQ(r.whirl_direction(m), 0)
+                    << "k=0 modes should be standing waves";
+            }
+        } else if (r.harmonic_index > 0 && r.harmonic_index < mesh.num_sectors / 2) {
+            bool has_fw = false, has_bw = false;
+            for (int m = 0; m < r.whirl_direction.size(); m++) {
+                if (r.whirl_direction(m) == 1) has_fw = true;
+                if (r.whirl_direction(m) == -1) has_bw = true;
+            }
+            EXPECT_TRUE(has_fw) << "k=" << r.harmonic_index
+                << " should have forward whirl modes in rotating frame";
+            EXPECT_TRUE(has_bw) << "k=" << r.harmonic_index
+                << " should have backward whirl modes in rotating frame";
+            found_labeled = true;
         }
     }
+    EXPECT_TRUE(found_labeled) << "Should have at least one harmonic with FW/BW labels";
 
-    // Stationary-frame conversion should produce FW/BW for 0 < k < N/2
-    bool found_split = false;
+    // Stationary-frame conversion should preserve FW/BW (1-to-1 Doppler shift,
+    // not 1-to-2 duplication, since modes are already labeled).
     for (const auto& r : results) {
         if (r.harmonic_index > 0 && r.harmonic_index < mesh.num_sectors / 2) {
             auto sf = CyclicSymmetrySolver::compute_stationary_frame(r, mesh.num_sectors);
@@ -457,14 +475,12 @@ TEST(Rotating, FWBWSplittingAtNonzeroRPM) {
                 if (sf.whirl_direction(m) == 1) has_fw = true;
                 if (sf.whirl_direction(m) == -1) has_bw = true;
             }
-            EXPECT_TRUE(has_fw) << "k=" << r.harmonic_index << " should have forward whirl modes";
-            EXPECT_TRUE(has_bw) << "k=" << r.harmonic_index << " should have backward whirl modes";
-            // Stationary frame should have 2x the modes
-            EXPECT_EQ(sf.frequencies.size(), 2 * r.frequencies.size());
-            found_split = true;
+            EXPECT_TRUE(has_fw) << "k=" << r.harmonic_index << " should have FW in stationary frame";
+            EXPECT_TRUE(has_bw) << "k=" << r.harmonic_index << " should have BW in stationary frame";
+            // 1-to-1 mapping since modes already carry FW/BW labels
+            EXPECT_EQ(sf.frequencies.size(), r.frequencies.size());
         }
     }
-    EXPECT_TRUE(found_split) << "Should have at least one harmonic with FW/BW splitting";
 }
 
 TEST(Rotating, StandingWavesAtK0) {
