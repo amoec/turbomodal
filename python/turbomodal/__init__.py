@@ -63,6 +63,7 @@ from turbomodal.signal_gen import (
     SignalGenerationConfig,
     generate_signals_for_condition,
     generate_dataset_signals,
+    filter_modal_results,
 )
 
 # Subsystem A extensions: dataset & parametric sweep
@@ -140,6 +141,8 @@ __all__ = [
     "interactive_plane_selector",
     "bc_editor",
     "plot_boundary_conditions",
+    "plot_sensor_contribution",
+    "plot_sensor_signals",
     # Sensors & noise
     "SensorType",
     "SensorLocation",
@@ -151,6 +154,7 @@ __all__ = [
     "SignalGenerationConfig",
     "generate_signals_for_condition",
     "generate_dataset_signals",
+    "filter_modal_results",
     # Dataset & parametric
     "OperatingCondition",
     "DatasetConfig",

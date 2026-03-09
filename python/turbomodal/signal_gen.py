@@ -416,29 +416,32 @@ def generate_signals_for_condition(
             mode_count += 1
 
     # --- Blade passage gating via ray tracing ---
-    # For each stationary sensor we cast a ray along its measurement
-    # direction against the full-annulus surface mesh.  The ray either
-    # hits the deformed blade surface (→ read displacement) or misses
-    # (→ gap between blades, signal = 0).  Because the rest geometry
-    # is static, the hit pattern is pre-computed once for one sector
-    # sweep and then tiled across the full time series.
+    # Any stationary sensor that looks at the rotating structure through
+    # gaps (BTT probes, casing-mounted displacement probes aimed at blade
+    # tips, etc.) must be gated: the signal is zero when the ray misses
+    # the surface.  The ray hit pattern is geometry-only and cached on
+    # the sensor array.
+    #
+    # Discrete blade arrival extraction (times, deflections, blade IDs)
+    # is BTT-specific — only computed for BTT_PROBE sensors.
+    from turbomodal.sensors import SensorType
+
+    is_btt = np.array([s.sensor_type == SensorType.BTT_PROBE for s in sensors])
+
     btt_arrival_times: dict[int, np.ndarray] = {}
     btt_deflections: dict[int, np.ndarray] = {}
     btt_blade_indices: dict[int, np.ndarray] = {}
 
     if has_mesh and np.any(is_stat) and omega_rad > 0:
         try:
-            # Use cached ray hits from the sensor array (geometry-only,
-            # built once and reused across all operating conditions).
             ray_hits = sensor_array.ray_hit_pattern()
         except Exception:
-            # PyVista unavailable or mesh too large — skip gating
             ray_hits = {}
 
         T_rev = 2.0 * np.pi / omega_rad
 
         for s in range(n_sensors):
-            if s not in ray_hits:
+            if not is_stat[s] or s not in ray_hits:
                 continue
 
             hit_mask_sector = ray_hits[s]  # (n_steps,) bool for one sector
@@ -450,28 +453,29 @@ def generate_signals_for_condition(
             np.clip(bin_idx, 0, n_steps - 1, out=bin_idx)
             on_blade = hit_mask_sector[bin_idx]
 
-            # --- Discrete blade arrivals ---
-            arrivals: list[float] = []
-            deflections_list: list[float] = []
-            blade_ids: list[int] = []
-            for b in range(N):
-                blade_angle = 2.0 * np.pi * b / N
-                t0_blade = (theta_s[s] - blade_angle) / omega_rad
-                while t0_blade < t[0]:
-                    t0_blade += T_rev
-                while t0_blade <= t[-1]:
-                    arrivals.append(t0_blade)
-                    idx_t = min(np.searchsorted(t, t0_blade), n_samples - 1)
-                    deflections_list.append(signals[s, idx_t])
-                    blade_ids.append(b)
-                    t0_blade += T_rev
-
-            btt_arrival_times[s] = np.array(arrivals)
-            btt_deflections[s] = np.array(deflections_list)
-            btt_blade_indices[s] = np.array(blade_ids, dtype=np.int32)
-
             # Gate the continuous signal — zero where ray misses
             signals[s, ~on_blade] = 0.0
+
+            # Discrete blade arrivals (BTT probes only)
+            if is_btt[s]:
+                arrivals: list[float] = []
+                deflections_list: list[float] = []
+                blade_ids: list[int] = []
+                for b in range(N):
+                    blade_angle = 2.0 * np.pi * b / N
+                    t0_blade = (theta_s[s] - blade_angle) / omega_rad
+                    while t0_blade < t[0]:
+                        t0_blade += T_rev
+                    while t0_blade <= t[-1]:
+                        arrivals.append(t0_blade)
+                        idx_t = min(np.searchsorted(t, t0_blade), n_samples - 1)
+                        deflections_list.append(signals[s, idx_t])
+                        blade_ids.append(b)
+                        t0_blade += T_rev
+
+                btt_arrival_times[s] = np.array(arrivals)
+                btt_deflections[s] = np.array(deflections_list)
+                btt_blade_indices[s] = np.array(blade_ids, dtype=np.int32)
 
     clean_signals = signals.copy()
 
