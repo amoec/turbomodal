@@ -47,6 +47,8 @@ from turbomodal.viz import (
     interactive_plane_selector,
     bc_editor,
     plot_boundary_conditions,
+    _removed_func,
+    _removed_func,
 )
 
 # Subsystem B: Signal generation pipeline
@@ -76,6 +78,7 @@ try:
     from turbomodal._version import version as __version__
 except ImportError:
     from importlib.metadata import version as _pkg_version
+
     __version__ = _pkg_version("turbomodal")
 
 __all__ = [
