@@ -51,7 +51,7 @@
 
 | Feature | Files | Status |
 |---------|-------|:------:|
-| _RemovedClass (BTT, strain, accelerometer, displacement) | Signal synthesis from modal superposition | Gaussian noise, harmonic interference | Sensor drift (linear, random-walk) | Bandwidth limiting (Butterworth LP) | ADC quantisation, signal dropout | HDF5 dataset export / import | Latin Hypercube parametric sweeps 
+| _RemovedClass (BTT, strain, accelerometer, displacement) | Signal synthesis from modal superposition | Full-annulus virtual probe model (circumferential phase, rotating/stationary) | BTT blade passage gating and discrete arrival output | Time vector control (custom array, t_start/t_end, damping) | Sensor circumferential angles and blade tip profile from mesh | Gaussian noise, harmonic interference | Sensor drift (linear, random-walk) | Bandwidth limiting (Butterworth LP) | ADC quantisation, signal dropout | HDF5 dataset export / import | Latin Hypercube parametric sweeps 
 ### 
 
 | Feature | Files | Status |

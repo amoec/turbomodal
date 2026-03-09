@@ -413,18 +413,35 @@ TEST(Cyclic, ConsistentModeCountAcrossHarmonics) {
     }
 }
 
-TEST(Cyclic, WhirlDirectionZeroInRotatingFrame) {
-    // In the rotating frame, whirl_direction should be 0 for all modes
+TEST(Cyclic, WhirlDirectionInRotatingFrame) {
+    // k=0 and k=N/2 should be standing waves (whirl=0).
+    // Degenerate harmonics (0 < k < N/2) should carry FW (+1) and BW (-1)
+    // labels on their expanded mode pairs.
     Mesh mesh = load_wedge_mesh();
     Material mat(200e9, 0.3, 7850);
     CyclicSymmetrySolver solver(mesh, mat);
+    int max_k = mesh.num_sectors / 2;
 
     auto results = solver.solve_at_rpm(5000.0, 5);
     for (const auto& r : results) {
-        for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
-            EXPECT_EQ(r.whirl_direction(m), 0)
-                << "k=" << r.harmonic_index << " mode " << m
-                << " has non-zero whirl in rotating frame";
+        int k = r.harmonic_index;
+        bool is_standing = (k == 0) || (mesh.num_sectors % 2 == 0 && k == max_k);
+        if (is_standing) {
+            for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
+                EXPECT_EQ(r.whirl_direction(m), 0)
+                    << "k=" << k << " mode " << m << " should be standing (whirl=0)";
+            }
+        } else {
+            // Degenerate: should have both FW and BW
+            bool has_fw = false, has_bw = false;
+            for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
+                EXPECT_NE(r.whirl_direction(m), 0)
+                    << "k=" << k << " mode " << m << " should be FW or BW, not standing";
+                if (r.whirl_direction(m) == 1) has_fw = true;
+                if (r.whirl_direction(m) == -1) has_bw = true;
+            }
+            EXPECT_TRUE(has_fw) << "k=" << k << " should have FW modes";
+            EXPECT_TRUE(has_bw) << "k=" << k << " should have BW modes";
         }
     }
 }
@@ -520,18 +537,27 @@ TEST(Cyclic, ComputeStationaryFrameZeroRpmNoSplit) {
 // ============== Coriolis / Lancaster QEP tests ==============
 
 TEST(Cyclic, CoriolisOffMatchesBaseline) {
-    // include_coriolis=false should give whirl_direction=0 for all modes
+    // Without Coriolis, frequencies should still be degenerate for FW/BW pairs.
+    // whirl_direction should be ±1 for degenerate harmonics, 0 for standing.
     Mesh mesh = load_wedge_mesh();
     Material mat(200e9, 0.3, 7850);
     CyclicSymmetrySolver solver(mesh, mat);
+    int max_k = mesh.num_sectors / 2;
 
     auto results = solver.solve_at_rpm(5000.0, 5, {}, 0, false);
     ASSERT_GT(results.size(), 0u);
 
     for (const auto& r : results) {
+        int k = r.harmonic_index;
+        bool is_standing = (k == 0) || (mesh.num_sectors % 2 == 0 && k == max_k);
         for (Eigen::Index m = 0; m < r.whirl_direction.size(); m++) {
-            EXPECT_EQ(r.whirl_direction(m), 0)
-                << "k=" << r.harmonic_index << " mode=" << m;
+            if (is_standing) {
+                EXPECT_EQ(r.whirl_direction(m), 0)
+                    << "k=" << k << " mode=" << m << " should be standing";
+            } else {
+                EXPECT_NE(r.whirl_direction(m), 0)
+                    << "k=" << k << " mode=" << m << " should be FW or BW";
+            }
         }
     }
 }
