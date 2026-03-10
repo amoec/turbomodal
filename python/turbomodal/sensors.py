@@ -297,6 +297,7 @@ class VirtualSensorArray:
         # Lazily built ray-tracing cache (geometry-only, RPM-independent)
         self._annulus_surface = None       # PyVista PolyData
         self._ray_hit_cache: dict | None = None  # {sensor_idx: bool_array}
+        self._ray_geometry_cache: dict | None = None  # {sensor_idx: RayHitGeometry}
 
     # ------------------------------------------------------------------
     # Public properties
@@ -401,25 +402,40 @@ class VirtualSensorArray:
             self._annulus_surface = _build_annulus_surface(self._mesh)
         return self._annulus_surface
 
+    def ray_hit_geometry(self, n_steps: int = 256) -> dict:
+        """Pre-computed ray-surface intersection geometry, built on first access.
+
+        Returns ``{sensor_idx: RayHitGeometry}`` with full intersection
+        data (hit points, triangle vertices, barycentric coords, sector
+        IDs) for each stationary sensor.  Cached because it depends only
+        on mesh geometry and sensor placement.
+        """
+        if self._ray_geometry_cache is None:
+            from turbomodal.signal_gen import (
+                _precompute_ray_geometry, _sensor_is_stationary,
+            )
+            sensors = self._config.sensors
+            is_stat = np.array([_sensor_is_stationary(s) for s in sensors])
+            sector_angle = 2.0 * np.pi / self._mesh.num_sectors
+            self._ray_geometry_cache = _precompute_ray_geometry(
+                self.annulus_surface, sensors, is_stat, self._mesh,
+                sector_angle, n_steps=n_steps,
+            )
+        return self._ray_geometry_cache
+
     def ray_hit_pattern(self, n_steps: int = 256) -> dict[int, np.ndarray]:
         """Pre-computed ray hit masks for stationary sensors, built on first access.
 
         Returns ``{sensor_idx: bool_array(n_steps)}`` indicating where
         a ray from each stationary sensor hits the blade surface during
-        one sector of rotation.  The result is cached because it depends
-        only on mesh geometry and sensor placement.
+        one sector of rotation.  Delegates to :meth:`ray_hit_geometry`
+        and extracts the boolean mask.
         """
         if self._ray_hit_cache is None:
-            from turbomodal.signal_gen import (
-                _precompute_ray_hits, _sensor_is_stationary,
-            )
-            sensors = self._config.sensors
-            is_stat = np.array([_sensor_is_stationary(s) for s in sensors])
-            sector_angle = 2.0 * np.pi / self._mesh.num_sectors
-            self._ray_hit_cache = _precompute_ray_hits(
-                self.annulus_surface, sensors, is_stat, self._mesh,
-                sector_angle, n_steps=n_steps,
-            )
+            geom = self.ray_hit_geometry(n_steps=n_steps)
+            self._ray_hit_cache = {
+                s_idx: rg.hit_mask for s_idx, rg in geom.items()
+            }
         return self._ray_hit_cache
 
     def invalidate_ray_cache(self) -> None:
@@ -429,6 +445,7 @@ class VirtualSensorArray:
         """
         self._annulus_surface = None
         self._ray_hit_cache = None
+        self._ray_geometry_cache = None
 
     # ------------------------------------------------------------------
     # Interpolation

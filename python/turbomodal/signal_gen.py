@@ -509,6 +509,36 @@ class SignalGenerationConfig:
     excitation_model: ExcitationModel | None = None
 
 
+@dataclass
+class RayHitGeometry:
+    """Pre-computed ray-surface intersection geometry for one sensor.
+
+    Stores everything needed to evaluate mode shape displacement at each
+    angular bin during one sector sweep, without per-time-step ray tracing.
+
+    Attributes
+    ----------
+    hit_mask : (n_steps,) bool — True where the ray hits blade surface.
+    hit_points : (n_steps, 3) float64 — intersection coordinates in
+        disk rest frame.  NaN where no hit.
+    cell_ids : (n_steps,) int64 — surface cell (triangle) index at each
+        hit.  -1 where no hit.
+    local_node_ids : (n_steps, 3) int64 — sector-0 node IDs of the three
+        triangle vertices.  -1 where no hit.
+    bary_coords : (n_steps, 3) float64 — barycentric coordinates of the
+        hit point within its triangle.  0 where no hit.
+    sector_ids : (n_steps,) int — which sector (0..N-1) each hit
+        triangle belongs to.  -1 where no hit.
+    """
+
+    hit_mask: np.ndarray
+    hit_points: np.ndarray
+    cell_ids: np.ndarray
+    local_node_ids: np.ndarray
+    bary_coords: np.ndarray
+    sector_ids: np.ndarray
+
+
 def _build_annulus_surface(mesh):
     """Build the full annulus outer surface as a PyVista PolyData.
 
@@ -585,6 +615,124 @@ def _precompute_ray_hits(surface, sensors, is_stat, mesh, sector_angle,
             hit_mask[i] = len(hit_pts) > 0
 
         results[s_idx] = hit_mask
+
+    return results
+
+
+def _compute_barycentric(p, v0, v1, v2):
+    """Compute barycentric coordinates of point *p* in triangle (v0, v1, v2).
+
+    Returns (lam0, lam1, lam2) such that p ≈ lam0*v0 + lam1*v1 + lam2*v2.
+    """
+    e0 = v1 - v0
+    e1 = v2 - v0
+    e2 = p - v0
+    d00 = np.dot(e0, e0)
+    d01 = np.dot(e0, e1)
+    d11 = np.dot(e1, e1)
+    d20 = np.dot(e2, e0)
+    d21 = np.dot(e2, e1)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-30:
+        return 1.0 / 3, 1.0 / 3, 1.0 / 3  # degenerate triangle
+    lam1 = (d11 * d20 - d01 * d21) / denom
+    lam2 = (d00 * d21 - d01 * d20) / denom
+    lam0 = 1.0 - lam1 - lam2
+    return lam0, lam1, lam2
+
+
+def _precompute_ray_geometry(surface, sensors, is_stat, mesh, sector_angle,
+                             n_steps: int = 256) -> dict[int, RayHitGeometry]:
+    """Pre-compute ray-surface intersections with full geometry data.
+
+    Like :func:`_precompute_ray_hits` but also records the hit point,
+    surface cell, triangle vertex node IDs (mapped back to sector-0),
+    barycentric coordinates, and sector index for each angular bin.
+
+    Returns ``{sensor_idx: RayHitGeometry}``.
+    """
+    from turbomodal._utils import rotation_matrix_3x3
+
+    axis = mesh.rotation_axis
+    n_nodes = mesh.num_nodes()
+    N = mesh.num_sectors
+
+    # Surface topology — map surface point IDs back to volume node IDs
+    orig_ids = np.asarray(surface.point_data["vtkOriginalPointIds"])
+    surf_pts = np.asarray(surface.points)
+
+    # Triangle connectivity: surface.regular_faces is (n_tris, 3) for a
+    # fully-triangulated PolyData.  Fall back to manual extraction from
+    # the faces array if the property is unavailable.
+    if hasattr(surface, "regular_faces") and surface.regular_faces is not None:
+        tri_verts = np.asarray(surface.regular_faces)  # (n_tris, 3)
+    else:
+        raw = np.asarray(surface.faces)
+        # VTK format: [n_verts, v0, v1, v2, n_verts, v0, ...]
+        tri_verts = raw.reshape(-1, 4)[:, 1:]  # assume all triangles
+
+    results: dict[int, RayHitGeometry] = {}
+
+    for s_idx, sensor in enumerate(sensors):
+        if not is_stat[s_idx]:
+            continue
+
+        pos = np.asarray(sensor.position, dtype=np.float64)
+        direction = np.asarray(sensor.direction, dtype=np.float64)
+        d_norm = np.linalg.norm(direction)
+        if d_norm < 1e-30:
+            continue
+        direction = direction / d_norm
+
+        hit_mask = np.zeros(n_steps, dtype=bool)
+        hit_points = np.full((n_steps, 3), np.nan)
+        cell_id_arr = np.full(n_steps, -1, dtype=np.int64)
+        local_node_ids = np.full((n_steps, 3), -1, dtype=np.int64)
+        bary_coords = np.zeros((n_steps, 3))
+        sector_ids = np.full(n_steps, -1, dtype=np.intp)
+
+        for i in range(n_steps):
+            angle = -i * sector_angle / n_steps
+            R = rotation_matrix_3x3(angle, axis)
+            pos_rot = R @ pos
+            dir_rot = R @ direction
+
+            end_point = pos_rot + dir_rot * 10.0
+            hit_pts, cell_ids = surface.ray_trace(pos_rot, end_point)
+            if len(hit_pts) == 0:
+                continue
+
+            hit_mask[i] = True
+            hit_points[i] = hit_pts[0]  # closest hit
+            cid = int(cell_ids[0])
+            cell_id_arr[i] = cid
+
+            # Triangle vertex surface-local indices → volume node IDs
+            sv = tri_verts[cid]  # (3,) surface-local vertex indices
+            vol_ids = orig_ids[sv]  # (3,) volume node IDs in full annulus
+
+            # Map to sector and local node ID within sector 0
+            sec = vol_ids // n_nodes
+            loc = vol_ids % n_nodes
+            # Use first vertex's sector as the representative
+            sector_ids[i] = int(sec[0])
+            local_node_ids[i] = loc
+
+            # Barycentric coordinates
+            v0 = surf_pts[sv[0]]
+            v1 = surf_pts[sv[1]]
+            v2 = surf_pts[sv[2]]
+            lam0, lam1, lam2 = _compute_barycentric(hit_pts[0], v0, v1, v2)
+            bary_coords[i] = [lam0, lam1, lam2]
+
+        results[s_idx] = RayHitGeometry(
+            hit_mask=hit_mask,
+            hit_points=hit_points,
+            cell_ids=cell_id_arr,
+            local_node_ids=local_node_ids,
+            bary_coords=bary_coords,
+            sector_ids=sector_ids,
+        )
 
     return results
 
@@ -801,6 +949,29 @@ def generate_signals_for_condition(
         N = 0
         sector_angle = 0.0
 
+    # --- Ray geometry for surface displacement lookup ---
+    # For stationary sensors looking at discrete blades, pre-compute
+    # the full ray-surface intersection geometry (hit points, triangle
+    # vertices, barycentric coords) so we can evaluate the actual mode
+    # shape displacement at each blade passage instead of using the
+    # analytical approximation + binary gating.
+    #
+    # Only use the ray-based path for sensors that see GAPS (i.e. the
+    # hit mask is not all-True).  For continuous surfaces (shrouds,
+    # solid disks) the analytical approach is correct and avoids
+    # spurious amplitude modulation from mesh discretisation.
+    ray_geometry: dict[int, RayHitGeometry] = {}
+    has_ray_geom = np.zeros(n_sensors, dtype=bool)
+    if has_mesh and np.any(is_stat) and omega_rad > 0:
+        try:
+            full_geom = sensor_array.ray_hit_geometry()
+            for s_idx, rg in full_geom.items():
+                if not np.all(rg.hit_mask):  # has gaps → use ray-based path
+                    ray_geometry[s_idx] = rg
+            has_ray_geom = np.array([s in ray_geometry for s in range(n_sensors)])
+        except Exception:
+            pass
+
     # --- Mode shape sampling ---
     # sample_mode_shape uses nearest node in sector 0; the circumferential
     # phase factor exp(-j*w*k*θ) is applied separately below.
@@ -835,12 +1006,26 @@ def generate_signals_for_condition(
                     theta_s, is_stat, None, config.max_frequency,
                     am.blade_amplitudes, am.blade_phases, N,
                     sensors=sensors,
+                    skip_sensors=has_ray_geom,
                 )
             else:
                 _add_single_component(
                     signals, t, phi_s, am.amplitude, omega_rot_val, am.phase,
                     am.harmonic_index, am.whirl_direction, omega_rad,
                     theta_s, is_stat, None, config.max_frequency,
+                    skip_sensors=has_ray_geom,
+                )
+
+            # Ray-based displacement for stationary sensors with geometry
+            if np.any(has_ray_geom):
+                _add_ray_based_component(
+                    signals, t, mr.mode_shapes[:, am.mode_index],
+                    am.amplitude, omega_rot_val, am.phase,
+                    am.harmonic_index, am.whirl_direction, omega_rad,
+                    theta_s, is_stat, None, config.max_frequency,
+                    ray_geometry, mesh.num_nodes(), N, sensors,
+                    blade_amplitudes=am.blade_amplitudes,
+                    blade_phases=am.blade_phases,
                 )
 
         # Colored broadband noise (added before sensor noise pipeline)
@@ -903,7 +1088,17 @@ def generate_signals_for_condition(
                         signals, t, phi_s, amp, omega_rot, phase,
                         k, w, omega_rad, theta_s, is_stat, envelope,
                         config.max_frequency,
+                        skip_sensors=has_ray_geom,
                     )
+                    # Ray-based displacement for stationary sensors
+                    if np.any(has_ray_geom):
+                        _add_ray_based_component(
+                            signals, t, mr.mode_shapes[:, m],
+                            amp, omega_rot, phase,
+                            k, w, omega_rad, theta_s, is_stat, envelope,
+                            config.max_frequency,
+                            ray_geometry, mesh.num_nodes(), N, sensors,
+                        )
                 else:
                     # --- Degenerate (w=0, k>0): emit FW + BW at half amplitude ---
                     for w_comp in (+1, -1):
@@ -911,19 +1106,25 @@ def generate_signals_for_condition(
                             signals, t, phi_s, amp * 0.5, omega_rot, phase,
                             k, w_comp, omega_rad, theta_s, is_stat, envelope,
                             config.max_frequency,
+                            skip_sensors=has_ray_geom,
                         )
+                        # Ray-based displacement for stationary sensors
+                        if np.any(has_ray_geom):
+                            _add_ray_based_component(
+                                signals, t, mr.mode_shapes[:, m],
+                                amp * 0.5, omega_rot, phase,
+                                k, w_comp, omega_rad, theta_s, is_stat, envelope,
+                                config.max_frequency,
+                                ray_geometry, mesh.num_nodes(), N, sensors,
+                            )
 
                 mode_count += 1
 
-    # --- Blade passage gating via ray tracing ---
-    # Any stationary sensor that looks at the rotating structure through
-    # gaps (BTT probes, casing-mounted displacement probes aimed at blade
-    # tips, etc.) must be gated: the signal is zero when the ray misses
-    # the surface.  The ray hit pattern is geometry-only and cached on
-    # the sensor array.
-    #
-    # Discrete blade arrival extraction (times, deflections, blade IDs)
-    # is BTT-specific — only computed for BTT_PROBE sensors.
+    # --- Blade passage gating (fallback) and BTT extraction ---
+    # Sensors with ray geometry already have physically correct signals
+    # (zero where no hit, proper per-blade displacement where hit).
+    # Sensors WITHOUT ray geometry still need the old binary gating.
+    # BTT arrival extraction works for both paths.
     from turbomodal.sensors import SensorType
 
     is_btt = np.array([s.sensor_type == SensorType.BTT_PROBE for s in sensors])
@@ -933,49 +1134,65 @@ def generate_signals_for_condition(
     btt_blade_indices: dict[int, np.ndarray] = {}
 
     if has_mesh and np.any(is_stat) and omega_rad > 0:
-        try:
-            ray_hits = sensor_array.ray_hit_pattern()
-        except Exception:
-            ray_hits = {}
-
         T_rev = 2.0 * np.pi / omega_rad
 
+        # Fallback binary gating for stationary sensors without ray geometry
+        fallback_sensors = is_stat & ~has_ray_geom
+        if np.any(fallback_sensors):
+            try:
+                ray_hits = sensor_array.ray_hit_pattern()
+            except Exception:
+                ray_hits = {}
+
+            for s in range(n_sensors):
+                if not fallback_sensors[s] or s not in ray_hits:
+                    continue
+
+                hit_mask_sector = ray_hits[s]
+                n_steps_mask = len(hit_mask_sector)
+
+                theta_local = (theta_s[s] - omega_rad * t) % sector_angle
+                bin_idx = (theta_local / sector_angle * n_steps_mask).astype(np.intp)
+                np.clip(bin_idx, 0, n_steps_mask - 1, out=bin_idx)
+                on_blade = hit_mask_sector[bin_idx]
+
+                signals[s, ~on_blade] = 0.0
+
+        # Discrete blade arrivals (BTT probes only) — works for both paths
         for s in range(n_sensors):
-            if not is_stat[s] or s not in ray_hits:
+            if not (is_stat[s] and is_btt[s]):
                 continue
 
-            hit_mask_sector = ray_hits[s]  # (n_steps,) bool for one sector
-            n_steps = len(hit_mask_sector)
+            # Use ray geometry hit mask if available, else ray_hit_pattern
+            if has_ray_geom[s]:
+                hit_mask_sector = ray_geometry[s].hit_mask
+            else:
+                try:
+                    rh = sensor_array.ray_hit_pattern()
+                    if s not in rh:
+                        continue
+                    hit_mask_sector = rh[s]
+                except Exception:
+                    continue
 
-            # Map each time sample to the corresponding angular bin
-            theta_local = (theta_s[s] - omega_rad * t) % sector_angle
-            bin_idx = (theta_local / sector_angle * n_steps).astype(np.intp)
-            np.clip(bin_idx, 0, n_steps - 1, out=bin_idx)
-            on_blade = hit_mask_sector[bin_idx]
+            arrivals: list[float] = []
+            deflections_list: list[float] = []
+            blade_ids: list[int] = []
+            for b in range(N):
+                blade_angle = 2.0 * np.pi * b / N
+                t0_blade = (theta_s[s] - blade_angle) / omega_rad
+                while t0_blade < t[0]:
+                    t0_blade += T_rev
+                while t0_blade <= t[-1]:
+                    arrivals.append(t0_blade)
+                    idx_t = min(np.searchsorted(t, t0_blade), n_samples - 1)
+                    deflections_list.append(signals[s, idx_t])
+                    blade_ids.append(b)
+                    t0_blade += T_rev
 
-            # Gate the continuous signal — zero where ray misses
-            signals[s, ~on_blade] = 0.0
-
-            # Discrete blade arrivals (BTT probes only)
-            if is_btt[s]:
-                arrivals: list[float] = []
-                deflections_list: list[float] = []
-                blade_ids: list[int] = []
-                for b in range(N):
-                    blade_angle = 2.0 * np.pi * b / N
-                    t0_blade = (theta_s[s] - blade_angle) / omega_rad
-                    while t0_blade < t[0]:
-                        t0_blade += T_rev
-                    while t0_blade <= t[-1]:
-                        arrivals.append(t0_blade)
-                        idx_t = min(np.searchsorted(t, t0_blade), n_samples - 1)
-                        deflections_list.append(signals[s, idx_t])
-                        blade_ids.append(b)
-                        t0_blade += T_rev
-
-                btt_arrival_times[s] = np.array(arrivals)
-                btt_deflections[s] = np.array(deflections_list)
-                btt_blade_indices[s] = np.array(blade_ids, dtype=np.int32)
+            btt_arrival_times[s] = np.array(arrivals)
+            btt_deflections[s] = np.array(deflections_list)
+            btt_blade_indices[s] = np.array(blade_ids, dtype=np.int32)
 
     clean_signals = signals.copy()
 
@@ -1011,12 +1228,19 @@ def _add_single_component(
     is_stat: np.ndarray,
     envelope: np.ndarray | None,
     max_frequency: float,
+    skip_sensors: np.ndarray | None = None,
 ) -> None:
     """Add one mode component (FW or BW) to the signal array in-place.
 
     For stationary sensors the lab-frame frequency is used with the
     circumferential phase factor.  For rotating sensors the rotating-
     frame frequency is used.
+
+    Parameters
+    ----------
+    skip_sensors : (n_sensors,) bool, optional.  If provided, sensors
+        where ``skip_sensors[s]`` is True are skipped (handled by the
+        ray-based displacement path instead).
     """
     n_sensors = len(phi_s)
 
@@ -1036,6 +1260,9 @@ def _add_single_component(
     sin_rot = np.sin(omega_rot * t + phase)
 
     for s in range(n_sensors):
+        if skip_sensors is not None and skip_sensors[s]:
+            continue
+
         phi_mag = np.abs(phi_s[s])
         phi_phase = np.angle(phi_s[s])
         if phi_mag < 1e-30:
@@ -1080,6 +1307,7 @@ def _add_mistuned_component(
     blade_phases: np.ndarray | None,
     num_sectors: int,
     sensors=None,
+    skip_sensors: np.ndarray | None = None,
 ) -> None:
     """Add a mistuned mode component with per-blade amplitude/phase.
 
@@ -1087,6 +1315,12 @@ def _add_mistuned_component(
     time step and applies that blade's amplitude and phase offset.
     For rotating sensors (strain gauges), uses the blade the sensor is
     mounted on (``SensorLocation.blade_index``).
+
+    Parameters
+    ----------
+    skip_sensors : (n_sensors,) bool, optional.  If provided, sensors
+        where ``skip_sensors[s]`` is True are skipped (handled by the
+        ray-based displacement path instead).
     """
     n_sensors = len(phi_s)
     N = num_sectors
@@ -1100,6 +1334,9 @@ def _add_mistuned_component(
         return
 
     for s in range(n_sensors):
+        if skip_sensors is not None and skip_sensors[s]:
+            continue
+
         phi_mag = np.abs(phi_s[s])
         phi_phase = np.angle(phi_s[s])
         if phi_mag < 1e-30:
@@ -1128,6 +1365,153 @@ def _add_mistuned_component(
             b_phase = blade_phases[b_idx] if blade_phases is not None else 0.0
             total_phase = total_phase_base + b_phase + phase
             contrib = amp * phi_mag * b_amp * np.cos(omega_rot * t + total_phase)
+
+        if envelope is not None:
+            contrib *= envelope
+
+        signals[s, :] += contrib
+
+
+def _interpolate_mode_at_ray_hits(
+    mode_shape: np.ndarray,
+    ray_geom: RayHitGeometry,
+    n_nodes_per_sector: int,
+    sensor_direction: np.ndarray,
+) -> np.ndarray:
+    """Interpolate a mode shape at pre-computed ray hit points.
+
+    Evaluates the displacement field at each angular bin's hit location
+    using barycentric interpolation on the surface triangle, then projects
+    onto the sensor measurement direction.
+
+    The circumferential phase factor is NOT applied here — it is handled
+    at runtime based on which sector is under the sensor at each time step.
+
+    Parameters
+    ----------
+    mode_shape : (3 * n_nodes_per_sector,) complex — one mode vector.
+    ray_geom : Pre-computed geometry for one sensor.
+    n_nodes_per_sector : Number of nodes in the reference sector mesh.
+    sensor_direction : (3,) unit vector — measurement direction.
+
+    Returns
+    -------
+    (n_steps,) complex — projected displacement at each angular bin.
+    Zero where no ray hit.
+    """
+    n_steps = len(ray_geom.hit_mask)
+    result = np.zeros(n_steps, dtype=np.complex128)
+
+    mask = ray_geom.hit_mask
+    n_hits = np.count_nonzero(mask)
+    if n_hits == 0:
+        return result
+
+    # Reshape mode shape from flat DOF vector to (n_nodes, 3) complex
+    mode_3d = mode_shape.reshape(n_nodes_per_sector, 3)
+
+    # Gather mode shape values at the three triangle vertices
+    loc_ids = ray_geom.local_node_ids[mask]  # (n_hits, 3)
+    phi_v = mode_3d[loc_ids]  # (n_hits, 3_vertices, 3_xyz) complex
+
+    # Barycentric interpolation: weighted sum of vertex displacements
+    bary = ray_geom.bary_coords[mask]  # (n_hits, 3)
+    phi_interp = np.einsum('ij,ijk->ik', bary, phi_v)  # (n_hits, 3_xyz)
+
+    # Project onto sensor direction
+    dir_norm = sensor_direction / max(np.linalg.norm(sensor_direction), 1e-30)
+    phi_proj = phi_interp @ dir_norm  # (n_hits,) complex
+
+    result[mask] = phi_proj
+    return result
+
+
+def _add_ray_based_component(
+    signals: np.ndarray,
+    t: np.ndarray,
+    mode_shape: np.ndarray,
+    amp: float,
+    omega_rot: float,
+    phase: float,
+    k: int,
+    w: int,
+    omega_rad: float,
+    theta_s: np.ndarray,
+    is_stat: np.ndarray,
+    envelope: np.ndarray | None,
+    max_frequency: float,
+    ray_geometry: dict,
+    n_nodes_per_sector: int,
+    num_sectors: int,
+    sensors: list,
+    blade_amplitudes: np.ndarray | None = None,
+    blade_phases: np.ndarray | None = None,
+) -> None:
+    """Add a mode component using ray-traced surface displacement.
+
+    For each stationary sensor with pre-computed ray geometry, evaluates
+    the actual mode shape at the ray-surface intersection point as each
+    blade passes.  This captures the correct per-blade amplitude and
+    phase variation for nodal diameter patterns.
+    """
+    N = num_sectors
+    if N == 0:
+        return
+    sector_angle = 2.0 * np.pi / N
+
+    f_rot = omega_rot / (2.0 * np.pi)
+    f_omega = omega_rad / (2.0 * np.pi)
+    f_stat = abs(f_rot + w * k * f_omega)
+    omega_stat = 2.0 * np.pi * f_stat
+
+    if max_frequency > 0 and f_stat > max_frequency:
+        return
+
+    for s in range(len(is_stat)):
+        if not is_stat[s] or s not in ray_geometry:
+            continue
+
+        rg = ray_geometry[s]
+        n_steps = len(rg.hit_mask)
+
+        # Interpolate mode shape at each angular bin's hit point
+        sensor_dir = np.asarray(sensors[s].direction, dtype=np.float64)
+        phi_bins = _interpolate_mode_at_ray_hits(
+            mode_shape, rg, n_nodes_per_sector, sensor_dir,
+        )
+
+        # Map each time sample to angular bin within one sector
+        theta_local = (theta_s[s] - omega_rad * t) % sector_angle
+        bin_idx = (theta_local / sector_angle * n_steps).astype(np.intp)
+        np.clip(bin_idx, 0, n_steps - 1, out=bin_idx)
+
+        # Determine which sector is under the sensor at each time step
+        theta_full = (theta_s[s] - omega_rad * t) % (2.0 * np.pi)
+        sector_at_t = (theta_full / sector_angle).astype(np.intp)
+        sector_at_t = sector_at_t % N
+
+        # Look up pre-interpolated displacement and apply circumferential phase
+        phi_at_t = phi_bins[bin_idx]  # (n_samples,) complex
+        circ_phase = np.exp(-1j * w * k * sector_at_t * sector_angle)
+        phi_at_t = phi_at_t * circ_phase
+
+        # Time-harmonic signal
+        contrib = amp * np.real(
+            phi_at_t * np.exp(1j * (omega_stat * t + phase))
+        )
+
+        # Per-blade mistuning
+        if blade_amplitudes is not None:
+            b_amp = blade_amplitudes[sector_at_t]
+            contrib *= b_amp
+        if blade_phases is not None:
+            # Re-compute with the per-blade phase offset
+            b_phase = blade_phases[sector_at_t]
+            contrib = amp * np.real(
+                phi_at_t * np.exp(1j * (omega_stat * t + phase + b_phase))
+            )
+            if blade_amplitudes is not None:
+                contrib *= blade_amplitudes[sector_at_t]
 
         if envelope is not None:
             contrib *= envelope

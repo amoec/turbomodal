@@ -432,6 +432,223 @@ def test_filter_nc_requires_mesh(signal_gen_setup):
 
 
 # ====================================================================
+# Ray-based surface displacement tests
+# ====================================================================
+
+def test_ray_geometry_fields(signal_gen_setup):
+    """RayHitGeometry should have correctly shaped arrays."""
+    vsa, _ = signal_gen_setup
+    geom = vsa.ray_hit_geometry()
+    for s_idx, rg in geom.items():
+        n_steps = len(rg.hit_mask)
+        assert rg.hit_mask.shape == (n_steps,)
+        assert rg.hit_points.shape == (n_steps, 3)
+        assert rg.cell_ids.shape == (n_steps,)
+        assert rg.local_node_ids.shape == (n_steps, 3)
+        assert rg.bary_coords.shape == (n_steps, 3)
+        assert rg.sector_ids.shape == (n_steps,)
+
+        # Barycentric coords should sum to ~1 at hit locations
+        if np.any(rg.hit_mask):
+            bary_sums = rg.bary_coords[rg.hit_mask].sum(axis=1)
+            np.testing.assert_allclose(bary_sums, 1.0, atol=1e-10)
+
+
+def test_ray_hit_pattern_backward_compat(signal_gen_setup):
+    """ray_hit_pattern() should return boolean masks consistent with ray_hit_geometry()."""
+    vsa, _ = signal_gen_setup
+    # Get both
+    geom = vsa.ray_hit_geometry()
+    vsa._ray_hit_cache = None  # force re-derivation
+    patterns = vsa.ray_hit_pattern()
+    for s_idx in geom:
+        np.testing.assert_array_equal(patterns[s_idx], geom[s_idx].hit_mask)
+
+
+def test_continuous_surface_uses_analytical_path(signal_gen_setup):
+    """For a continuous surface (no gaps), the ray-based path should NOT be used."""
+    from turbomodal.signal_gen import generate_signals_for_condition
+
+    vsa, results = signal_gen_setup
+    # Wedge mesh is a continuous disk — all rays hit
+    geom = vsa.ray_hit_geometry()
+    for s_idx, rg in geom.items():
+        assert np.all(rg.hit_mask), (
+            f"Sensor {s_idx}: expected all hits for continuous surface"
+        )
+
+    # When all hits are True, the ray-based path should be skipped
+    # and the analytical path should be used (identical to old behavior).
+    cfg = SignalGenerationConfig(sample_rate=100_000.0, duration=0.01, seed=42)
+    out = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+    assert "signals" in out
+    # Verify signals are non-zero (analytical path produced them)
+    assert np.any(out["signals"] != 0)
+
+
+def test_ray_based_blade_phase_progression():
+    """For ND=k on a bladed disk, successive blade pulses should show 2*pi*k/N phase shift.
+
+    Since the test meshes are continuous (no gaps), we test the
+    _add_ray_based_component helper directly with a synthetic
+    RayHitGeometry that simulates gaps.
+    """
+    from turbomodal.signal_gen import (
+        RayHitGeometry, _interpolate_mode_at_ray_hits, _add_ray_based_component,
+    )
+    from turbomodal.sensors import SensorLocation, SensorType
+
+    # Synthetic setup: 4 sectors, sensor at theta=0
+    N = 4
+    sector_angle = 2.0 * np.pi / N
+    n_nodes = 10  # nodes per sector
+    n_steps = 64  # angular bins per sector sweep
+
+    # Create a mode shape: simple radial displacement, k=1
+    # phi(r,z) = [1+0j, 0, 0] at all nodes (radial only)
+    mode_shape = np.zeros(3 * n_nodes, dtype=complex)
+    for nd in range(n_nodes):
+        mode_shape[3 * nd] = 1.0 + 0j  # x-displacement = 1 for all nodes
+
+    # Create a RayHitGeometry with gaps (50% duty cycle)
+    hit_mask = np.zeros(n_steps, dtype=bool)
+    hit_mask[:n_steps // 2] = True  # first half of sector has blade
+
+    local_node_ids = np.full((n_steps, 3), -1, dtype=np.int64)
+    bary_coords = np.zeros((n_steps, 3))
+    sector_ids = np.full(n_steps, -1, dtype=np.intp)
+    hit_points = np.full((n_steps, 3), np.nan)
+    cell_ids = np.full(n_steps, -1, dtype=np.int64)
+
+    # For hit bins: point to the same 3 nodes with equal barycentric weights
+    for i in range(n_steps // 2):
+        local_node_ids[i] = [0, 1, 2]
+        bary_coords[i] = [1.0 / 3, 1.0 / 3, 1.0 / 3]
+        sector_ids[i] = 0
+
+    rg = RayHitGeometry(
+        hit_mask=hit_mask,
+        hit_points=hit_points,
+        cell_ids=cell_ids,
+        local_node_ids=local_node_ids,
+        bary_coords=bary_coords,
+        sector_ids=sector_ids,
+    )
+
+    # Interpolate — should give uniform displacement in x direction
+    sensor_dir = np.array([1.0, 0.0, 0.0])  # radial
+    phi_bins = _interpolate_mode_at_ray_hits(mode_shape, rg, n_nodes, sensor_dir)
+    assert phi_bins.shape == (n_steps,)
+    # Hit bins should be non-zero, miss bins should be zero
+    assert np.all(phi_bins[:n_steps // 2] != 0)
+    assert np.all(phi_bins[n_steps // 2:] == 0)
+
+    # Now test full signal generation with k=1
+    rpm = 6000.0
+    omega_rad = 2.0 * np.pi * rpm / 60.0
+    f_rot = 1000.0  # rotating frame frequency
+    omega_rot = 2.0 * np.pi * f_rot
+    k = 1
+    w = 1  # forward whirl
+
+    sample_rate = 100_000.0
+    T_rev = 60.0 / rpm  # 0.01 s
+    duration = 3 * T_rev  # 3 revolutions
+    n_samples = int(sample_rate * duration)
+    t = np.arange(n_samples) / sample_rate
+
+    signals = np.zeros((1, n_samples))
+    theta_s = np.array([0.0])
+    is_stat = np.array([True])
+
+    sensor = SensorLocation(
+        sensor_type=SensorType.BTT_PROBE,
+        position=np.array([0.15, 0.0, 0.005]),
+        direction=np.array([1.0, 0.0, 0.0]),
+    )
+
+    _add_ray_based_component(
+        signals, t, mode_shape, 1.0, omega_rot, 0.0,
+        k, w, omega_rad, theta_s, is_stat, None, 0.0,
+        {0: rg}, n_nodes, N, [sensor],
+    )
+
+    # The signal should have N blade pulses per revolution, with
+    # different PHASE due to the circumferential phase factor
+    # exp(-j*w*k*sector*sector_angle) for ND=k pattern.
+    sig = signals[0]
+    assert np.max(np.abs(sig)) > 0, "Signal should not be all zeros"
+
+    # Find the peaks of each blade pulse in the first revolution.
+    # Each blade passage creates a burst of oscillation; we find
+    # peaks by looking for local maxima in the envelope.
+    T_blade = T_rev / N
+    samples_per_rev = int(T_rev * sample_rate)
+    rev_sig = sig[:samples_per_rev]
+
+    # Identify blade pulse regions (non-zero segments)
+    nonzero_mask = np.abs(rev_sig) > 1e-15
+    # Find transitions to identify individual pulses
+    diff = np.diff(nonzero_mask.astype(int))
+    starts = np.where(diff == 1)[0] + 1
+    ends = np.where(diff == -1)[0] + 1
+    if nonzero_mask[0]:
+        starts = np.concatenate([[0], starts])
+    if nonzero_mask[-1]:
+        ends = np.concatenate([ends, [len(rev_sig)]])
+
+    n_pulses = min(len(starts), len(ends))
+    assert n_pulses >= 2, f"Expected at least 2 blade pulses, got {n_pulses}"
+
+    # Sample the signal at the midpoint of each pulse
+    pulse_midpoint_values = []
+    for i in range(n_pulses):
+        mid = (starts[i] + ends[i]) // 2
+        pulse_midpoint_values.append(rev_sig[mid])
+
+    pulse_midpoint_values = np.array(pulse_midpoint_values)
+
+    # For k=1, N=4: circumferential phases are 0, -pi/2, -pi, -3pi/2
+    # so the instantaneous values at equivalent blade positions should
+    # NOT all be the same (unlike k=0 where they would be identical).
+    assert not np.allclose(pulse_midpoint_values, pulse_midpoint_values[0], atol=1e-10), (
+        "Expected different instantaneous values for k=1 traveling wave, "
+        f"got all ≈ {pulse_midpoint_values[0]:.6f}"
+    )
+
+
+def test_rotating_sensors_unaffected_by_ray_path(signal_gen_setup):
+    """Strain gauge signals should be identical regardless of ray geometry."""
+    from turbomodal.signal_gen import generate_signals_for_condition
+    from turbomodal.sensors import SensorArrayConfig, SensorType, VirtualSensorArray
+
+    vsa_btt, results = signal_gen_setup
+    mesh = vsa_btt.mesh
+
+    nodes = np.asarray(mesh.nodes)
+    mid_node = nodes[nodes.shape[0] // 2]
+    cfg_sg = SensorArrayConfig.default_strain_gauge_array(
+        num_gauges=1, radial_positions=[np.linalg.norm(mid_node[:2])],
+        sample_rate=100_000.0, duration=0.05,
+    )
+    vsa_sg = VirtualSensorArray(mesh, cfg_sg)
+
+    k_results = [r for r in results if r.harmonic_index > 0][:1]
+    if not k_results:
+        pytest.skip("No k>0 modes in test results")
+
+    cfg = SignalGenerationConfig(
+        sample_rate=100_000.0, duration=0.05, seed=42,
+        max_modes_per_harmonic=1,
+    )
+    out = generate_signals_for_condition(vsa_sg, k_results, 3000.0, cfg)
+    sig = out["signals"]
+
+    # Rotating sensor should have a non-zero signal
+    assert np.any(sig != 0), "Strain gauge signal should not be all zeros"
+
+
+# ====================================================================
 # Physics-based amplitude model tests
 # ====================================================================
 

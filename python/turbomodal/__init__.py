@@ -63,6 +63,7 @@ from turbomodal.noise import NoiseConfig, apply_noise
 from turbomodal.signal_gen import (
     SignalGenerationConfig,
     ExcitationModel,
+    RayHitGeometry,
     generate_signals_for_condition,
     generate_dataset_signals,
     filter_modal_results,
@@ -156,6 +157,7 @@ __all__ = [
     # Signal generation
     "SignalGenerationConfig",
     "ExcitationModel",
+    "RayHitGeometry",
     "generate_signals_for_condition",
     "generate_dataset_signals",
     "filter_modal_results",
