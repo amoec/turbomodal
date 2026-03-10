@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import math
 import sys
 
 import numpy as np
@@ -16,6 +17,451 @@ import numpy as np
 from turbomodal._utils import progress_bar as _progress_bar
 from turbomodal.noise import apply_noise, NoiseConfig
 
+
+# ---------------------------------------------------------------------------
+# ExcitationModel — physics-based excitation configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExcitationModel:
+    """Physics-based excitation model for realistic signal generation.
+
+    Implements the simplified analytical model from turbomachinery modal
+    excitation research: engine order selection rules, Campbell crossing
+    detection, mode family roll-off, ND-dependent damping, mistuning,
+    and colored broadband noise.
+
+    Parameters
+    ----------
+    stator_vane_counts : Upstream/downstream stator vane counts.  Engine
+        orders are ``EO = h * V`` for each vane count *V* and harmonic
+        *h* = 1 .. *max_eo_harmonic*.
+    max_eo_harmonic : Number of harmonics per primary EO to include.
+    leo_orders : Low engine orders from inlet distortion / geometric
+        imperfections.  Excited at amplitudes *leo_amplitude_db* below
+        the primary EO.
+    leo_amplitude_db : LEO amplitude relative to primary EO (dB).
+    base_amplitude : Reference amplitude A0 in metres.
+    nc_rolloff_alpha : Exponent for nodal circle amplitude roll-off:
+        ``A *= 1 / (1 + NC) ** alpha``.
+    eo_harmonic_decay_beta : Exponent for EO harmonic amplitude decay:
+        ``A *= 1 / h ** beta``.
+    rpm_scaling_exponent : RPM-dependent scaling exponent:
+        ``A *= (RPM / rpm_ref) ** exponent``.
+    rpm_ref : Reference RPM for RPM-dependent scaling.
+    random_amplitude_sigma_db : Log-normal random amplitude variation
+        standard deviation in dB.
+    structural_damping_ratio : Baseline structural damping ratio
+        (material + friction).
+    aero_damping_mean : Mean aerodynamic damping ratio.
+    aero_damping_variation : Amplitude of sinusoidal ND-dependent aero
+        damping: ``zeta_aero(k) = mean * [1 + A * sin(2*pi*k/N)]``.
+    campbell_crossing_tolerance : Fractional frequency tolerance for
+        detecting Campbell crossings: ``|f_mode - f_eo| / f_mode < tol``.
+    multi_mode_sampling : If True, randomly select how many modes are
+        active per example using *mode_count_weights*.
+    mode_count_weights : Probability weights for (1, 2, 3+) active
+        modes.  Only used when *multi_mode_sampling* is True.
+    mistuning_sigma : Std of per-blade frequency deviation.  0 = tuned.
+    mistuning_method : ``"jitter"`` for simplified per-blade jitter,
+        ``"fmm"`` for Fundamental Mistuning Model.
+    blade_amplitude_jitter_std : Std of per-blade amplitude multiplier
+        (fraction of 1.0).  Used with ``mistuning_method="jitter"``.
+    blade_phase_jitter_deg : Max per-blade phase jitter in degrees.
+    broadband_snr_db : Colored broadband noise level relative to peak
+        deterministic signal (dB).  0 = no broadband noise.
+    broadband_spectral_exponent : PSD spectral roll-off exponent gamma
+        in ``PSD ~ f^(-gamma)``.  Default 5/3 (Kolmogorov).
+    """
+
+    stator_vane_counts: list[int] = field(default_factory=lambda: [24])
+    max_eo_harmonic: int = 3
+    leo_orders: list[int] = field(default_factory=lambda: [1, 2, 3])
+    leo_amplitude_db: float = -20.0
+
+    base_amplitude: float = 1e-6
+    nc_rolloff_alpha: float = 1.5
+    eo_harmonic_decay_beta: float = 1.0
+    rpm_scaling_exponent: float = 2.0
+    rpm_ref: float = 5000.0
+    random_amplitude_sigma_db: float = 3.0
+
+    structural_damping_ratio: float = 0.003
+    aero_damping_mean: float = 0.002
+    aero_damping_variation: float = 0.5
+
+    campbell_crossing_tolerance: float = 0.05
+
+    multi_mode_sampling: bool = False
+    mode_count_weights: tuple[float, float, float] = (0.6, 0.3, 0.1)
+
+    mistuning_sigma: float = 0.0
+    mistuning_method: str = "jitter"
+    blade_amplitude_jitter_std: float = 0.15
+    blade_phase_jitter_deg: float = 10.0
+
+    broadband_snr_db: float = 20.0
+    broadband_spectral_exponent: float = 5.0 / 3.0
+
+
+# ---------------------------------------------------------------------------
+# ActiveMode — internal descriptor for physics-selected modes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ActiveMode:
+    """Descriptor for a single active mode in the physics model."""
+
+    harmonic_index: int
+    mode_index: int
+    frequency: float
+    amplitude: float
+    whirl_direction: int
+    engine_order: int
+    eo_harmonic: int
+    nodal_circle: int
+    phase: float
+    blade_amplitudes: np.ndarray | None = None
+    blade_phases: np.ndarray | None = None
+
+
+# ---------------------------------------------------------------------------
+# Physics helper functions
+# ---------------------------------------------------------------------------
+
+def eo_excites_harmonic(eo: int, k: int, num_sectors: int) -> bool:
+    """Check if engine order *eo* excites harmonic index *k*.
+
+    The aliasing rule: EO excites k if ``k == EO mod N`` or
+    ``k == (-EO) mod N`` (backward alias), where N = *num_sectors*.
+    """
+    if num_sectors <= 0:
+        return False
+    eo_mod = eo % num_sectors
+    if eo_mod < 0:
+        eo_mod += num_sectors
+    k_pos = k % num_sectors
+    if k_pos < 0:
+        k_pos += num_sectors
+    k_neg = (-k) % num_sectors
+    if k_neg < 0:
+        k_neg += num_sectors
+    return eo_mod == k_pos or eo_mod == k_neg
+
+
+def eo_whirl_direction(eo: int, k: int, num_sectors: int) -> int:
+    """Determine FW/BW direction from the EO aliasing rule.
+
+    Returns +1 (forward wave) if ``EO mod N == k``, -1 (backward wave)
+    if ``EO mod N == N - k``, or 0 for k=0 / k=N/2 (standing wave).
+    """
+    if k == 0:
+        return 0
+    N = num_sectors
+    if N > 0 and N % 2 == 0 and k == N // 2:
+        return 0  # k = N/2 is a standing wave
+    eo_mod = ((eo % N) + N) % N
+    k_pos = ((k % N) + N) % N
+    k_neg = (((-k) % N) + N) % N
+    if eo_mod == k_pos:
+        return 1
+    if eo_mod == k_neg:
+        return -1
+    return 0
+
+
+def total_damping_ratio(
+    k: int, num_sectors: int, model: ExcitationModel,
+) -> float:
+    """Compute total damping ratio (structural + aero) for harmonic *k*.
+
+    ``zeta_aero(k) = mean * [1 + A * sin(2*pi*k/N)]``
+    ``zeta_total  = zeta_struct + zeta_aero(k)``
+    """
+    N = max(num_sectors, 1)
+    zeta_aero = model.aero_damping_mean * (
+        1.0 + model.aero_damping_variation * math.sin(2.0 * math.pi * k / N)
+    )
+    return model.structural_damping_ratio + max(zeta_aero, 0.0)
+
+
+def frf_detuning_factor(f_mode: float, f_eo: float, zeta: float) -> float:
+    """Compute normalised single-DOF FRF magnitude.
+
+    ``H(r) = 1 / sqrt((1 - r^2)^2 + (2*zeta*r)^2)``
+
+    The result is normalised by the on-resonance peak ``1/(2*zeta)``
+    so that an exactly resonant mode returns ~1.0.
+    """
+    if f_mode <= 0:
+        return 0.0
+    r = f_eo / f_mode
+    denom_sq = (1.0 - r * r) ** 2 + (2.0 * zeta * r) ** 2
+    if denom_sq <= 0:
+        return 1.0
+    H = 1.0 / math.sqrt(denom_sq)
+    H_peak = 1.0 / (2.0 * zeta) if zeta > 0 else 1.0
+    return H / H_peak if H_peak > 0 else H
+
+
+def find_campbell_crossings(
+    modal_results: list,
+    rpm: float,
+    num_sectors: int,
+    model: ExcitationModel,
+    mesh=None,
+) -> list[dict]:
+    """Find active Campbell crossings at the given RPM.
+
+    For each engine order (from stator vane counts x harmonics + LEO
+    orders), computes ``f_eo = EO * RPM / 60`` and checks which modal
+    frequencies are within *campbell_crossing_tolerance* of ``f_eo``.
+
+    Returns a list of dicts with keys: ``eo``, ``eo_harmonic``,
+    ``harmonic_index``, ``mode_index``, ``frequency``, ``nodal_circle``,
+    ``whirl_direction``, ``detuning_ratio``, ``is_leo``.
+    """
+    if rpm == 0:
+        return []
+
+    f_rev = abs(rpm) / 60.0  # rev/s
+    tol = model.campbell_crossing_tolerance
+
+    # Build list of (EO, harmonic_number, is_leo)
+    eo_list: list[tuple[int, int, bool]] = []
+    for V in model.stator_vane_counts:
+        for h in range(1, model.max_eo_harmonic + 1):
+            eo_list.append((h * V, h, False))
+    for leo in model.leo_orders:
+        eo_list.append((leo, 1, True))
+
+    # Optionally identify nodal circles
+    nc_map: dict[tuple[int, int], int] = {}
+    if mesh is not None:
+        try:
+            from turbomodal._core import identify_modes
+            for mr in modal_results:
+                ids = identify_modes(mr, mesh)
+                for m_idx, mid in enumerate(ids):
+                    nc_map[(mr.harmonic_index, m_idx)] = mid.nodal_circle
+        except Exception:
+            pass
+
+    crossings: list[dict] = []
+    seen: set[tuple[int, int]] = set()  # avoid duplicate (k, mode_index)
+
+    for eo, h, is_leo in eo_list:
+        f_eo = eo * f_rev
+        if f_eo <= 0:
+            continue
+
+        for mr in modal_results:
+            k = mr.harmonic_index
+            if not eo_excites_harmonic(eo, k, num_sectors):
+                continue
+
+            freqs = np.asarray(mr.frequencies)
+            for m_idx in range(len(freqs)):
+                f_mode = freqs[m_idx]
+                if f_mode <= 0:
+                    continue
+                detuning = abs(f_mode - f_eo) / f_mode
+                if detuning > tol:
+                    continue
+
+                key = (k, m_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                nc = nc_map.get(key, 0)
+                whirl = eo_whirl_direction(eo, k, num_sectors)
+
+                crossings.append({
+                    "eo": eo,
+                    "eo_harmonic": h,
+                    "harmonic_index": k,
+                    "mode_index": m_idx,
+                    "frequency": float(f_mode),
+                    "nodal_circle": nc,
+                    "whirl_direction": whirl,
+                    "detuning_ratio": detuning,
+                    "is_leo": is_leo,
+                })
+
+    return crossings
+
+
+def compute_physics_amplitudes(
+    modal_results: list,
+    rpm: float,
+    num_sectors: int,
+    model: ExcitationModel,
+    mesh=None,
+    rng: np.random.Generator | None = None,
+) -> list[ActiveMode]:
+    """Compute physically realistic amplitudes for active modes.
+
+    Implements the simplified analytical excitation model (Appendix B):
+
+    1. Find Campbell crossings
+    2. Base amplitude: ``A = A0 / ((1+NC)^alpha * zeta_total(k))``
+    3. EO harmonic decay: ``A *= 1 / h^beta``
+    4. LEO scaling: ``A *= 10^(leo_db/20)``
+    5. Off-resonance detuning via FRF transfer function
+    6. RPM scaling: ``A *= (RPM / rpm_ref)^exp``
+    7. Log-normal random variation
+    8. FW/BW from aliasing rule
+    9. Optional multi-mode sampling
+    10. Optional mistuning (per-blade jitter or FMM)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    crossings = find_campbell_crossings(
+        modal_results, rpm, num_sectors, model, mesh=mesh,
+    )
+    if not crossings:
+        return []
+
+    f_rev = abs(rpm) / 60.0
+    active: list[ActiveMode] = []
+
+    for cx in crossings:
+        k = cx["harmonic_index"]
+        nc = cx["nodal_circle"]
+        h = cx["eo_harmonic"]
+        f_eo = cx["eo"] * f_rev
+        f_mode = cx["frequency"]
+
+        # 2. Base amplitude with NC roll-off and damping
+        zeta = total_damping_ratio(k, num_sectors, model)
+        A = model.base_amplitude / ((1.0 + nc) ** model.nc_rolloff_alpha * zeta)
+
+        # 3. EO harmonic decay
+        if h > 1:
+            A /= h ** model.eo_harmonic_decay_beta
+
+        # 4. LEO scaling
+        if cx["is_leo"]:
+            A *= 10.0 ** (model.leo_amplitude_db / 20.0)
+
+        # 5. Off-resonance detuning
+        A *= frf_detuning_factor(f_mode, f_eo, zeta)
+
+        # 6. RPM scaling
+        if model.rpm_ref > 0:
+            A *= (abs(rpm) / model.rpm_ref) ** model.rpm_scaling_exponent
+
+        # 7. Log-normal random variation
+        if model.random_amplitude_sigma_db > 0:
+            sigma_log10 = model.random_amplitude_sigma_db / 20.0
+            A *= 10.0 ** rng.normal(0.0, sigma_log10)
+
+        # 8. FW/BW from aliasing
+        whirl = cx["whirl_direction"]
+
+        phase = rng.uniform(0, 2 * np.pi)
+
+        active.append(ActiveMode(
+            harmonic_index=k,
+            mode_index=cx["mode_index"],
+            frequency=f_mode,
+            amplitude=A,
+            whirl_direction=whirl,
+            engine_order=cx["eo"],
+            eo_harmonic=h,
+            nodal_circle=nc,
+            phase=phase,
+        ))
+
+    # 9. Multi-mode sampling
+    if model.multi_mode_sampling and len(active) > 1:
+        w = np.array(model.mode_count_weights, dtype=np.float64)
+        w /= w.sum()
+        n_modes_choice = rng.choice([1, 2, 3], p=w)
+        n_keep = min(n_modes_choice, len(active))
+        # Keep the strongest modes
+        active.sort(key=lambda m: m.amplitude, reverse=True)
+        active = active[:n_keep]
+
+    # 10. Mistuning
+    if model.mistuning_sigma > 0 and num_sectors > 0:
+        if model.mistuning_method == "fmm":
+            _apply_fmm_mistuning(active, num_sectors, model, modal_results, rng)
+        else:
+            _apply_jitter_mistuning(active, num_sectors, model, rng)
+
+    return active
+
+
+def _apply_jitter_mistuning(
+    active: list[ActiveMode],
+    num_sectors: int,
+    model: ExcitationModel,
+    rng: np.random.Generator,
+) -> None:
+    """Apply simplified per-blade amplitude/phase jitter."""
+    for am in active:
+        am.blade_amplitudes = 1.0 + rng.normal(
+            0.0, model.blade_amplitude_jitter_std, size=num_sectors,
+        )
+        am.blade_amplitudes = np.clip(am.blade_amplitudes, 0.1, None)
+        am.blade_phases = np.deg2rad(
+            rng.uniform(
+                -model.blade_phase_jitter_deg,
+                model.blade_phase_jitter_deg,
+                size=num_sectors,
+            )
+        )
+
+
+def _apply_fmm_mistuning(
+    active: list[ActiveMode],
+    num_sectors: int,
+    model: ExcitationModel,
+    modal_results: list,
+    rng: np.random.Generator,
+) -> None:
+    """Apply Fundamental Mistuning Model for per-blade amplitudes."""
+    try:
+        from turbomodal._core import FMMSolver
+    except ImportError:
+        _apply_jitter_mistuning(active, num_sectors, model, rng)
+        return
+
+    blade_devs = FMMSolver.random_mistuning(
+        num_sectors, model.mistuning_sigma,
+        seed=int(rng.integers(0, 2**31)),
+    )
+
+    # Group active modes by mode family (NC)
+    for am in active:
+        # Get tuned frequencies for this mode family across NDs
+        tuned_freqs = []
+        for mr in modal_results:
+            freqs = np.asarray(mr.frequencies)
+            if am.mode_index < len(freqs):
+                tuned_freqs.append(freqs[am.mode_index])
+        if len(tuned_freqs) < 2:
+            _apply_jitter_mistuning([am], num_sectors, model, rng)
+            continue
+
+        tuned_freqs_arr = np.array(tuned_freqs[:num_sectors // 2 + 1])
+        try:
+            result = FMMSolver.solve(num_sectors, tuned_freqs_arr, blade_devs)
+            # Use blade amplitudes from FMM
+            blade_amps = np.abs(result.blade_amplitudes[:, 0])
+            blade_amps /= np.mean(blade_amps) if np.mean(blade_amps) > 0 else 1.0
+            am.blade_amplitudes = blade_amps
+            am.blade_phases = np.angle(result.blade_amplitudes[:, 0])
+        except Exception:
+            _apply_jitter_mistuning([am], num_sectors, model, rng)
+
+
+# ---------------------------------------------------------------------------
+# SignalGenerationConfig
+# ---------------------------------------------------------------------------
 
 @dataclass
 class SignalGenerationConfig:
@@ -27,7 +473,8 @@ class SignalGenerationConfig:
     duration : Total acquisition duration in seconds.
     num_revolutions : If > 0, overrides *duration* based on RPM.
     seed : Random seed for reproducibility.
-    amplitude_mode : ``"unit"``, ``"forced_response"``, or ``"random"``.
+    amplitude_mode : ``"unit"``, ``"forced_response"``, ``"random"``,
+        or ``"physics"``.
     amplitude_scale : Base amplitude in metres (for ``"unit"`` mode).
     max_frequency : Upper frequency cutoff in Hz (0 = no limit).
     max_modes_per_harmonic : Maximum modes per harmonic index (0 = all).
@@ -35,6 +482,8 @@ class SignalGenerationConfig:
     t_start : Start time in seconds.
     t_end : End time in seconds (0 = use *duration* or *num_revolutions*).
     damping_ratio : Modal damping ratio zeta (0 = undamped).
+    excitation_model : Physics-based excitation model.  Required when
+        *amplitude_mode* is ``"physics"``.
     """
 
     sample_rate: float = 100000.0      # Hz
@@ -43,7 +492,7 @@ class SignalGenerationConfig:
     seed: int = 42
 
     # Amplitude mode: how to set modal amplitudes
-    amplitude_mode: str = "unit"       # "unit", "forced_response", "random"
+    amplitude_mode: str = "unit"       # "unit", "forced_response", "random", "physics"
     amplitude_scale: float = 1e-6      # meters (base amplitude for "unit" mode)
 
     # Which modes to include
@@ -55,6 +504,9 @@ class SignalGenerationConfig:
     t_start: float = 0.0              # Start time (s)
     t_end: float = 0.0                # End time (0 = use duration)
     damping_ratio: float = 0.0        # Modal damping ζ (0 = undamped)
+
+    # Physics-based excitation model (used when amplitude_mode="physics")
+    excitation_model: ExcitationModel | None = None
 
 
 def _build_annulus_surface(mesh):
@@ -353,67 +805,115 @@ def generate_signals_for_condition(
     # sample_mode_shape uses nearest node in sector 0; the circumferential
     # phase factor exp(-j*w*k*θ) is applied separately below.
 
-    mode_count = 0
-    for mr in modal_results:
-        n_modes = len(mr.frequencies)
-        k = mr.harmonic_index
-        whirl_arr = (
-            np.asarray(mr.whirl_direction)
-            if hasattr(mr, 'whirl_direction')
-            else np.zeros(n_modes, dtype=np.int32)
+    if config.amplitude_mode == "physics":
+        # --- Physics-based amplitude model ---
+        if config.excitation_model is None:
+            raise ValueError(
+                "amplitude_mode='physics' requires excitation_model to be set "
+                "in SignalGenerationConfig"
+            )
+        active_modes = compute_physics_amplitudes(
+            modal_results, rpm, N, config.excitation_model,
+            mesh=mesh, rng=rng,
         )
+        # Build a lookup from harmonic_index → ModalResult
+        mr_by_k: dict[int, object] = {mr.harmonic_index: mr for mr in modal_results}
 
-        for m in range(n_modes):
-            f_rot = mr.frequencies[m]
-            if config.max_modes_per_harmonic > 0 and m >= config.max_modes_per_harmonic:
-                break
+        for am in active_modes:
+            mr = mr_by_k.get(am.harmonic_index)
+            if mr is None:
+                continue
+            if am.mode_index >= len(mr.frequencies):
+                continue
+            phi_s = sensor_array.sample_mode_shape(mr.mode_shapes[:, am.mode_index])
+            omega_rot_val = 2.0 * np.pi * am.frequency
 
-            phi_s = sensor_array.sample_mode_shape(mr.mode_shapes[:, m])  # (n_sensors,) complex
-
-            # Amplitude
-            if config.amplitude_mode == "forced_response" and forced_response_result is not None:
-                if mode_count < len(forced_response_result.max_response_amplitude):
-                    amp = forced_response_result.max_response_amplitude[mode_count]
-                else:
-                    amp = config.amplitude_scale
-            elif config.amplitude_mode == "random":
-                amp = config.amplitude_scale * rng.exponential(1.0)
-            else:
-                amp = config.amplitude_scale
-
-            omega_rot = 2.0 * np.pi * f_rot
-            w = int(whirl_arr[m]) if m < len(whirl_arr) else 0
-            phase = rng.uniform(0, 2 * np.pi)
-
-            # Damping envelope: exp(-ζ·ω·(t - t0))
-            if config.damping_ratio > 0:
-                t0 = t[0]
-                envelope = np.exp(-config.damping_ratio * omega_rot * (t - t0))
-            else:
-                envelope = None
-
-            # ---- Synthesise per-mode contribution ----
-            # Physics: u(r,θ,z,t) = Re[φ(r,z) · exp(-j·w·k·θ) · exp(j·ω·t)]
-            # FW (w=+1): exp(-jkθ) rotates with the disk → lab freq = f_rot + kΩ
-            # BW (w=-1): exp(+jkθ) rotates against disk → lab freq = |f_rot − kΩ|
-
-            if w != 0 or k == 0:
-                # --- Single component (Coriolis-split or axisymmetric k=0) ---
-                _add_single_component(
-                    signals, t, phi_s, amp, omega_rot, phase,
-                    k, w, omega_rad, theta_s, is_stat, envelope,
-                    config.max_frequency,
+            if am.blade_amplitudes is not None:
+                _add_mistuned_component(
+                    signals, t, phi_s, am.amplitude, omega_rot_val, am.phase,
+                    am.harmonic_index, am.whirl_direction, omega_rad,
+                    theta_s, is_stat, None, config.max_frequency,
+                    am.blade_amplitudes, am.blade_phases, N,
+                    sensors=sensors,
                 )
             else:
-                # --- Degenerate (w=0, k>0): emit FW + BW at half amplitude ---
-                for w_comp in (+1, -1):
+                _add_single_component(
+                    signals, t, phi_s, am.amplitude, omega_rot_val, am.phase,
+                    am.harmonic_index, am.whirl_direction, omega_rad,
+                    theta_s, is_stat, None, config.max_frequency,
+                )
+
+        # Colored broadband noise (added before sensor noise pipeline)
+        if (config.excitation_model.broadband_snr_db > 0
+                and active_modes and len(t) > 1):
+            peak_amp = max(am.amplitude for am in active_modes)
+            _add_colored_broadband(
+                signals, peak_amp, config.excitation_model,
+                config.sample_rate, rng,
+            )
+    else:
+        # --- Original amplitude modes: unit / random / forced_response ---
+        mode_count = 0
+        for mr in modal_results:
+            n_modes = len(mr.frequencies)
+            k = mr.harmonic_index
+            whirl_arr = (
+                np.asarray(mr.whirl_direction)
+                if hasattr(mr, 'whirl_direction')
+                else np.zeros(n_modes, dtype=np.int32)
+            )
+
+            for m in range(n_modes):
+                f_rot = mr.frequencies[m]
+                if config.max_modes_per_harmonic > 0 and m >= config.max_modes_per_harmonic:
+                    break
+
+                phi_s = sensor_array.sample_mode_shape(mr.mode_shapes[:, m])  # (n_sensors,) complex
+
+                # Amplitude
+                if config.amplitude_mode == "forced_response" and forced_response_result is not None:
+                    if mode_count < len(forced_response_result.max_response_amplitude):
+                        amp = forced_response_result.max_response_amplitude[mode_count]
+                    else:
+                        amp = config.amplitude_scale
+                elif config.amplitude_mode == "random":
+                    amp = config.amplitude_scale * rng.exponential(1.0)
+                else:
+                    amp = config.amplitude_scale
+
+                omega_rot = 2.0 * np.pi * f_rot
+                w = int(whirl_arr[m]) if m < len(whirl_arr) else 0
+                phase = rng.uniform(0, 2 * np.pi)
+
+                # Damping envelope: exp(-ζ·ω·(t - t0))
+                if config.damping_ratio > 0:
+                    t0 = t[0]
+                    envelope = np.exp(-config.damping_ratio * omega_rot * (t - t0))
+                else:
+                    envelope = None
+
+                # ---- Synthesise per-mode contribution ----
+                # Physics: u(r,θ,z,t) = Re[φ(r,z) · exp(-j·w·k·θ) · exp(j·ω·t)]
+                # FW (w=+1): exp(-jkθ) rotates with the disk → lab freq = f_rot + kΩ
+                # BW (w=-1): exp(+jkθ) rotates against disk → lab freq = |f_rot − kΩ|
+
+                if w != 0 or k == 0:
+                    # --- Single component (Coriolis-split or axisymmetric k=0) ---
                     _add_single_component(
-                        signals, t, phi_s, amp * 0.5, omega_rot, phase,
-                        k, w_comp, omega_rad, theta_s, is_stat, envelope,
+                        signals, t, phi_s, amp, omega_rot, phase,
+                        k, w, omega_rad, theta_s, is_stat, envelope,
                         config.max_frequency,
                     )
+                else:
+                    # --- Degenerate (w=0, k>0): emit FW + BW at half amplitude ---
+                    for w_comp in (+1, -1):
+                        _add_single_component(
+                            signals, t, phi_s, amp * 0.5, omega_rot, phase,
+                            k, w_comp, omega_rad, theta_s, is_stat, envelope,
+                            config.max_frequency,
+                        )
 
-            mode_count += 1
+                mode_count += 1
 
     # --- Blade passage gating via ray tracing ---
     # Any stationary sensor that looks at the rotating structure through
@@ -560,6 +1060,104 @@ def _add_single_component(
             contrib *= envelope
 
         signals[s, :] += contrib
+
+
+def _add_mistuned_component(
+    signals: np.ndarray,
+    t: np.ndarray,
+    phi_s: np.ndarray,
+    amp: float,
+    omega_rot: float,
+    phase: float,
+    k: int,
+    w: int,
+    omega_rad: float,
+    theta_s: np.ndarray,
+    is_stat: np.ndarray,
+    envelope: np.ndarray | None,
+    max_frequency: float,
+    blade_amplitudes: np.ndarray,
+    blade_phases: np.ndarray | None,
+    num_sectors: int,
+    sensors=None,
+) -> None:
+    """Add a mistuned mode component with per-blade amplitude/phase.
+
+    For stationary sensors, determines which blade is passing at each
+    time step and applies that blade's amplitude and phase offset.
+    For rotating sensors (strain gauges), uses the blade the sensor is
+    mounted on (``SensorLocation.blade_index``).
+    """
+    n_sensors = len(phi_s)
+    N = num_sectors
+
+    f_rot = omega_rot / (2.0 * np.pi)
+    f_omega = omega_rad / (2.0 * np.pi)
+    f_stat = abs(f_rot + w * k * f_omega)
+    omega_stat = 2.0 * np.pi * f_stat
+
+    if max_frequency > 0 and f_stat > max_frequency:
+        return
+
+    for s in range(n_sensors):
+        phi_mag = np.abs(phi_s[s])
+        phi_phase = np.angle(phi_s[s])
+        if phi_mag < 1e-30:
+            continue
+
+        circ_phase = -w * k * theta_s[s]
+        total_phase_base = phi_phase + circ_phase
+
+        if is_stat[s] and omega_rad > 0 and N > 0:
+            # Stationary sensor: determine which blade is passing at each t
+            blade_angle_at_sensor = (theta_s[s] - omega_rad * t) % (2.0 * np.pi)
+            blade_idx = (blade_angle_at_sensor / (2.0 * np.pi) * N).astype(np.intp)
+            blade_idx = blade_idx % N
+
+            b_amp = blade_amplitudes[blade_idx]
+            b_phase = blade_phases[blade_idx] if blade_phases is not None else 0.0
+
+            total_phase = total_phase_base + b_phase + phase
+            contrib = amp * phi_mag * b_amp * np.cos(omega_stat * t + total_phase)
+        else:
+            # Rotating sensor: mounted on a specific blade
+            b_idx = 0
+            if sensors is not None and hasattr(sensors[s], 'blade_index'):
+                b_idx = sensors[s].blade_index % N if N > 0 else 0
+            b_amp = blade_amplitudes[b_idx]
+            b_phase = blade_phases[b_idx] if blade_phases is not None else 0.0
+            total_phase = total_phase_base + b_phase + phase
+            contrib = amp * phi_mag * b_amp * np.cos(omega_rot * t + total_phase)
+
+        if envelope is not None:
+            contrib *= envelope
+
+        signals[s, :] += contrib
+
+
+def _add_colored_broadband(
+    signals: np.ndarray,
+    peak_amplitude: float,
+    model: ExcitationModel,
+    sample_rate: float,
+    rng: np.random.Generator,
+) -> None:
+    """Add colored broadband noise to all sensor channels in-place.
+
+    Noise level is set by *model.broadband_snr_db* relative to
+    *peak_amplitude*.  Spectral shape is ``PSD ~ f^(-gamma)`` with
+    gamma = *model.broadband_spectral_exponent*.
+    """
+    from turbomodal.noise import generate_colored_noise
+
+    n_sensors, n_samples = signals.shape
+    noise_rms = peak_amplitude * 10.0 ** (-model.broadband_snr_db / 20.0)
+
+    for s in range(n_sensors):
+        noise = generate_colored_noise(
+            n_samples, sample_rate, model.broadband_spectral_exponent, rng,
+        )
+        signals[s, :] += noise * noise_rms
 
 
 def generate_dataset_signals(

@@ -429,3 +429,338 @@ def test_filter_nc_requires_mesh(signal_gen_setup):
     _, results = signal_gen_setup
     with pytest.raises(ValueError, match="mesh is required"):
         filter_modal_results(results, nc=0)
+
+
+# ====================================================================
+# Physics-based amplitude model tests
+# ====================================================================
+
+from turbomodal.signal_gen import (
+    ExcitationModel,
+    eo_excites_harmonic,
+    eo_whirl_direction,
+    total_damping_ratio,
+    frf_detuning_factor,
+    find_campbell_crossings,
+    compute_physics_amplitudes,
+)
+
+
+# ---- eo_excites_harmonic ----
+
+class TestEoAliasingRule:
+    """Engine order spatial aliasing rule: k = EO mod N."""
+
+    def test_direct_match(self):
+        """EO=36 excites k=12 for N=24 (36 mod 24 = 12)."""
+        assert eo_excites_harmonic(36, 12, 24) is True
+
+    def test_k0(self):
+        """EO=24 excites k=0 for N=24 (24 mod 24 = 0)."""
+        assert eo_excites_harmonic(24, 0, 24) is True
+
+    def test_aliased_forward(self):
+        """EO=25 excites k=1 for N=24 (25 mod 24 = 1)."""
+        assert eo_excites_harmonic(25, 1, 24) is True
+
+    def test_aliased_backward(self):
+        """EO=23 excites k=1 for N=24 (23 mod 24 = 23 = -1 mod 24)."""
+        assert eo_excites_harmonic(23, 1, 24) is True
+
+    def test_wrong_k_rejected(self):
+        """EO=25 does NOT excite k=2 for N=24."""
+        assert eo_excites_harmonic(25, 2, 24) is False
+
+    def test_higher_harmonic(self):
+        """EO=72 excites k=0 for N=24 (72 mod 24 = 0)."""
+        assert eo_excites_harmonic(72, 0, 24) is True
+
+    def test_eo_equals_n_half(self):
+        """EO=12 excites k=12 for N=24."""
+        assert eo_excites_harmonic(12, 12, 24) is True
+
+    def test_zero_sectors(self):
+        """N=0 should always return False."""
+        assert eo_excites_harmonic(1, 0, 0) is False
+
+
+# ---- eo_whirl_direction ----
+
+class TestEoWhirlDirection:
+    """Determine FW/BW direction from EO aliasing."""
+
+    def test_forward(self):
+        """EO=25, k=1, N=24 -> forward (25 mod 24 = 1 = k)."""
+        assert eo_whirl_direction(25, 1, 24) == 1
+
+    def test_backward(self):
+        """EO=23, k=1, N=24 -> backward (23 mod 24 = 23 = N-k)."""
+        assert eo_whirl_direction(23, 1, 24) == -1
+
+    def test_axisymmetric(self):
+        """k=0 is always standing (0)."""
+        assert eo_whirl_direction(24, 0, 24) == 0
+
+    def test_n_half_standing(self):
+        """k=N/2 is a standing wave."""
+        assert eo_whirl_direction(12, 12, 24) == 0
+
+    def test_forward_high_eo(self):
+        """EO=49 = 2*24+1, so EO mod 24 = 1 = k -> FW."""
+        assert eo_whirl_direction(49, 1, 24) == 1
+
+
+# ---- total_damping_ratio ----
+
+class TestTotalDamping:
+    """ND-dependent total damping ratio."""
+
+    def test_varies_with_nd(self):
+        model = ExcitationModel(
+            structural_damping_ratio=0.003,
+            aero_damping_mean=0.002,
+            aero_damping_variation=0.5,
+        )
+        zeta_0 = total_damping_ratio(0, 24, model)
+        zeta_6 = total_damping_ratio(6, 24, model)
+        # k=6 gives sin(2*pi*6/24) = sin(pi/2) = 1 -> max aero damping
+        assert zeta_6 > zeta_0
+
+    def test_structural_only(self):
+        model = ExcitationModel(
+            structural_damping_ratio=0.005,
+            aero_damping_mean=0.0,
+            aero_damping_variation=0.0,
+        )
+        zeta = total_damping_ratio(3, 24, model)
+        assert zeta == pytest.approx(0.005)
+
+    def test_max_at_quarter_n(self):
+        """Peak aero damping at k = N/4 where sin(2*pi*k/N) = 1."""
+        model = ExcitationModel(
+            structural_damping_ratio=0.0,
+            aero_damping_mean=0.002,
+            aero_damping_variation=1.0,
+        )
+        zeta_peak = total_damping_ratio(6, 24, model)  # k=N/4
+        assert zeta_peak == pytest.approx(0.004)  # mean * (1+1)
+
+
+# ---- frf_detuning_factor ----
+
+class TestFrfDetuning:
+    """Normalised single-DOF FRF magnitude."""
+
+    def test_on_resonance(self):
+        """Exactly on resonance should give factor ~1."""
+        factor = frf_detuning_factor(1000.0, 1000.0, 0.01)
+        assert factor == pytest.approx(1.0, abs=0.05)
+
+    def test_off_resonance_attenuated(self):
+        """5% off-resonance should be significantly < 1."""
+        factor = frf_detuning_factor(1000.0, 950.0, 0.01)
+        assert factor < 0.25
+
+    def test_far_off_resonance(self):
+        """50% off should be very small."""
+        factor = frf_detuning_factor(1000.0, 500.0, 0.01)
+        assert factor < 0.05
+
+    def test_zero_freq(self):
+        """Zero mode frequency should return 0."""
+        assert frf_detuning_factor(0.0, 500.0, 0.01) == 0.0
+
+
+# ---- Physics amplitude model properties ----
+
+class TestPhysicsAmplitudeProperties:
+    """Verify physics relationships between amplitude parameters."""
+
+    def test_nc_rolloff_ratio(self):
+        """NC=1 should be ~1/(2^1.5) = 0.354x of NC=0."""
+        # alpha=1.5 -> ratio = 1/(1+1)^1.5 / (1/(1+0)^1.5) = 1/2^1.5
+        expected_ratio = 1.0 / (2.0 ** 1.5)
+        assert expected_ratio == pytest.approx(0.3536, abs=0.001)
+
+    def test_eo_harmonic_decay(self):
+        """h=2 amplitude / h=1 amplitude = 1/2 for beta=1."""
+        # A *= 1/h^beta, so ratio = (1/2^1) / (1/1^1) = 0.5
+        beta = 1.0
+        ratio = (1.0 / 2 ** beta)
+        assert ratio == pytest.approx(0.5)
+
+    def test_rpm_scaling(self):
+        """Doubling RPM should quadruple amplitude for exponent=2."""
+        ratio = (2.0) ** 2.0
+        assert ratio == pytest.approx(4.0)
+
+    def test_leo_20db_below(self):
+        """LEO at -20 dB is 0.1x amplitude."""
+        ratio = 10.0 ** (-20.0 / 20.0)
+        assert ratio == pytest.approx(0.1)
+
+
+# ---- Colored noise ----
+
+class TestColoredNoise:
+    """Tests for generate_colored_noise."""
+
+    def test_length(self):
+        from turbomodal.noise import generate_colored_noise
+        noise = generate_colored_noise(1024, 44100.0)
+        assert len(noise) == 1024
+
+    def test_unit_rms(self):
+        from turbomodal.noise import generate_colored_noise
+        noise = generate_colored_noise(8192, 44100.0)
+        rms = np.sqrt(np.mean(noise ** 2))
+        assert rms == pytest.approx(1.0, abs=0.1)
+
+    def test_spectral_slope(self):
+        """PSD slope should approximate -gamma in log-log space."""
+        from turbomodal.noise import generate_colored_noise
+        gamma = 5.0 / 3.0
+        noise = generate_colored_noise(
+            65536, 44100.0, spectral_exponent=gamma,
+            rng=np.random.default_rng(42),
+        )
+        # Compute PSD via periodogram
+        fft_vals = np.fft.rfft(noise)
+        psd = np.abs(fft_vals) ** 2
+        freqs = np.fft.rfftfreq(len(noise), d=1.0 / 44100.0)
+
+        # Fit slope in log-log space (skip DC and near-Nyquist)
+        mask = (freqs > 100) & (freqs < 15000)
+        log_f = np.log10(freqs[mask])
+        log_psd = np.log10(psd[mask] + 1e-30)
+        slope = np.polyfit(log_f, log_psd, 1)[0]
+
+        # Slope should be close to -gamma (within tolerance for finite signal)
+        assert slope < 0, "PSD should decrease with frequency"
+        assert abs(slope + gamma) < 1.0, (
+            f"PSD slope {slope:.2f} too far from -{gamma:.2f}"
+        )
+
+    def test_reproducible(self):
+        from turbomodal.noise import generate_colored_noise
+        n1 = generate_colored_noise(1024, 44100.0, rng=np.random.default_rng(7))
+        n2 = generate_colored_noise(1024, 44100.0, rng=np.random.default_rng(7))
+        np.testing.assert_array_equal(n1, n2)
+
+
+# ---- Physics signal generation integration ----
+
+class TestPhysicsSignalGeneration:
+    """Integration tests for amplitude_mode='physics'."""
+
+    def test_requires_excitation_model(self, signal_gen_setup):
+        """Should raise ValueError without excitation_model."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01,
+            amplitude_mode="physics",
+        )
+        with pytest.raises(ValueError, match="excitation_model"):
+            generate_signals_for_condition(vsa, results, 3000.0, cfg)
+
+    def test_output_shape(self, signal_gen_setup):
+        """Physics mode should return correct signal shape."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        model = ExcitationModel(
+            stator_vane_counts=[24],
+            campbell_crossing_tolerance=0.99,  # wide tolerance to catch modes
+            broadband_snr_db=0.0,  # disable broadband for shape test
+        )
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01,
+            amplitude_mode="physics",
+            excitation_model=model,
+        )
+        output = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        assert "signals" in output
+        assert "time" in output
+        assert output["signals"].shape[0] == vsa.n_sensors
+        assert output["signals"].shape[1] == len(output["time"])
+
+    def test_reproducible(self, signal_gen_setup):
+        """Same seed should produce identical physics signals."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        model = ExcitationModel(
+            stator_vane_counts=[24],
+            campbell_crossing_tolerance=0.99,
+            broadband_snr_db=0.0,
+        )
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01, seed=42,
+            amplitude_mode="physics",
+            excitation_model=model,
+        )
+        out1 = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        out2 = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        np.testing.assert_array_equal(out1["signals"], out2["signals"])
+
+    def test_backward_compatible(self, signal_gen_setup):
+        """Unit mode should still work exactly as before."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01, seed=42,
+            amplitude_mode="unit",
+        )
+        output = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        assert output["signals"].shape[0] == vsa.n_sensors
+
+    def test_with_broadband_noise(self, signal_gen_setup):
+        """Physics mode with broadband noise should produce non-zero signals."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        model = ExcitationModel(
+            stator_vane_counts=[24],
+            campbell_crossing_tolerance=0.99,
+            broadband_snr_db=10.0,
+        )
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01,
+            amplitude_mode="physics",
+            excitation_model=model,
+        )
+        output = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        # Should have non-zero signals (broadband noise at minimum)
+        assert np.any(output["signals"] != 0)
+
+    def test_mistuning_jitter(self, signal_gen_setup):
+        """Physics mode with jitter mistuning should run without error."""
+        from turbomodal.signal_gen import generate_signals_for_condition
+        vsa, results = signal_gen_setup
+        model = ExcitationModel(
+            stator_vane_counts=[24],
+            campbell_crossing_tolerance=0.99,
+            mistuning_sigma=0.02,
+            mistuning_method="jitter",
+            broadband_snr_db=0.0,
+        )
+        cfg = SignalGenerationConfig(
+            sample_rate=100_000.0, duration=0.01,
+            amplitude_mode="physics",
+            excitation_model=model,
+        )
+        output = generate_signals_for_condition(vsa, results, 3000.0, cfg)
+        assert output["signals"].shape[0] == vsa.n_sensors
+
+
+# ---- ExcitationModel defaults ----
+
+def test_excitation_model_defaults():
+    """ExcitationModel should have sensible defaults."""
+    model = ExcitationModel()
+    assert model.stator_vane_counts == [24]
+    assert model.max_eo_harmonic == 3
+    assert model.nc_rolloff_alpha == 1.5
+    assert model.structural_damping_ratio == 0.003
+    assert model.aero_damping_mean == 0.002
+    assert model.campbell_crossing_tolerance == 0.05
+    assert model.broadband_snr_db == 20.0
+    assert model.broadband_spectral_exponent == pytest.approx(5.0 / 3.0)

@@ -51,6 +51,7 @@ class SensorLocation:
     sensitivity: float = 1.0
     noise_floor: float = 1e-9
     is_stationary: bool | None = None  # None = infer from sensor_type
+    blade_index: int = 0  # Which blade the sensor is mounted on (rotating sensors)
 
 
 @dataclass

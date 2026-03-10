@@ -295,6 +295,59 @@ def apply_dropout(
 
 
 # ---------------------------------------------------------------------------
+# Colored (broadband) noise
+# ---------------------------------------------------------------------------
+
+def generate_colored_noise(
+    n_samples: int,
+    sample_rate: float,
+    spectral_exponent: float = 5.0 / 3.0,
+    rng: np.random.Generator | None = None,
+) -> NDArray:
+    """Generate colored noise with ``PSD ~ f^(-gamma)``.
+
+    Uses spectral shaping: white noise in the frequency domain is
+    multiplied by ``f^(-gamma/2)`` then inverse-FFT'd.
+
+    Parameters
+    ----------
+    n_samples : Number of output samples.
+    sample_rate : Sample rate in Hz.
+    spectral_exponent : gamma in ``PSD ~ f^(-gamma)``.
+        Default 5/3 (Kolmogorov turbulence inertial subrange).
+    rng : NumPy random generator for reproducibility.
+
+    Returns
+    -------
+    ``(n_samples,)`` real array, normalised to unit RMS.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # White noise in frequency domain
+    n_fft = n_samples
+    white = rng.standard_normal(n_fft) + 1j * rng.standard_normal(n_fft)
+
+    # Frequency bins
+    freqs = np.fft.fftfreq(n_fft, d=1.0 / sample_rate)
+    freqs[0] = 1.0  # avoid division by zero at DC
+
+    # Spectral shaping: multiply by |f|^(-gamma/2)
+    shaping = np.abs(freqs) ** (-spectral_exponent / 2.0)
+    shaping[0] = 0.0  # zero DC component
+
+    colored_fft = white * shaping
+    colored = np.fft.ifft(colored_fft).real
+
+    # Normalise to unit RMS
+    rms = np.sqrt(np.mean(colored ** 2))
+    if rms > 0:
+        colored /= rms
+
+    return colored
+
+
+# ---------------------------------------------------------------------------
 # Combined pipeline
 # ---------------------------------------------------------------------------
 
