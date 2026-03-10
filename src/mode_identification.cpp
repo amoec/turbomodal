@@ -133,13 +133,21 @@ int identify_nodal_circles(
     if (profile.size() < 3) return 0;
 
     // --- Step 5: count zero crossings on smoothed profile ---
+    // Track the last bin with significant amplitude and detect sign
+    // changes against it.  This avoids missing crossings where the
+    // profile passes through near-zero values at the nodal circle.
     int crossings = 0;
-    for (size_t i = 1; i < profile.size(); i++) {
-        if (std::abs(profile[i - 1]) > 0.05 && std::abs(profile[i]) > 0.05) {
-            if ((profile[i - 1] > 0 && profile[i] < 0) ||
-                (profile[i - 1] < 0 && profile[i] > 0)) {
+    double last_sig = 0.0;
+    bool has_last = false;
+    for (size_t i = 0; i < profile.size(); i++) {
+        if (std::abs(profile[i]) > 0.02) {
+            if (has_last &&
+                ((last_sig > 0.0 && profile[i] < 0.0) ||
+                 (last_sig < 0.0 && profile[i] > 0.0))) {
                 crossings++;
             }
+            last_sig = profile[i];
+            has_last = true;
         }
     }
 
