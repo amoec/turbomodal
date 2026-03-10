@@ -60,6 +60,7 @@ from turbomodal.viz import (
 )
     _RemovedClass,
     ExcitationModel,
+    RayHitGeometry,
     _removed,
     _removed,
     filter_modal_results,
@@ -151,6 +152,7 @@ __all__ = [
     # Signal generation
     "_RemovedClass",
     "ExcitationModel",
+    "RayHitGeometry",
     "_removed",
     "_removed",
     "filter_modal_results",
