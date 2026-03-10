@@ -431,6 +431,46 @@ def test_filter_nc_requires_mesh(signal_gen_setup):
         filter_modal_results(results, nc=0)
 
 
+def test_filter_by_modes_single(signal_gen_setup):
+    """Filtering by modes=0 should keep only the lowest-frequency mode per ND."""
+    _, results = signal_gen_setup
+    filtered = filter_modal_results(results, nd=0, modes=0)
+    assert len(filtered) == 1
+    assert len(filtered[0].frequencies) == 1
+
+
+def test_filter_by_modes_list(signal_gen_setup):
+    """Filtering by modes=[0,1] should keep two lowest modes per ND."""
+    _, results = signal_gen_setup
+    filtered = filter_modal_results(results, nd=0, modes=[0, 1])
+    assert len(filtered) == 1
+    assert len(filtered[0].frequencies) == 2
+    # Frequencies should still be sorted
+    assert filtered[0].frequencies[0] < filtered[0].frequencies[1]
+
+
+def test_filter_by_modes_out_of_range(signal_gen_setup):
+    """Mode indices beyond available modes should be silently ignored."""
+    _, results = signal_gen_setup
+    n_modes = len([r for r in results if r.harmonic_index == 0][0].frequencies)
+    filtered = filter_modal_results(results, nd=0, modes=[0, n_modes + 10])
+    assert len(filtered) == 1
+    assert len(filtered[0].frequencies) == 1  # only mode 0 kept
+
+
+def test_filter_by_modes_preserves_mode_shapes(signal_gen_setup):
+    """Mode shapes should correspond to the selected mode indices."""
+    _, results = signal_gen_setup
+    r0 = [r for r in results if r.harmonic_index == 0][0]
+    filtered = filter_modal_results(results, nd=0, modes=1)
+    assert len(filtered) == 1
+    # The kept mode shape should match original mode index 1
+    np.testing.assert_array_equal(
+        np.asarray(filtered[0].mode_shapes)[:, 0],
+        np.asarray(r0.mode_shapes)[:, 1],
+    )
+
+
 # ====================================================================
 # Ray-based surface displacement tests
 # ====================================================================

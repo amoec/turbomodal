@@ -781,8 +781,9 @@ def filter_modal_results(
     nd: int | list[int] | None = None,
     nc: int | list[int] | None = None,
     whirl: int | list[int] | None = None,
+    modes: int | list[int] | None = None,
 ) -> list:
-    """Filter modal results by nodal diameter, nodal circles, and/or whirl.
+    """Filter modal results by nodal diameter, nodal circles, whirl, or mode index.
 
     Parameters
     ----------
@@ -793,11 +794,17 @@ def filter_modal_results(
         Requires *mesh* for on-the-fly mode identification.
     whirl : Whirl direction(s) to keep: ``+1`` (FW), ``-1`` (BW),
         ``0`` (degenerate/standing).  ``None`` keeps all.
+    modes : Mode index/indices within each ND to keep (0-based,
+        ordered by frequency).  For example, ``modes=0`` keeps only
+        the lowest-frequency mode per ND; ``modes=[0, 1]`` keeps the
+        two lowest.  ``None`` keeps all.  Applied after *whirl* and
+        *nc* filtering.
 
     Returns
     -------
-    Filtered list of ModalResult.  When *nc* or *whirl* is specified,
-    individual results may contain fewer modes than the originals.
+    Filtered list of ModalResult.  When *nc*, *whirl*, or *modes* is
+    specified, individual results may contain fewer modes than the
+    originals.
     """
     from turbomodal._core import ModalResult
 
@@ -805,12 +812,15 @@ def filter_modal_results(
     nd_set: set[int] | None = None
     nc_set: set[int] | None = None
     whirl_set: set[int] | None = None
+    modes_set: set[int] | None = None
     if nd is not None:
         nd_set = {nd} if isinstance(nd, int) else set(nd)
     if nc is not None:
         nc_set = {nc} if isinstance(nc, int) else set(nc)
     if whirl is not None:
         whirl_set = {whirl} if isinstance(whirl, int) else set(whirl)
+    if modes is not None:
+        modes_set = {modes} if isinstance(modes, int) else set(modes)
 
     # Step 1: filter by ND (harmonic_index)
     if nd_set is not None:
@@ -858,6 +868,25 @@ def filter_modal_results(
             nr.whirl_direction = np.asarray(r.whirl_direction)[idx]
             filtered.append(nr)
         modal_results = filtered
+
+    # Step 4: filter by mode index (0-based position within each ND)
+    if modes_set is not None:
+        filtered_m: list = []
+        for r in modal_results:
+            n = len(r.frequencies)
+            keep = sorted(i for i in modes_set if 0 <= i < n)
+            if not keep:
+                continue
+            nr = ModalResult()
+            nr.harmonic_index = r.harmonic_index
+            nr.rpm = r.rpm
+            nr.converged = r.converged
+            idx = np.array(keep)
+            nr.frequencies = np.asarray(r.frequencies)[idx]
+            nr.mode_shapes = np.asarray(r.mode_shapes)[:, idx]
+            nr.whirl_direction = np.asarray(r.whirl_direction)[idx]
+            filtered_m.append(nr)
+        modal_results = filtered_m
 
     return modal_results
 
