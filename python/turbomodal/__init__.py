@@ -59,6 +59,7 @@ from turbomodal.viz import (
     _RemovedClass,
 )
     _RemovedClass,
+    ExcitationModel,
     _removed,
     _removed,
     filter_modal_results,
@@ -149,6 +150,7 @@ __all__ = [
     "_removed",
     # Signal generation
     "_RemovedClass",
+    "ExcitationModel",
     "_removed",
     "_removed",
     "filter_modal_results",
