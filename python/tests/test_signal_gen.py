@@ -981,3 +981,83 @@ def test_excitation_model_defaults():
     assert model.campbell_crossing_tolerance == 0.05
     assert model.broadband_snr_db == 20.0
     assert model.broadband_spectral_exponent == pytest.approx(5.0 / 3.0)
+
+
+# ---- NC identification on blade sector mesh ----
+
+class TestBladeNcIdentification:
+    """NC identification tests using the blade sector mesh (hub + blade)."""
+
+    def test_bending_nc_progression(self, solved_blade):
+        """First several bending modes should have increasing NC with frequency."""
+        from turbomodal._core import identify_modes
+
+        mesh, _, results = solved_blade
+        for r in results:
+            if r.harmonic_index != 0:
+                continue
+            ids = identify_modes(r, mesh)
+            # Collect bending modes sorted by frequency
+            bending = [(mid.frequency, mid.nodal_circle)
+                       for mid in ids if mid.family_label.endswith("B")]
+            if len(bending) < 3:
+                continue
+            bending.sort()
+            # Check the first 5 bending modes (higher modes may be
+            # misclassified or belong to a different sub-family)
+            n_check = min(5, len(bending))
+            ncs = [nc for _, nc in bending[:n_check]]
+            for i in range(1, len(ncs)):
+                assert ncs[i] >= ncs[i - 1], (
+                    f"Bending NC should increase with frequency: "
+                    f"f={bending[i-1][0]:.0f} NC={ncs[i-1]} -> "
+                    f"f={bending[i][0]:.0f} NC={ncs[i]}"
+                )
+
+    def test_lowest_bending_mode_is_nc0(self, solved_blade):
+        """The lowest-frequency bending mode should be NC=0."""
+        from turbomodal._core import identify_modes
+
+        mesh, _, results = solved_blade
+        for r in results:
+            if r.harmonic_index != 0:
+                continue
+            ids = identify_modes(r, mesh)
+            bending = [(mid.frequency, mid.nodal_circle)
+                       for mid in ids if mid.family_label.endswith("B")]
+            if not bending:
+                continue
+            bending.sort()
+            assert bending[0][1] == 0, (
+                f"Lowest bending mode should be NC=0, "
+                f"got NC={bending[0][1]} at f={bending[0][0]:.0f} Hz"
+            )
+
+    def test_blade_mesh_has_bending_modes(self, solved_blade):
+        """Blade sector mesh should produce B-family modes (unlike continuous disk)."""
+        from turbomodal._core import identify_modes
+
+        mesh, _, results = solved_blade
+        families_found: set[str] = set()
+        for r in results:
+            if r.harmonic_index == 0:
+                ids = identify_modes(r, mesh)
+                for mid in ids:
+                    families_found.add(mid.family_label[-1])
+        assert "B" in families_found, "Blade mesh should have bending (B) modes"
+
+    def test_nc_values_reasonable_range(self, solved_blade):
+        """NC values should be in a reasonable range for the mesh resolution."""
+        from turbomodal._core import identify_modes
+
+        mesh, _, results = solved_blade
+        for r in results:
+            if r.harmonic_index != 0:
+                continue
+            ids = identify_modes(r, mesh)
+            for mid in ids:
+                assert mid.nodal_circle >= 0, "NC should be non-negative"
+                assert mid.nodal_circle < 20, (
+                    f"NC={mid.nodal_circle} seems too high for this mesh, "
+                    f"f={mid.frequency:.0f} Hz {mid.family_label}"
+                )

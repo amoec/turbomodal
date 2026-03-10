@@ -22,32 +22,10 @@ int identify_nodal_circles(
     double mid_angle = sector_angle / 2.0;
     double angle_tolerance = sector_angle * 0.15;  // 15% of sector width
 
-    // --- Step 1: determine globally dominant component (B/T/A) ---
-    double rms_radial = 0.0, rms_tangential = 0.0, rms_axial = 0.0;
-    for (int i = 0; i < n_nodes; i++) {
-        double x = mesh.nodes(i, 0);
-        double y = mesh.nodes(i, 1);
-        double r = std::sqrt(x * x + y * y);
-        std::complex<double> ux = mode_shape(3 * i);
-        std::complex<double> uy = mode_shape(3 * i + 1);
-        std::complex<double> uz = mode_shape(3 * i + 2);
-        if (r > 1e-10) {
-            std::complex<double> ur = (x * ux + y * uy) / r;
-            std::complex<double> ut = (-y * ux + x * uy) / r;
-            rms_radial += std::norm(ur);
-            rms_tangential += std::norm(ut);
-        }
-        rms_axial += std::norm(uz);
-    }
-    // 0 = axial/bending, 1 = radial, 2 = tangential
-    int dominant = 0;
-    if (rms_radial > rms_axial && rms_radial > rms_tangential) dominant = 1;
-    else if (rms_tangential > rms_axial) dominant = 2;
-
-    // --- Step 2: collect complex displacement along radial strip ---
+    // --- Step 1: collect 3D complex displacement along radial strip ---
     struct RadialSample {
         double radius;
-        std::complex<double> displacement;
+        std::complex<double> dx, dy, dz;  // Cartesian displacement
     };
     std::vector<RadialSample> samples;
     samples.reserve(n_nodes);
@@ -60,19 +38,8 @@ int identify_nodal_circles(
         if (theta < 0) theta += 2.0 * PI;
 
         if (std::abs(theta - mid_angle) < angle_tolerance && r > 1e-10) {
-            std::complex<double> ux = mode_shape(3 * i);
-            std::complex<double> uy = mode_shape(3 * i + 1);
-            std::complex<double> uz = mode_shape(3 * i + 2);
-
-            std::complex<double> disp;
-            if (dominant == 0) {
-                disp = uz;
-            } else if (dominant == 1) {
-                disp = (x * ux + y * uy) / r;
-            } else {
-                disp = (-y * ux + x * uy) / r;
-            }
-            samples.push_back({r, disp});
+            samples.push_back({r,
+                mode_shape(3 * i), mode_shape(3 * i + 1), mode_shape(3 * i + 2)});
         }
     }
 
@@ -82,42 +49,48 @@ int identify_nodal_circles(
     std::sort(samples.begin(), samples.end(),
               [](const auto& a, const auto& b) { return a.radius < b.radius; });
 
-    // --- Step 3: factor out global phase ---
-    // Find sample with maximum magnitude and use its phase as reference.
-    double max_mag = 0.0;
-    std::complex<double> ref_phasor(1.0, 0.0);
-    for (const auto& s : samples) {
-        double m = std::abs(s.displacement);
-        if (m > max_mag) {
-            max_mag = m;
-            ref_phasor = s.displacement / m;  // unit phasor
+    // --- Step 2: find reference displacement vector (max amplitude node) ---
+    double max_mag2 = 0.0;
+    size_t ref_idx = 0;
+    for (size_t i = 0; i < samples.size(); i++) {
+        double m2 = std::norm(samples[i].dx)
+                   + std::norm(samples[i].dy)
+                   + std::norm(samples[i].dz);
+        if (m2 > max_mag2) {
+            max_mag2 = m2;
+            ref_idx = i;
         }
     }
-    if (max_mag < 1e-15) return 0;
+    if (max_mag2 < 1e-30) return 0;
+    double ref_mag = std::sqrt(max_mag2);
+    const auto& ref = samples[ref_idx];
 
-    // Project onto reference phase direction → real-valued signed profile
-    std::complex<double> conj_ref = std::conj(ref_phasor);
+    // --- Step 3: project each sample onto reference direction+phase ---
+    // p_i = Re(d_i · conj(d_ref)) / |d_ref|
+    // This gives a signed scalar: positive when displacement aligns with
+    // the reference, negative when it opposes.  Handles mixed-direction
+    // modes (staggered blades) and complex phase automatically.
 
     // --- Step 4: bin radial profile to suppress mesh noise ---
-    // Raw per-node data has high-frequency FE oscillations that create
-    // spurious zero crossings.  Average into radial bins first.
     double r_min = samples.front().radius;
     double r_max = samples.back().radius;
     double r_span = r_max - r_min;
     if (r_span < 1e-12) return 0;
 
-    // Use enough bins to resolve up to ~15 nodal circles but few enough
-    // to filter mesh noise.  Clamp to [10, 60].
     int n_bins = std::max(10, std::min(60,
         static_cast<int>(samples.size() / 5)));
     std::vector<double> bin_sum(n_bins, 0.0);
     std::vector<int> bin_count(n_bins, 0);
 
     for (size_t i = 0; i < samples.size(); i++) {
+        // 3D complex dot product with conjugate of reference
+        double proj = (samples[i].dx * std::conj(ref.dx)
+                     + samples[i].dy * std::conj(ref.dy)
+                     + samples[i].dz * std::conj(ref.dz)).real() / ref_mag;
         double frac = (samples[i].radius - r_min) / r_span;
         int b = static_cast<int>(frac * n_bins);
         if (b >= n_bins) b = n_bins - 1;
-        bin_sum[b] += (samples[i].displacement * conj_ref).real() / max_mag;
+        bin_sum[b] += proj;
         bin_count[b]++;
     }
 
@@ -131,6 +104,12 @@ int identify_nodal_circles(
     }
 
     if (profile.size() < 3) return 0;
+
+    // Normalize
+    double max_val = 0.0;
+    for (double v : profile) max_val = std::max(max_val, std::abs(v));
+    if (max_val < 1e-15) return 0;
+    for (double& v : profile) v /= max_val;
 
     // --- Step 5: count zero crossings on smoothed profile ---
     // Track the last bin with significant amplitude and detect sign
