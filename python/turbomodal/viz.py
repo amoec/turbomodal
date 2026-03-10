@@ -1990,6 +1990,7 @@ def _removed_func(
     nd: "int | list[int] | None" = None,
     nc: "int | list[int] | None" = None,
     whirl: "int | list[int] | None" = None,
+    modes: "int | list[int] | None" = None,
     config=None,
     noise_config=None,
     sensors: "list[int] | None" = None,
@@ -2001,8 +2002,8 @@ def _removed_func(
     Generates synthetic signals via
     :func:`~turbomodal (internal)` for a
     subset of modes filtered by nodal diameter (*nd*), nodal circles
-    (*nc*), and/or whirl direction (*whirl*), then renders stacked
-    waveform subplots — one per sensor.
+    (*nc*), whirl direction (*whirl*), and/or mode index (*modes*),
+    then renders stacked waveform subplots — one per sensor.
 
     Parameters
     ----------
@@ -2016,6 +2017,10 @@ def _removed_func(
         Requires *mesh* for mode identification.
     whirl : Whirl direction(s) to include: ``+1`` (FW), ``-1`` (BW),
         ``0`` (degenerate).  ``None`` = all.
+    modes : Mode index/indices within each ND to include (0-based,
+        ordered by frequency).  ``modes=0`` selects only the lowest-
+        frequency mode per ND.  ``None`` = all.  Applied after *whirl*
+        and *nc* filtering.
     config : :class:`~turbomodal (internal)`.
         Uses sensible defaults if ``None``.
     noise_config : Optional :class:`~turbomodal (internal)`.
@@ -2040,7 +2045,7 @@ def _removed_func(
 
     # --- Filter modes ---
     filtered = filter_modal_results(
-        modal_results, mesh=mesh, nd=nd, nc=nc, whirl=whirl,
+        modal_results, mesh=mesh, nd=nd, nc=nc, whirl=whirl, modes=modes,
     )
 
     # --- Build title describing the selection ---
@@ -2051,6 +2056,10 @@ def _removed_func(
     if nc is not None:
         nc_list = [nc] if isinstance(nc, int) else list(nc)
         title_parts.append("NC=" + ",".join(str(n) for n in nc_list))
+    if modes is not None:
+        m_list = [modes] if isinstance(modes, int) else list(modes)
+        title_parts.append("mode" + ("s" if len(m_list) > 1 else "") +
+                           "=" + ",".join(str(m) for m in m_list))
     if whirl is not None:
         _wmap = {1: "FW", -1: "BW", 0: "degen"}
         wl = [whirl] if isinstance(whirl, int) else list(whirl)
