@@ -67,6 +67,7 @@ from turbomodal.signal_gen import (
     generate_signals_for_condition,
     generate_dataset_signals,
     filter_modal_results,
+    find_resonance_crossings,
 )
 
 # Subsystem A extensions: dataset & parametric sweep

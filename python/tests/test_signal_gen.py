@@ -1014,7 +1014,7 @@ def test_excitation_model_defaults():
     """ExcitationModel should have sensible defaults."""
     model = ExcitationModel()
     assert model.stator_vane_counts == [24]
-    assert model.max_eo_harmonic == 3
+    assert model.max_eo_harmonic is None  # auto-computed from frequency range
     assert model.nc_rolloff_alpha == 1.5
     assert model.structural_damping_ratio == 0.003
     assert model.aero_damping_mean == 0.002

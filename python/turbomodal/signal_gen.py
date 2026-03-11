@@ -37,6 +37,9 @@ class ExcitationModel:
         orders are ``EO = h * V`` for each vane count *V* and harmonic
         *h* = 1 .. *max_eo_harmonic*.
     max_eo_harmonic : Number of harmonics per primary EO to include.
+        ``None`` auto-computes from the modal frequency range: enough
+        harmonics so that ``h * V * RPM / 60`` covers the highest modal
+        frequency in the results.
     leo_orders : Low engine orders from inlet distortion / geometric
         imperfections.  Excited at amplitudes *leo_amplitude_db* below
         the primary EO.
@@ -75,7 +78,7 @@ class ExcitationModel:
     """
 
     stator_vane_counts: list[int] = field(default_factory=lambda: [24])
-    max_eo_harmonic: int = 3
+    max_eo_harmonic: int | None = None
     leo_orders: list[int] = field(default_factory=lambda: [1, 2, 3])
     leo_amplitude_db: float = -20.0
 
@@ -204,6 +207,303 @@ def frf_detuning_factor(f_mode: float, f_eo: float, zeta: float) -> float:
     return H / H_peak if H_peak > 0 else H
 
 
+def _resolve_max_eo_harmonic(
+    model: ExcitationModel,
+    modal_results: list,
+    f_rev: float,
+) -> int:
+    """Resolve *max_eo_harmonic*: ``None`` → auto from modal frequency range."""
+    if model.max_eo_harmonic is not None:
+        return model.max_eo_harmonic
+    f_max = 0.0
+    for mr in modal_results:
+        freqs = np.asarray(mr.frequencies)
+        if len(freqs) > 0:
+            f_max = max(f_max, float(freqs.max()))
+    min_V = min(model.stator_vane_counts) if model.stator_vane_counts else 1
+    if f_rev > 0 and min_V > 0:
+        return max(1, int(math.ceil(f_max / (min_V * f_rev))))
+    return 20  # fallback
+
+
+def _build_eo_list(
+    model: ExcitationModel,
+    max_eo_h: int,
+) -> list[tuple[int, int, bool]]:
+    """Build list of ``(EO, harmonic_number, is_leo)`` tuples."""
+    eo_list: list[tuple[int, int, bool]] = []
+    for V in model.stator_vane_counts:
+        for h in range(1, max_eo_h + 1):
+            eo_list.append((h * V, h, False))
+    for leo in model.leo_orders:
+        eo_list.append((leo, 1, True))
+    return eo_list
+
+
+def _seg_intersect(p1, p2, p3, p4):
+    """Return the intersection point of segments *p1*-*p2* and *p3*-*p4*, or ``None``."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-12:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+    return None
+
+
+def find_resonance_crossings(
+    modal_results: list,
+    rpm: float,
+    num_sectors: int,
+    stator_vane_counts: list[int] | None = None,
+    max_eo_harmonic: int | None = None,
+    max_freq: float | None = None,
+    mode_ids: list | None = None,
+    mesh=None,
+) -> list[dict]:
+    """Find resonance crossings using geometric zig-zag intersection.
+
+    Builds piecewise-linear family curves in the folded nodal-diameter
+    vs frequency plane (the ZZENF representation) and finds intersections
+    with the engine-order zig-zag line.  Only crossings that satisfy the
+    spatial aliasing rule ``EO mod N == k`` (or ``N - k``) are returned.
+
+    This is the single source of truth for resonance detection, used by
+    both the ZZENF/Campbell visualizations and the physics-based signal
+    generation model.
+
+    Parameters
+    ----------
+    modal_results : list of ModalResult at a single RPM.
+    rpm : rotational speed in RPM.
+    num_sectors : number of sectors in the full annulus (N).
+    stator_vane_counts : vane counts to restrict crossings to NPF engine
+        orders (``h * V``).  ``None`` means report crossings at all EOs
+        along the zig-zag.
+    max_eo_harmonic : number of harmonics per vane count.  ``None``
+        auto-computes from the modal frequency range.  Ignored when
+        *stator_vane_counts* is ``None``.
+    max_freq : upper frequency limit.  ``None`` = use highest modal
+        frequency.
+    mode_ids : optional pre-computed mode identifications (one list per
+        ModalResult) for family curve grouping.  Falls back to
+        ``mode_index // 2`` pairing at degenerate NDs.
+    mesh : optional Mesh for automatic mode identification.
+
+    Returns
+    -------
+    list of dict
+        Each dict has keys:
+
+        - ``nd`` : folded nodal diameter of the crossing (float,
+          interpolated along the family curve)
+        - ``frequency`` : crossing frequency in Hz (float)
+        - ``eo`` : engine order at the crossing (int)
+        - ``harmonic_index`` : harmonic index *k* of the nearest discrete
+          mode (int)
+        - ``mode_index`` : index of the nearest mode within that *k* (int)
+        - ``whirl_direction`` : +1 (FW), -1 (BW), 0 (standing)
+        - ``is_npf`` : True if the crossing lies on an NPF harmonic
+    """
+    if rpm == 0 or num_sectors <= 0:
+        return []
+
+    N = num_sectors
+    half_N = N // 2
+    f_rev = abs(rpm) / 60.0
+
+    # -- Compute mode_ids if mesh is available --
+    if mode_ids is None and mesh is not None:
+        try:
+            from turbomodal._core import identify_modes as _id_modes
+            mode_ids = [_id_modes(r, mesh) for r in modal_results]
+        except Exception:
+            pass
+
+    # -- Build family curves: families[key] -> [(nd_folded, freq, whirl, k, m_idx)] --
+    from collections import defaultdict
+    families: dict = defaultdict(list)
+    has_coriolis = any(
+        np.any(np.asarray(r.whirl_direction) != 0) for r in modal_results
+    )
+
+    for r_idx, result in enumerate(modal_results):
+        nd = result.harmonic_index
+        nd_folded = nd if nd <= half_N else N - nd
+        is_nondegen = (nd == 0) or (N % 2 == 0 and nd == half_N)
+        whirl_arr = np.asarray(result.whirl_direction)
+        n_modes = len(result.frequencies)
+
+        if mode_ids is not None:
+            ids = mode_ids[r_idx]
+            for i in range(min(n_modes, len(ids))):
+                freq = float(result.frequencies[i])
+                w = int(whirl_arr[i]) if i < len(whirl_arr) else 0
+                families[ids[i].family_label].append(
+                    (nd_folded, freq, w, nd, i))
+        else:
+            for i in range(n_modes):
+                freq = float(result.frequencies[i])
+                w = int(whirl_arr[i]) if i < len(whirl_arr) else 0
+                fkey = i // 2 if not is_nondegen else i
+                families[fkey].append((nd_folded, freq, w, nd, i))
+
+    # -- Build piecewise-linear family curves --
+    def _unique_nd(pts):
+        seen: set[int] = set()
+        out = []
+        for item in pts:
+            nd_val = item[0]
+            if nd_val not in seen:
+                seen.add(nd_val)
+                out.append(item)
+        return out
+
+    fam_curves: list[list[tuple[float, float]]] = []
+    # Also store the discrete mode data per curve for mapping crossings
+    # back to (harmonic_index, mode_index)
+    fam_curve_points: list[list[tuple[int, int, int]]] = []  # (k, m_idx, whirl)
+
+    for fkey in families:
+        data = families[fkey]
+        if has_coriolis:
+            fw_pts = [(nd, f, w, k, mi) for nd, f, w, k, mi in data if w == 1]
+            bw_pts = [(nd, f, w, k, mi) for nd, f, w, k, mi in data if w == -1]
+            st_pts = [(nd, f, w, k, mi) for nd, f, w, k, mi in data if w == 0]
+            for branch_pts in (
+                sorted(st_pts + fw_pts, key=lambda x: x[0]),
+                sorted(st_pts + bw_pts, key=lambda x: x[0]),
+            ):
+                seen_nd: set[int] = set()
+                line_xy: list[tuple[float, float]] = []
+                line_info: list[tuple[int, int, int]] = []
+                for nd_f, freq, w, k, mi in branch_pts:
+                    if nd_f not in seen_nd:
+                        seen_nd.add(nd_f)
+                        line_xy.append((float(nd_f), freq))
+                        line_info.append((k, mi, w))
+                if len(line_xy) > 1:
+                    fam_curves.append(line_xy)
+                    fam_curve_points.append(line_info)
+        else:
+            seen_nd: set[int] = set()
+            line_xy: list[tuple[float, float]] = []
+            line_info: list[tuple[int, int, int]] = []
+            for nd_f, freq, w, k, mi in sorted(data, key=lambda x: x[0]):
+                if nd_f not in seen_nd:
+                    seen_nd.add(nd_f)
+                    line_xy.append((float(nd_f), freq))
+                    line_info.append((k, mi, w))
+            if len(line_xy) > 1:
+                fam_curves.append(line_xy)
+                fam_curve_points.append(line_info)
+
+    # -- Determine frequency ceiling --
+    if max_freq is None:
+        max_freq = 0.0
+        for mr in modal_results:
+            freqs = np.asarray(mr.frequencies)
+            if len(freqs) > 0:
+                max_freq = max(max_freq, float(freqs.max()))
+        max_freq *= 1.1  # small margin
+
+    # -- Build zig-zag --
+    max_eo = int(max_freq / f_rev) + 1 if f_rev > 0 else 0
+    zz: list[tuple[float, float]] = []
+    zz_eo: list[int] = []
+    for e in range(max_eo + 1):
+        nd_raw = e % N
+        nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
+        zz.append((float(nd_fold), e * f_rev))
+        zz_eo.append(e)
+
+    # -- Determine which EOs are valid (NPF filter) --
+    valid_eos: set[int] | None = None
+    if stator_vane_counts is not None:
+        # Resolve max_eo_harmonic
+        if max_eo_harmonic is None:
+            min_V = min(stator_vane_counts) if stator_vane_counts else 1
+            if f_rev > 0 and min_V > 0:
+                max_eo_h = max(1, int(math.ceil(max_freq / (min_V * f_rev))))
+            else:
+                max_eo_h = 20
+        else:
+            max_eo_h = max_eo_harmonic
+        valid_eos = set()
+        for V in stator_vane_counts:
+            for h in range(1, max_eo_h + 1):
+                valid_eos.add(h * V)
+
+    # -- Find zig-zag × family curve intersections --
+    crossings: list[dict] = []
+
+    for curve_idx, curve in enumerate(fam_curves):
+        info = fam_curve_points[curve_idx]
+        for ci in range(len(curve) - 1):
+            p1, p2 = curve[ci], curve[ci + 1]
+            for zi in range(len(zz) - 1):
+                p3, p4 = zz[zi], zz[zi + 1]
+                hit = _seg_intersect(p1, p2, p3, p4)
+                if hit is None:
+                    continue
+                nd_cross, f_cross = hit
+                if f_cross > max_freq:
+                    continue
+
+                # Interpolate EO at the crossing
+                # The zig-zag goes from zz_eo[zi] to zz_eo[zi+1]
+                eo_cross = zz_eo[zi]
+                if abs(zz[zi + 1][1] - zz[zi][1]) > 1e-12:
+                    frac = (f_cross - zz[zi][1]) / (zz[zi + 1][1] - zz[zi][1])
+                    eo_cross = zz_eo[zi] + frac * (zz_eo[zi + 1] - zz_eo[zi])
+                eo_int = round(eo_cross)
+
+                # Check aliasing rule
+                nd_raw_cross = eo_int % N
+                nd_fold_check = nd_raw_cross if nd_raw_cross <= half_N else N - nd_raw_cross
+                # The crossing ND should be close to nd_fold_check
+                if abs(nd_cross - nd_fold_check) > 0.5:
+                    continue
+
+                # NPF filter: only keep crossings at valid engine orders
+                is_npf = False
+                if valid_eos is not None:
+                    if eo_int not in valid_eos:
+                        continue
+                    is_npf = True
+
+                # Map crossing back to nearest discrete mode
+                # Use the family curve segment endpoints
+                k1, mi1, w1 = info[ci]
+                k2, mi2, w2 = info[ci + 1]
+                # Pick the closer endpoint by ND distance
+                d1 = abs(nd_cross - curve[ci][0])
+                d2 = abs(nd_cross - curve[ci + 1][0])
+                if d1 <= d2:
+                    k_nearest, mi_nearest, w_nearest = k1, mi1, w1
+                else:
+                    k_nearest, mi_nearest, w_nearest = k2, mi2, w2
+
+                whirl = eo_whirl_direction(eo_int, k_nearest, N)
+
+                crossings.append({
+                    "nd": nd_cross,
+                    "frequency": f_cross,
+                    "eo": eo_int,
+                    "harmonic_index": k_nearest,
+                    "mode_index": mi_nearest,
+                    "whirl_direction": whirl if whirl != 0 else w_nearest,
+                    "is_npf": is_npf,
+                })
+
+    return crossings
+
+
 def find_campbell_crossings(
     modal_results: list,
     rpm: float,
@@ -213,9 +513,9 @@ def find_campbell_crossings(
 ) -> list[dict]:
     """Find active Campbell crossings at the given RPM.
 
-    For each engine order (from stator vane counts x harmonics + LEO
-    orders), computes ``f_eo = EO * RPM / 60`` and checks which modal
-    frequencies are within *campbell_crossing_tolerance* of ``f_eo``.
+    Delegates to :func:`find_resonance_crossings` for geometric zig-zag
+    intersection, then enriches the results with EO harmonic number,
+    nodal circle, detuning ratio, and LEO classification.
 
     Returns a list of dicts with keys: ``eo``, ``eo_harmonic``,
     ``harmonic_index``, ``mode_index``, ``frequency``, ``nodal_circle``,
@@ -224,16 +524,35 @@ def find_campbell_crossings(
     if rpm == 0:
         return []
 
-    f_rev = abs(rpm) / 60.0  # rev/s
-    tol = model.campbell_crossing_tolerance
+    f_rev = abs(rpm) / 60.0
+    max_eo_h = _resolve_max_eo_harmonic(model, modal_results, f_rev)
 
-    # Build list of (EO, harmonic_number, is_leo)
-    eo_list: list[tuple[int, int, bool]] = []
+    # Use geometric crossing detection
+    geo_crossings = find_resonance_crossings(
+        modal_results, rpm, num_sectors,
+        stator_vane_counts=model.stator_vane_counts,
+        max_eo_harmonic=max_eo_h,
+        mesh=mesh,
+    )
+
+    # Also find LEO crossings (low engine orders not tied to stator vanes)
+    # These use the same zig-zag but with different EO filtering
+    leo_eos = set(model.leo_orders)
+
+    leo_crossings = []
+    if leo_eos:
+        all_crossings = find_resonance_crossings(
+            modal_results, rpm, num_sectors,
+            stator_vane_counts=None,  # all EOs
+            mesh=mesh,
+        )
+        leo_crossings = [c for c in all_crossings if c["eo"] in leo_eos]
+
+    # Build NPF EO set for classifying
+    npf_eos: dict[int, int] = {}  # eo -> harmonic number h
     for V in model.stator_vane_counts:
-        for h in range(1, model.max_eo_harmonic + 1):
-            eo_list.append((h * V, h, False))
-    for leo in model.leo_orders:
-        eo_list.append((leo, 1, True))
+        for h in range(1, max_eo_h + 1):
+            npf_eos[h * V] = h
 
     # Optionally identify nodal circles
     nc_map: dict[tuple[int, int], int] = {}
@@ -247,49 +566,59 @@ def find_campbell_crossings(
         except Exception:
             pass
 
-    crossings: list[dict] = []
-    seen: set[tuple[int, int]] = set()  # avoid duplicate (k, mode_index)
+    # Merge and enrich
+    seen: set[tuple[int, int]] = set()
+    result: list[dict] = []
 
-    for eo, h, is_leo in eo_list:
-        f_eo = eo * f_rev
-        if f_eo <= 0:
+    for cx in geo_crossings:
+        key = (cx["harmonic_index"], cx["mode_index"])
+        if key in seen:
             continue
+        seen.add(key)
 
-        for mr in modal_results:
-            k = mr.harmonic_index
-            if not eo_excites_harmonic(eo, k, num_sectors):
-                continue
+        eo = cx["eo"]
+        h = npf_eos.get(eo, 1)
+        # Compute detuning from nearest mode
+        f_eo = eo * f_rev
+        f_mode = cx["frequency"]
+        detuning = abs(f_mode - f_eo) / f_mode if f_mode > 0 else 0.0
 
-            freqs = np.asarray(mr.frequencies)
-            for m_idx in range(len(freqs)):
-                f_mode = freqs[m_idx]
-                if f_mode <= 0:
-                    continue
-                detuning = abs(f_mode - f_eo) / f_mode
-                if detuning > tol:
-                    continue
+        result.append({
+            "eo": eo,
+            "eo_harmonic": h,
+            "harmonic_index": cx["harmonic_index"],
+            "mode_index": cx["mode_index"],
+            "frequency": f_mode,
+            "nodal_circle": nc_map.get(key, 0),
+            "whirl_direction": cx["whirl_direction"],
+            "detuning_ratio": detuning,
+            "is_leo": False,
+        })
 
-                key = (k, m_idx)
-                if key in seen:
-                    continue
-                seen.add(key)
+    for cx in leo_crossings:
+        key = (cx["harmonic_index"], cx["mode_index"])
+        if key in seen:
+            continue
+        seen.add(key)
 
-                nc = nc_map.get(key, 0)
-                whirl = eo_whirl_direction(eo, k, num_sectors)
+        eo = cx["eo"]
+        f_eo = eo * f_rev
+        f_mode = cx["frequency"]
+        detuning = abs(f_mode - f_eo) / f_mode if f_mode > 0 else 0.0
 
-                crossings.append({
-                    "eo": eo,
-                    "eo_harmonic": h,
-                    "harmonic_index": k,
-                    "mode_index": m_idx,
-                    "frequency": float(f_mode),
-                    "nodal_circle": nc,
-                    "whirl_direction": whirl,
-                    "detuning_ratio": detuning,
-                    "is_leo": is_leo,
-                })
+        result.append({
+            "eo": eo,
+            "eo_harmonic": 1,
+            "harmonic_index": cx["harmonic_index"],
+            "mode_index": cx["mode_index"],
+            "frequency": f_mode,
+            "nodal_circle": nc_map.get(key, 0),
+            "whirl_direction": cx["whirl_direction"],
+            "detuning_ratio": detuning,
+            "is_leo": True,
+        })
 
-    return crossings
+    return result
 
 
 def compute_physics_amplitudes(
@@ -1016,6 +1345,36 @@ def generate_signals_for_condition(
             modal_results, rpm, N, config.excitation_model,
             mesh=mesh, rng=rng,
         )
+        if not active_modes:
+            import warnings
+            em = config.excitation_model
+            f_rev = abs(rpm) / 60.0
+            max_eo_h = _resolve_max_eo_harmonic(em, modal_results, f_rev)
+            eo_list = [h * V for V in em.stator_vane_counts
+                       for h in range(1, max_eo_h + 1)]
+            eo_freqs = [eo * f_rev for eo in eo_list]
+            modal_freq_ranges = []
+            for mr in modal_results:
+                fs = np.asarray(mr.frequencies)
+                if len(fs) > 0:
+                    modal_freq_ranges.append(
+                        f"k={mr.harmonic_index}: {fs.min():.1f}-{fs.max():.1f} Hz"
+                    )
+            warnings.warn(
+                f"amplitude_mode='physics' produced no active modes at "
+                f"{rpm:.0f} RPM. No geometric zig-zag crossings found.\n"
+                f"  EOs from stator vanes (max_eo_harmonic={max_eo_h}): "
+                f"{eo_list}\n"
+                f"  EO excitation frequencies: "
+                f"{[f'{f:.1f} Hz' for f in eo_freqs]}\n"
+                f"  LEO orders: {em.leo_orders}\n"
+                f"  Modal frequency ranges: {modal_freq_ranges}\n"
+                f"  num_sectors (N): {N}\n"
+                f"Hint: ensure the RPM corresponds to a resonance crossing "
+                f"where the EO zig-zag intersects a modal family curve in "
+                f"the ZZENF diagram.",
+                stacklevel=2,
+            )
         # Build a lookup from harmonic_index → ModalResult
         mr_by_k: dict[int, object] = {mr.harmonic_index: mr for mr in modal_results}
 
