@@ -64,6 +64,7 @@ from turbomodal.viz import (
     _removed,
     _removed,
     filter_modal_results,
+    find_resonance_crossings,
 )
 
 # Subsystem A extensions: dataset & parametric sweep

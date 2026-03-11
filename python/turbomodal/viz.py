@@ -1294,7 +1294,8 @@ def plot_campbell(
     if crossing_markers and stator_vanes is not None and stator_vanes > 0:
         V = stator_vanes
         y_top = max_freq if max_freq else ax.get_ylim()[1]
-        for n in range(1, 20):
+        _max_npf_n = int(y_top / (V * rpms[0] / 60.0)) + 2 if rpms[0] > 0 else 200
+        for n in range(1, _max_npf_n + 1):
             if n * V * rpms[0] / 60.0 > y_top and n * V * rpms[-1] / 60.0 > y_top:
                 break
             _plot_crossings(n * V, style.stator_color)
@@ -1325,7 +1326,9 @@ def plot_campbell(
     if stator_vanes is not None and stator_vanes > 0:
         V = stator_vanes
         y_top = max_freq if max_freq else ax.get_ylim()[1]
-        for n in range(1, 20):
+        # Upper bound: highest harmonic that could appear in the plot
+        _max_npf_n = int(y_top / (V * rpms[0] / 60.0)) + 2 if rpms[0] > 0 else 200
+        for n in range(1, _max_npf_n + 1):
             npf_freqs = n * V * rpms / 60.0
             if np.min(npf_freqs) > y_top:
                 break
@@ -1404,21 +1407,6 @@ def _unique_nd(pts: list[tuple]) -> list[tuple]:
             out.append(item)
     return out
 
-
-def _seg_intersect(p1, p2, p3, p4):
-    """Return the intersection point of segments *p1*-*p2* and *p3*-*p4*, or ``None``."""
-    x1, y1 = p1
-    x2, y2 = p2
-    x3, y3 = p3
-    x4, y4 = p4
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-12:
-        return None
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
-    if 0 <= t <= 1 and 0 <= u <= 1:
-        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-    return None
 
 
 def plot_zzenf(
@@ -1738,7 +1726,8 @@ def plot_zzenf(
     if stator_vanes is not None and stator_vanes > 0 and rpm > 0:
         V = stator_vanes
         y_top = ax.get_ylim()[1]
-        for n in range(1, 20):
+        _max_npf_n = int(y_top / (V * rpm / 60.0)) + 2
+        for n in range(1, _max_npf_n + 1):
             npf_freq = n * V * rpm / 60.0
             if npf_freq > y_top:
                 break
@@ -1776,76 +1765,33 @@ def plot_zzenf(
         _draw_eo or (stator_vanes is not None and stator_vanes > 0)
     )
     if _need_crossings:
-        # Build piecewise-linear family curves (same logic as drawing)
-        fam_curves: list[list[tuple[float, float]]] = []
-        for fkey in family_keys:
-            data = families[fkey]
-            if has_coriolis:
-                fw_pts = [(nd, f) for nd, f, w in data if w == 1]
-                bw_pts = [(nd, f) for nd, f, w in data if w == -1]
-                st_pts = [(nd, f) for nd, f, w in data if w == 0]
-                if degenerate_only:
-                    fw_line = _unique_nd(sorted(
-                        [(nd, f) for nd, f in fw_pts if _is_degen(nd)]))
-                    bw_line = _unique_nd(sorted(
-                        [(nd, f) for nd, f in bw_pts if _is_degen(nd)]))
-                else:
-                    fw_line = _unique_nd(sorted(st_pts + fw_pts))
-                    bw_line = _unique_nd(sorted(st_pts + bw_pts))
-                for line in (fw_line, bw_line):
-                    if len(line) > 1:
-                        fam_curves.append([(float(n), f) for n, f in line])
-            else:
-                all_pts = _unique_nd(sorted(set((nd, f) for nd, f, _ in data)))
-                if degenerate_only:
-                    pts = [(nd, f) for nd, f in all_pts if _is_degen(nd)]
-                else:
-                    pts = all_pts
-                if len(pts) > 1:
-                    fam_curves.append([(float(n), f) for n, f in pts])
+        
+        y_top = ax.get_ylim()[1]
 
-        crossings: list[tuple[float, float]] = []
-        npf_crossings: list[tuple[float, float]] = []
-
-        # EO zig-zag crossings
+        # EO zig-zag crossings (all engine orders)
+        eo_crossing_pts: list[tuple[float, float]] = []
         if _draw_eo:
-            f1 = rpm / 60.0
-            y_top = ax.get_ylim()[1]
-            max_eo = int(y_top / f1) + 1
-            zz: list[tuple[float, float]] = []
-            for e in range(max_eo + 1):
-                nd_raw = e % N
-                nd_fold = nd_raw if nd_raw <= half_N else N - nd_raw
-                zz.append((float(nd_fold), e * f1))
-            for curve in fam_curves:
-                for ci in range(len(curve) - 1):
-                    p1, p2 = curve[ci], curve[ci + 1]
-                    for zi in range(len(zz) - 1):
-                        p3, p4 = zz[zi], zz[zi + 1]
-                        hit = _seg_intersect(p1, p2, p3, p4)
-                        if hit is not None:
-                            crossings.append(hit)
+            eo_cx = find_resonance_crossings(
+                results_at_rpm, rpm, N,
+                stator_vane_counts=None,  # all EOs
+                max_freq=y_top,
+                mode_ids=mode_ids, mesh=mesh,
+            )
+            eo_crossing_pts = [(c["nd"], c["frequency"]) for c in eo_cx]
 
-        # NPF horizontal line crossings
+        # NPF crossings (aliasing-rule enforced via stator vane EOs)
+        npf_crossing_pts: list[tuple[float, float]] = []
         if stator_vanes is not None and stator_vanes > 0:
-            V = stator_vanes
-            y_top = ax.get_ylim()[1]
-            for nh in range(1, 20):
-                npf_freq = nh * V * rpm / 60.0
-                if npf_freq > y_top:
-                    break
-                # Horizontal line at y=npf_freq from x=0 to x=half_N
-                p3 = (0.0, npf_freq)
-                p4 = (float(half_N), npf_freq)
-                for curve in fam_curves:
-                    for ci in range(len(curve) - 1):
-                        p1, p2 = curve[ci], curve[ci + 1]
-                        hit = _seg_intersect(p1, p2, p3, p4)
-                        if hit is not None:
-                            npf_crossings.append(hit)
+            npf_cx = find_resonance_crossings(
+                results_at_rpm, rpm, N,
+                stator_vane_counts=[stator_vanes],
+                max_freq=y_top,
+                mode_ids=mode_ids, mesh=mesh,
+            )
+            npf_crossing_pts = [(c["nd"], c["frequency"]) for c in npf_cx]
 
-        if crossings:
-            cx, cy = zip(*crossings)
+        if eo_crossing_pts:
+            cx, cy = zip(*eo_crossing_pts)
             ax.plot(
                 cx, cy, style.crossing_marker,
                 color=style.crossing_color,
@@ -1853,8 +1799,8 @@ def plot_zzenf(
                 markeredgewidth=style.crossing_markeredgewidth,
                 zorder=5,
             )
-        if npf_crossings:
-            nx, ny = zip(*npf_crossings)
+        if npf_crossing_pts:
+            nx, ny = zip(*npf_crossing_pts)
             ax.plot(
                 nx, ny, style.crossing_marker,
                 color=style.stator_color,
@@ -2117,19 +2063,53 @@ def _removed_func(
         dt = t[1] - t[0]
         n_samples = len(t)
         freqs = np.fft.rfftfreq(n_samples, d=dt)
+        f_nyq = freqs[-1]
 
-        # Collect expected frequencies from filtered results
-        expected_freqs: list[float] = []
+        # Collect expected modal frequencies from filtered results
+        modal_freqs: list[float] = []
         for r in filtered:
-            expected_freqs.extend(r.frequencies.tolist())
+            modal_freqs.extend(r.frequencies.tolist())
+        modal_freqs = sorted(set(modal_freqs))
+
+        # Synchronous frequency and harmonics
+        f_sync = rpm / 60.0
+        max_sync_harmonic = max(1, int(f_nyq / f_sync)) if f_sync > 0 else 0
+
+        # Modal frequency harmonics (up to Nyquist)
+        max_modal_harmonic = 4
 
         for ax_idx, s_idx in enumerate(plot_indices):
             ax = axes[ax_idx]
             sig = signals[s_idx]
             spectrum = np.abs(np.fft.rfft(sig)) * (2.0 / n_samples)
             ax.plot(freqs, spectrum, linewidth=0.6, color="C0")
-            for ef in expected_freqs:
-                ax.axvline(ef, color="C3", linestyle="--", linewidth=0.8, alpha=0.7)
+
+            # Synchronous frequency harmonics (light gray)
+            for h in range(1, max_sync_harmonic + 1):
+                f_h = h * f_sync
+                if f_h > f_nyq:
+                    break
+                ax.axvline(f_h, color="0.6", linestyle=":", linewidth=0.5,
+                           alpha=0.5)
+                # Only label every Nth harmonic to avoid clutter
+                _label_every = max(1, max_sync_harmonic // 30)
+                if ax_idx == 0 and h % _label_every == 0:
+                    ax.text(f_h, ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0,
+                            f" {h}x", fontsize=6, color="0.4", va="top",
+                            rotation=90)
+
+            # Expected modal frequencies (red dashed)
+            for ef in modal_freqs:
+                ax.axvline(ef, color="C3", linestyle="--", linewidth=0.9,
+                           alpha=0.7)
+                # Modal harmonics (fainter red dotted)
+                for mh in range(2, max_modal_harmonic + 1):
+                    ef_h = mh * ef
+                    if ef_h > f_nyq:
+                        break
+                    ax.axvline(ef_h, color="C3", linestyle=":",
+                               linewidth=0.5, alpha=0.35)
+
             label = sensor_list[s_idx].label or f"Sensor {s_idx}"
             stype = sensor_list[s_idx].sensor_type.value.replace("_", " ")
             ax.set_ylabel(f"{label}\n({stype})", fontsize=style.axis_label_fontsize - 1,
@@ -2138,13 +2118,20 @@ def _removed_func(
             ax.grid(True, alpha=style.grid_alpha)
 
         axes[-1].set_xlabel("Frequency (Hz)", fontsize=style.axis_label_fontsize)
-        # Add legend for expected-frequency markers
+        # Legend
         from matplotlib.lines import Line2D
-        axes[0].legend(
-            [Line2D([0], [0], color="C3", linestyle="--", linewidth=0.8)],
-            ["Expected modal freq"],
-            fontsize=8, loc="upper right",
-        )
+        legend_handles = [
+            Line2D([0], [0], color="C3", linestyle="--", linewidth=0.9),
+            Line2D([0], [0], color="C3", linestyle=":", linewidth=0.5, alpha=0.5),
+            Line2D([0], [0], color="0.6", linestyle=":", linewidth=0.5),
+        ]
+        legend_labels = [
+            "Modal freq (fundamental)",
+            "Modal freq (harmonics)",
+            f"Synchronous ({f_sync:.1f} Hz) harmonics",
+        ]
+        axes[0].legend(legend_handles, legend_labels, fontsize=7,
+                        loc="upper right")
         title = title.replace("Sensor Signals:", "Frequency Content:")
     else:
         # Time-domain plot
