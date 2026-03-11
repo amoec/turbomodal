@@ -1994,6 +1994,7 @@ def _removed_func(
     config=None,
     noise_config=None,
     sensors: "list[int] | None" = None,
+    domain: str = "time",
     figsize: tuple[float, float] = (14, 8),
     style: DiagramStyle | None = None,
 ):
@@ -2025,6 +2026,9 @@ def _removed_func(
         Uses sensible defaults if ``None``.
     noise_config : Optional :class:`~turbomodal (internal)`.
     sensors : Indices of sensors to plot.  ``None`` = all.
+    domain : ``"time"`` (default) for waveform plots, ``"frequency"`` for
+        one-sided FFT magnitude plots.  Frequency-domain mode also marks
+        the expected modal frequencies with dashed vertical lines.
     figsize : Matplotlib figure size.
     style : :class:`DiagramStyle` for title/label font sizes.
 
@@ -2101,34 +2105,70 @@ def _removed_func(
                 transform=ax.transAxes)
         return fig
 
-    # --- Time units ---
-    t_max = t[-1] - t[0]
-    if t_max < 0.1:
-        t_plot = (t - t[0]) * 1e3
-        t_label = "Time (ms)"
-    else:
-        t_plot = t - t[0]
-        t_label = "Time (s)"
-
     # --- Plot ---
     fig, axes = plt.subplots(
         n_plots, 1, figsize=figsize, sharex=True, squeeze=False,
     )
     axes = axes.ravel()
-
     sensor_list = sensor_array.config.sensors
-    for ax_idx, s_idx in enumerate(plot_indices):
-        ax = axes[ax_idx]
-        sig = signals[s_idx]
-        ax.plot(t_plot, sig, linewidth=0.6, color="C0")
-        label = sensor_list[s_idx].label or f"Sensor {s_idx}"
-        stype = sensor_list[s_idx].sensor_type.value.replace("_", " ")
-        ax.set_ylabel(f"{label}\n({stype})", fontsize=style.axis_label_fontsize - 1,
-                       rotation=0, ha="right", va="center", labelpad=10)
-        ax.tick_params(axis="y", labelsize=8)
-        ax.grid(True, alpha=style.grid_alpha)
 
-    axes[-1].set_xlabel(t_label, fontsize=style.axis_label_fontsize)
+    if domain == "frequency":
+        # One-sided FFT magnitude
+        dt = t[1] - t[0]
+        n_samples = len(t)
+        freqs = np.fft.rfftfreq(n_samples, d=dt)
+
+        # Collect expected frequencies from filtered results
+        expected_freqs: list[float] = []
+        for r in filtered:
+            expected_freqs.extend(r.frequencies.tolist())
+
+        for ax_idx, s_idx in enumerate(plot_indices):
+            ax = axes[ax_idx]
+            sig = signals[s_idx]
+            spectrum = np.abs(np.fft.rfft(sig)) * (2.0 / n_samples)
+            ax.plot(freqs, spectrum, linewidth=0.6, color="C0")
+            for ef in expected_freqs:
+                ax.axvline(ef, color="C3", linestyle="--", linewidth=0.8, alpha=0.7)
+            label = sensor_list[s_idx].label or f"Sensor {s_idx}"
+            stype = sensor_list[s_idx].sensor_type.value.replace("_", " ")
+            ax.set_ylabel(f"{label}\n({stype})", fontsize=style.axis_label_fontsize - 1,
+                           rotation=0, ha="right", va="center", labelpad=10)
+            ax.tick_params(axis="y", labelsize=8)
+            ax.grid(True, alpha=style.grid_alpha)
+
+        axes[-1].set_xlabel("Frequency (Hz)", fontsize=style.axis_label_fontsize)
+        # Add legend for expected-frequency markers
+        from matplotlib.lines import Line2D
+        axes[0].legend(
+            [Line2D([0], [0], color="C3", linestyle="--", linewidth=0.8)],
+            ["Expected modal freq"],
+            fontsize=8, loc="upper right",
+        )
+        title = title.replace("Sensor Signals:", "Frequency Content:")
+    else:
+        # Time-domain plot
+        t_max = t[-1] - t[0]
+        if t_max < 0.1:
+            t_plot = (t - t[0]) * 1e3
+            t_label = "Time (ms)"
+        else:
+            t_plot = t - t[0]
+            t_label = "Time (s)"
+
+        for ax_idx, s_idx in enumerate(plot_indices):
+            ax = axes[ax_idx]
+            sig = signals[s_idx]
+            ax.plot(t_plot, sig, linewidth=0.6, color="C0")
+            label = sensor_list[s_idx].label or f"Sensor {s_idx}"
+            stype = sensor_list[s_idx].sensor_type.value.replace("_", " ")
+            ax.set_ylabel(f"{label}\n({stype})", fontsize=style.axis_label_fontsize - 1,
+                           rotation=0, ha="right", va="center", labelpad=10)
+            ax.tick_params(axis="y", labelsize=8)
+            ax.grid(True, alpha=style.grid_alpha)
+
+        axes[-1].set_xlabel(t_label, fontsize=style.axis_label_fontsize)
+
     fig.suptitle(title, fontsize=style.title_fontsize)
     fig.tight_layout()
     return fig
