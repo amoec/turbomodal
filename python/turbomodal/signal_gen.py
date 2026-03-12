@@ -247,15 +247,17 @@ def find_resonance_crossings(
     stator_vane_counts: list[int] | None = None,
     max_eo_harmonic: int | None = None,
     max_freq: float | None = None,
+    tolerance: float = 0.05,
     mode_ids: list | None = None,
     mesh=None,
+    eo_whitelist: list[int] | None = None,
 ) -> list[dict]:
     """Find resonance crossings at discrete modal frequencies.
 
     For each engine order, computes the excitation frequency
     ``f_eo = EO * RPM / 60``, determines which harmonic index *k* it
     excites via the aliasing rule (``EO mod N``), and checks whether any
-    mode at that *k* has a frequency close to *f_eo*.
+    mode at that *k* has a frequency within *tolerance* of *f_eo*.
 
     This is the single source of truth for resonance detection, used by
     both the ZZENF/Campbell visualizations and the physics-based signal
@@ -274,8 +276,12 @@ def find_resonance_crossings(
         *stator_vane_counts* is ``None``.
     max_freq : upper frequency limit.  ``None`` = use highest modal
         frequency + 10 %%.
+    tolerance : fractional frequency tolerance for crossing detection:
+        ``|f_mode - f_eo| / f_mode < tolerance``.
     mode_ids : unused (kept for API compatibility).
     mesh : optional Mesh for nodal circle identification.
+    eo_whitelist : if given, only check these specific EO values instead of
+        building the full EO list from stator vane counts or frequency ceiling.
 
     Returns
     -------
@@ -307,7 +313,11 @@ def find_resonance_crossings(
         max_freq *= 1.1
 
     # -- Build EO list --
-    if stator_vane_counts is not None:
+    if eo_whitelist is not None:
+        # Caller provided an explicit list of EOs to check
+        eo_list = sorted(eo_whitelist)
+        is_npf = False
+    elif stator_vane_counts is not None:
         # NPF engine orders only
         if max_eo_harmonic is None:
             min_V = min(stator_vane_counts) if stator_vane_counts else 1
@@ -328,11 +338,6 @@ def find_resonance_crossings(
         max_eo = int(max_freq / f_rev) + 1 if f_rev > 0 else 0
         eo_list = list(range(1, max_eo + 1))
         is_npf = False
-
-    # -- Build harmonic-index lookup --
-    mr_by_k: dict[int, object] = {}
-    for mr in modal_results:
-        mr_by_k[mr.harmonic_index] = mr
 
     # -- Find crossings: for each EO, check aliased harmonic indices --
     crossings: list[dict] = []
@@ -358,9 +363,8 @@ def find_resonance_crossings(
                 if f_mode <= 0:
                     continue
 
-                # Check proximity: mode frequency within tolerance of f_eo
                 detuning = abs(f_mode - f_eo) / f_mode
-                if detuning > 0.05:
+                if detuning > tolerance:
                     continue
 
                 key = (eo, k, m_idx)
@@ -407,26 +411,32 @@ def find_campbell_crossings(
     f_rev = abs(rpm) / 60.0
     max_eo_h = _resolve_max_eo_harmonic(model, modal_results, f_rev)
 
+    tol = model.campbell_crossing_tolerance
+
     # Find NPF crossings (stator-vane engine orders)
     geo_crossings = find_resonance_crossings(
         modal_results, rpm, num_sectors,
         stator_vane_counts=model.stator_vane_counts,
         max_eo_harmonic=max_eo_h,
+        tolerance=tol,
         mesh=mesh,
     )
 
     # Also find LEO crossings (low engine orders not tied to stator vanes)
-    # These use the same zig-zag but with different EO filtering
+    # Only check the specific LEO EOs, not all integer EOs
     leo_eos = set(model.leo_orders)
 
     leo_crossings = []
     if leo_eos:
-        all_crossings = find_resonance_crossings(
+        leo_crossings = find_resonance_crossings(
             modal_results, rpm, num_sectors,
-            stator_vane_counts=None,  # all EOs
+            stator_vane_counts=None,
+            max_eo_harmonic=None,
+            tolerance=tol,
+            mode_ids=None,
             mesh=mesh,
+            eo_whitelist=sorted(leo_eos),
         )
-        leo_crossings = [c for c in all_crossings if c["eo"] in leo_eos]
 
     # Build NPF EO set for classifying
     npf_eos: dict[int, int] = {}  # eo -> harmonic number h
@@ -584,7 +594,15 @@ def compute_physics_amplitudes(
             phase=phase,
         ))
 
-    # 9. Multi-mode sampling
+    # 9a. Amplitude thresholding — drop negligible components
+    # Keep modes whose amplitude is within 60 dB of the strongest
+    if active:
+        max_amp = max(am.amplitude for am in active)
+        if max_amp > 0:
+            threshold = max_amp * 1e-3  # -60 dB
+            active = [am for am in active if am.amplitude >= threshold]
+
+    # 9b. Multi-mode sampling
     if model.multi_mode_sampling and len(active) > 1:
         w = np.array(model.mode_count_weights, dtype=np.float64)
         w /= w.sum()
@@ -1148,6 +1166,11 @@ def generate_signals_for_condition(
             ``(n_samples,)`` float64.
         ``'clean_signals'``
             ``(n_sensors, n_samples)`` float64 (before noise).
+        ``'active_modes'``
+            ``list[ActiveMode]`` — only present when
+            ``amplitude_mode='physics'``.  Contains the modes that
+            were actually excited (after amplitude thresholding and
+            multi-mode sampling).
         ``'condition'``
             OperatingCondition (if provided).
         ``'btt_arrival_times'``
@@ -1473,6 +1496,8 @@ def generate_signals_for_condition(
         "time": t,
         "clean_signals": clean_signals,
     }
+    if config.amplitude_mode == "physics":
+        result_dict["active_modes"] = active_modes
     if condition is not None:
         result_dict["condition"] = condition
     if btt_arrival_times:
