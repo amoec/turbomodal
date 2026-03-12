@@ -282,7 +282,6 @@ sweep_config = _RemovedClass(
 
 dataset_config = _RemovedClass(
     output_path="turbomodal_dataset.h5",
-    num_modes_per_harmonic=10,
     include_mode_shapes=True,
     compression="gzip", compression_level=4,
 )
