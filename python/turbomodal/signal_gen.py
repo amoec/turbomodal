@@ -376,8 +376,10 @@ def find_resonance_crossings(
             bw_pts = [(nd, f, w, k, mi) for nd, f, w, k, mi in data if w == -1]
             st_pts = [(nd, f, w, k, mi) for nd, f, w, k, mi in data if w == 0]
             for branch_pts in (
-                sorted(st_pts + fw_pts, key=lambda x: x[0]),
-                sorted(st_pts + bw_pts, key=lambda x: x[0]),
+                # Sort by (nd, freq) to match ZZENF drawing: lowest freq
+                # at each ND wins when _unique_nd deduplicates.
+                sorted(st_pts + fw_pts, key=lambda x: (x[0], x[1])),
+                sorted(st_pts + bw_pts, key=lambda x: (x[0], x[1])),
             ):
                 seen_nd: set[int] = set()
                 line_xy: list[tuple[float, float]] = []
@@ -394,7 +396,8 @@ def find_resonance_crossings(
             seen_nd: set[int] = set()
             line_xy: list[tuple[float, float]] = []
             line_info: list[tuple[int, int, int]] = []
-            for nd_f, freq, w, k, mi in sorted(data, key=lambda x: x[0]):
+            # Sort by (nd, freq) — keeps lowest-frequency mode per ND
+            for nd_f, freq, w, k, mi in sorted(data, key=lambda x: (x[0], x[1])):
                 if nd_f not in seen_nd:
                     seen_nd.add(nd_f)
                     line_xy.append((float(nd_f), freq))
