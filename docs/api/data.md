@@ -38,7 +38,6 @@ Configuration for HDF5 dataset export.
 @dataclass
 class DatasetConfig:
     output_path: str = "turbomodal_dataset.h5"
-    num_modes_per_harmonic: int = 10
     include_mode_shapes: bool = True
     include_forced_response: bool = False
     compression: str = "gzip"
@@ -50,11 +49,14 @@ class DatasetConfig:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `output_path` | `str` | `"turbomodal_dataset.h5"` | HDF5 output file path |
-| `num_modes_per_harmonic` | `int` | `10` | Number of modes stored per harmonic index |
 | `include_mode_shapes` | `bool` | `True` | Whether to store full complex mode shape arrays |
 | `include_forced_response` | `bool` | `False` | Whether to store forced response data |
 | `compression` | `str` | `"gzip"` | HDF5 compression filter (`"gzip"`, `"lzf"`) |
 | `compression_level` | `int` | `4` | Compression level (1-9 for gzip) |
+
+The number of modes stored per harmonic is determined by the solver (via
+``ParametricSweepConfig.num_modes`` or ``solve(num_modes=…)``).  All
+computed modes are exported — there is no separate truncation setting.
 
 ### HDF5 File Layout
 
@@ -121,7 +123,7 @@ for cond in conditions:
 
 tm.export_modal_results(
     "dataset.h5", mesh, conditions, all_results,
-    config=tm.DatasetConfig(num_modes_per_harmonic=10)
+    config=tm.DatasetConfig()
 )
 ```
 

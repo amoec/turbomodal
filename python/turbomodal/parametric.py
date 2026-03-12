@@ -24,6 +24,7 @@ from turbomodal._core import (
 )
 from turbomodal._utils import progress_bar as _progress_bar
 from turbomodal.dataset import DatasetConfig, OperatingCondition, export_modal_results
+from turbomodal.solver import BoundaryCondition, _build_constraint_groups
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +164,7 @@ def run_parametric_sweep(
     damping: Any | None = None,
     fluid: FluidConfig | None = None,
     verbose: int = 1,
+    boundary_conditions: list[BoundaryCondition] | None = None,
 ) -> str:
     """Execute a parametric sweep over operating conditions.
 
@@ -187,6 +189,9 @@ def run_parametric_sweep(
     damping : optional DampingConfig (reserved for future forced response)
     fluid : optional FluidConfig for fluid-structure coupling
     verbose : 0 = silent, 1 = progress bar, 2 = per-condition detail
+    boundary_conditions : list of ``BoundaryCondition`` objects (e.g. from
+        ``bc_editor``).  When provided, constraint groups are built from these
+        instead of using the default hub constraint.
 
     Returns
     -------
@@ -233,7 +238,11 @@ def run_parametric_sweep(
             cpp_conditions.append(pc)
 
         # Single solver instance, single batched call
-        solver = CyclicSymmetrySolver(mesh, base_material, fluid)
+        if boundary_conditions is not None:
+            constraint_groups = _build_constraint_groups(mesh, boundary_conditions)
+            solver = CyclicSymmetrySolver(mesh, base_material, constraint_groups, fluid)
+        else:
+            solver = CyclicSymmetrySolver(mesh, base_material, fluid)
 
         progress_cb = None
         if verbose >= 1:
@@ -255,6 +264,13 @@ def run_parametric_sweep(
 
     else:
         # Slow path: per-condition Python loop (needed for FMM mistuning)
+        # Build constraint groups once (they don't change per condition)
+        constraint_groups = (
+            _build_constraint_groups(mesh, boundary_conditions)
+            if boundary_conditions is not None
+            else None
+        )
+
         for idx, cond in enumerate(conditions):
             t0 = time.perf_counter()
 
@@ -262,7 +278,10 @@ def run_parametric_sweep(
             mat = base_material.at_temperature(cond.temperature)
 
             # Solve tuned cyclic symmetry problem
-            solver = CyclicSymmetrySolver(mesh, mat, fluid)
+            if constraint_groups is not None:
+                solver = CyclicSymmetrySolver(mesh, mat, constraint_groups, fluid)
+            else:
+                solver = CyclicSymmetrySolver(mesh, mat, fluid)
             results = solver.solve_at_rpm(cond.rpm, config.num_modes)
 
             # Apply FMM mistuning

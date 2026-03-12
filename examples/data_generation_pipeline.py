@@ -138,7 +138,6 @@ sweep_config = ParametricSweepConfig(
 )
 dataset_config = DatasetConfig(
     output_path=h5_path,
-    num_modes_per_harmonic=5,
     include_mode_shapes=False,  # keep file small for this example
     compression="gzip",
     compression_level=4,

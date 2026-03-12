@@ -29,7 +29,6 @@ def test_dataset_config_defaults():
     assert cfg.compression == "gzip"
     assert cfg.include_mode_shapes is True
     assert cfg.output_path == "turbomodal_dataset.h5"
-    assert cfg.num_modes_per_harmonic == 10
     assert cfg.compression_level == 4
 
 

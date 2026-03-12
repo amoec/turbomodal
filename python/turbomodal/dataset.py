@@ -47,7 +47,6 @@ class DatasetConfig:
     Parameters
     ----------
     output_path : file path for the HDF5 output
-    num_modes_per_harmonic : number of modes stored per harmonic index
     include_mode_shapes : whether to store the full complex mode shape arrays
     include_forced_response : whether to store forced response data
     compression : HDF5 compression filter name (e.g. "gzip", "lzf")
@@ -55,7 +54,6 @@ class DatasetConfig:
     """
 
     output_path: str = "turbomodal_dataset.h5"
-    num_modes_per_harmonic: int = 10
     include_mode_shapes: bool = True
     include_forced_response: bool = False
     compression: str = "gzip"
@@ -115,8 +113,6 @@ def export_modal_results(
         if config.compression == "gzip":
             comp_kwargs["compression_opts"] = config.compression_level
 
-    n_modes = config.num_modes_per_harmonic
-
     with h5py.File(str(path), "w") as f:
         # ---- Mesh ----
         mesh_grp = f.create_group("mesh")
@@ -148,6 +144,7 @@ def export_modal_results(
         if config.include_mode_shapes:
             shape_grp = f.create_group("modes/mode_shapes")
         mistuning_grp = None  # created on demand
+        global_max_modes = 0
 
         for cond in conditions:
             cid = cond.condition_id
@@ -159,11 +156,12 @@ def export_modal_results(
 
             n_harmonics = len(results_list)
 
-            # Determine actual number of modes to store per harmonic
-            actual_n_modes = min(
-                n_modes,
-                max(len(r.frequencies) for r in results_list),
+            # Store all computed modes — the solver already controls
+            # how many modes are produced via its num_modes parameter.
+            actual_n_modes = max(
+                len(r.frequencies) for r in results_list
             )
+            global_max_modes = max(global_max_modes, actual_n_modes)
 
             # Eigenvalues: store as frequencies in Hz  (n_harmonics, actual_n_modes)
             eigenvalues = np.full(
@@ -231,7 +229,7 @@ def export_modal_results(
         # Global attributes
         f.attrs["turbomodal_version"] = "0.1.0"
         f.attrs["num_conditions"] = len(conditions)
-        f.attrs["num_modes_per_harmonic"] = n_modes
+        f.attrs["num_modes_per_harmonic"] = global_max_modes
         f.attrs["include_mode_shapes"] = config.include_mode_shapes
 
 
