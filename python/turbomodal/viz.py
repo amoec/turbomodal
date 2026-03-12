@@ -2065,11 +2065,17 @@ def _removed_func(
         freqs = np.fft.rfftfreq(n_samples, d=dt)
         f_nyq = freqs[-1]
 
-        # Collect expected modal frequencies from filtered results
-        modal_freqs: list[float] = []
-        for r in filtered:
-            modal_freqs.extend(r.frequencies.tolist())
-        modal_freqs = sorted(set(modal_freqs))
+        # Collect expected modal frequencies
+        # When physics mode is active, only show frequencies for modes that
+        # were actually excited (avoids covering the plot in dashed lines)
+        active_modes_list = out.get("active_modes")
+        if active_modes_list:
+            modal_freqs = sorted(set(am.frequency for am in active_modes_list))
+        else:
+            modal_freqs: list[float] = []
+            for r in filtered:
+                modal_freqs.extend(r.frequencies.tolist())
+            modal_freqs = sorted(set(modal_freqs))
 
         # Synchronous frequency and harmonics
         f_sync = rpm / 60.0
@@ -2125,9 +2131,11 @@ def _removed_func(
             Line2D([0], [0], color="C3", linestyle=":", linewidth=0.5, alpha=0.5),
             Line2D([0], [0], color="0.6", linestyle=":", linewidth=0.5),
         ]
+        _freq_label = ("Active mode freq" if active_modes_list
+                       else "Modal freq")
         legend_labels = [
-            "Modal freq (fundamental)",
-            "Modal freq (harmonics)",
+            f"{_freq_label} (fundamental)",
+            f"{_freq_label} (harmonics)",
             f"Synchronous ({f_sync:.1f} Hz) harmonics",
         ]
         axes[0].legend(legend_handles, legend_labels, fontsize=7,
