@@ -49,16 +49,39 @@ static size_t total_system_memory() {
 #endif
 }
 
-// Rough estimate of peak memory (bytes) for one shift-invert eigensolver call.
-// LDLT fill on a sparse n×n FE matrix: ~C * n^(4/3).
-// Calibrated so n=40000 → ~1 GB (conservative with LDLT factorization).
-// Includes Lanczos basis overhead (V and MV matrices).
-static size_t estimate_per_harmonic_bytes(int n_dofs, int nev = 20) {
+// Estimate peak memory (bytes) for one shift-invert eigensolver call.
+//
+// Two estimation modes:
+//   1. nnz-based (preferred): when the actual nnz of the projected operator is
+//      known, use empirical fill ratio for SimplicialLDLT with AMD ordering.
+//      For 3D FE meshes this is typically 8-15x; we use 12x as conservative default.
+//   2. dimension-based (fallback): C * n^(4/3) heuristic for when nnz is unknown.
+//
+// Entry size: 16 bytes (complex double) for complex Hermitian,
+//             8 bytes (double) for k=0 / k=N/2 real-valued harmonics.
+//
+// Lanczos workspace: V and MV matrices, each n × (ncv+1).
+static size_t estimate_per_harmonic_bytes(int n_dofs, int nev = 20,
+                                          int64_t operator_nnz = 0,
+                                          int entry_bytes = 16) {
     double n = static_cast<double>(n_dofs);
-    size_t factorization = static_cast<size_t>(800.0 * std::pow(n, 4.0 / 3.0));
-    // Lanczos V and MV: 2 matrices × n × (4*nev+2) × 16 bytes (complex double)
+
+    size_t factorization;
+    if (operator_nnz > 0) {
+        // LDLT fill estimate: fill_ratio * nnz * entry_size.
+        // Eigen's SimplicialLDLT uses AMD ordering; empirical fill ratio
+        // for 3D FE sparsity patterns is typically 8-15x.  Use 12x.
+        constexpr double fill_ratio = 12.0;
+        factorization = static_cast<size_t>(
+            fill_ratio * static_cast<double>(operator_nnz) * entry_bytes);
+    } else {
+        // Fallback: 800 * n^(4/3) calibrated so n=40000 → ~1 GB
+        factorization = static_cast<size_t>(800.0 * std::pow(n, 4.0 / 3.0));
+    }
+
+    // Lanczos V and MV: 2 matrices × n × (ncv+1) × entry_bytes
     int ncv = std::min(4 * nev + 1, n_dofs);
-    size_t lanczos = static_cast<size_t>(2.0 * n * (ncv + 1) * 16.0);
+    size_t lanczos = static_cast<size_t>(2.0 * n * (ncv + 1) * entry_bytes);
     return factorization + lanczos;
 }
 
@@ -1140,22 +1163,44 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
         : std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
     max_concurrent = std::min(max_concurrent, n_harmonics);
 
-    // Memory-aware cap.
-    // When Coriolis is active, k>0 harmonics use Lancaster QEP which builds
-    // a 2n×2n system.  Use 2*n_free for the estimate since most harmonics
-    // (all k>0) will use the doubled system.
+    // Memory-aware cap using actual nnz of the projected operator.
+    //
+    // The shifted operator (K_free - σ*M_free) has the union sparsity of
+    // Kcf_, Kpf_, Mcf_, Mpf_.  Use Kcf_ nnz (the dominant part) as the
+    // base; Kpf_ adds relatively few new entries due to identical mesh
+    // topology on left/right boundaries.
+    //
+    // Differentiate:
+    //   k=0 / k=N/2 : real-valued (8 bytes/entry)
+    //   k>0          : complex Hermitian (16 bytes/entry)
+    //   k>0+Coriolis : Lancaster QEP doubles system to 2n (16 bytes/entry)
+    int64_t op_nnz = 0;
+    if (projections_precomputed_) {
+        // Upper bound on shifted operator nnz: sum of constituent nnz
+        // (actual is less due to overlapping patterns, but safe for estimate)
+        op_nnz = static_cast<int64_t>(Kcf_.nonZeros() + Kpf_.nonZeros()
+                                      + Mcf_.nonZeros() + Mpf_.nonZeros());
+    }
+
+    // Most harmonics are k>0 (complex).  Use worst-case for cap.
+    int n_est = coriolis_active ? 2 * n_free : n_free;
+    int entry_bytes = 16;  // complex double
+    int64_t op_nnz_est = coriolis_active ? 4 * op_nnz : op_nnz;
+
     size_t per_harmonic = estimate_per_harmonic_bytes(
-        coriolis_active ? 2 * n_free : n_free, num_modes_per_harmonic);
+        n_est, num_modes_per_harmonic, op_nnz_est, entry_bytes);
     size_t total_mem = total_system_memory();
     if (total_mem > 0 && per_harmonic > 0) {
-        size_t budget = static_cast<size_t>(total_mem * 0.5);
+        size_t budget = static_cast<size_t>(
+            total_mem * (1.0 - memory_reserve_fraction));
         int mem_limit = std::max(1, static_cast<int>(budget / per_harmonic));
         if (mem_limit < max_concurrent) {
             std::cerr << "[CyclicSolver] Memory cap: " << mem_limit
                       << " concurrent harmonics (est. "
                       << (per_harmonic / (1024*1024)) << " MB each, "
-                      << (total_mem / (1024*1024)) << " MB total RAM)"
-                      << std::endl;
+                      << (total_mem / (1024*1024)) << " MB total RAM, "
+                      << static_cast<int>((1.0 - memory_reserve_fraction) * 100)
+                      << "% budget)" << std::endl;
             max_concurrent = mem_limit;
         }
     }

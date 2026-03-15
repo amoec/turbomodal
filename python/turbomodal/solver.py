@@ -110,6 +110,7 @@ def solve(
     condition: _RemovedClass | None = None,
     boundary_conditions: list[BoundaryCondition] | None = None,
     show_convergence: bool = False,
+    memory_reserve_fraction: float = 0.2,
 ) -> list[ModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
@@ -147,6 +148,8 @@ def solve(
     show_convergence : if True, open a live matplotlib bar chart showing
         per-harmonic convergence status as each nodal diameter is solved.
         Requires matplotlib.  The plot stays open after solving completes.
+    memory_reserve_fraction : fraction of total system RAM to keep free
+        (0.0–1.0).  Default 0.2 (use up to 80 % of RAM).
 
     Returns
     -------
@@ -190,7 +193,7 @@ def solve(
         hi_resolved = hi if hi else list(range(max_k + 1))
         results = _solve_with_convergence_plot(
             solver, rpm, num_modes, hi, hi_resolved, max_threads, include_coriolis,
-            min_frequency, verbose, t0,
+            min_frequency, verbose, t0, memory_reserve_fraction,
         )
     else:
         progress_cb = None
@@ -205,7 +208,8 @@ def solve(
             progress_cb = _on_progress
 
         results = solver.solve_at_rpm(rpm, num_modes, hi, max_threads, include_coriolis,
-                                       min_frequency, progress_cb)
+                                       min_frequency, progress_cb,
+                                       memory_reserve_fraction=memory_reserve_fraction)
 
     elapsed = time.perf_counter() - t0
 
@@ -231,6 +235,7 @@ def _solve_with_convergence_plot(
     min_frequency: float,
     verbose: int,
     t0: float,
+    memory_reserve_fraction: float = 0.2,
 ) -> list[ModalResult]:
     """Run solve_at_rpm in a background thread while updating a live bar chart."""
     import queue
@@ -295,7 +300,8 @@ def _solve_with_convergence_plot(
     def _run() -> None:
         results_holder.append(
             solver.solve_at_rpm(rpm, num_modes, hi, max_threads,
-                                include_coriolis, min_frequency, _progress_cb)
+                                include_coriolis, min_frequency, _progress_cb,
+                                memory_reserve_fraction=memory_reserve_fraction)
         )
         update_queue.put(None)
 
@@ -351,6 +357,7 @@ def rpm_sweep(
     min_frequency: float = 0.0,
     temperature: float | None = None,
     boundary_conditions: list[BoundaryCondition] | None = None,
+    memory_reserve_fraction: float = 0.2,
 ) -> list[list[ModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
@@ -375,6 +382,8 @@ def rpm_sweep(
     temperature : bulk temperature in Kelvin.  When provided, the material
         stiffness is adjusted via ``material.at_temperature(temperature)``
         before solving.
+    memory_reserve_fraction : fraction of total system RAM to keep free
+        (0.0–1.0).  Default 0.2 (use up to 80 % of RAM).
 
     Returns
     -------
@@ -416,7 +425,8 @@ def rpm_sweep(
     for i, rpm in enumerate(rpm_arr):
         t0 = time.perf_counter()
         results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
-                                       include_coriolis, min_frequency)
+                                       include_coriolis, min_frequency,
+                                       memory_reserve_fraction=memory_reserve_fraction)
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 
