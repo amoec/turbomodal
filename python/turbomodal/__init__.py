@@ -72,6 +72,7 @@ from turbomodal.viz import (
     _RemovedClass,
     export_modal_results,
     load_modal_results,
+    load_signals,
 )
     _RemovedClass,
     _RemovedClass,
@@ -162,6 +163,7 @@ __all__ = [
     "_RemovedClass",
     "export_modal_results",
     "load_modal_results",
+    "load_signals",
     "_RemovedClass",
     "_RemovedClass",
     "generate_conditions",
