@@ -21,6 +21,10 @@ from turbomodal._core import (
 )
 from turbomodal._utils import progress_bar as _progress_bar
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     
 
@@ -91,6 +95,25 @@ def _build_constraint_groups(
 SILENT = 0
 PROGRESS = 1
 DETAILED = 2
+
+
+def _validate_modal_results(results: list[ModalResult]) -> list[ModalResult]:
+    """Post-solve sanity checks. Logs warnings for suspicious results."""
+    for r in results:
+        freqs = np.asarray(r.frequencies)
+        if freqs.size == 0:
+            continue
+        if np.any(np.isnan(freqs)):
+            logger.warning("ND=%d: NaN frequencies detected — solver may not have converged",
+                           r.harmonic_index)
+        if np.any(freqs < 0):
+            logger.warning("ND=%d: negative frequencies detected", r.harmonic_index)
+        shapes = np.asarray(r.mode_shapes)
+        if shapes.size > 0:
+            norms = np.linalg.norm(shapes, axis=0)
+            if np.any(norms < 1e-15):
+                logger.warning("ND=%d: zero-norm mode shapes detected", r.harmonic_index)
+    return results
 
 
 def solve(
@@ -221,7 +244,7 @@ def solve(
             freqs = ", ".join(f"{f:.1f}" for f in r.frequencies[:4])
             print(f"    ND={r.harmonic_index:2d}: [{freqs}] Hz (rotating frame)")
 
-    return results
+    return _validate_modal_results(results)
 
 
 def _solve_with_convergence_plot(
@@ -424,9 +447,10 @@ def rpm_sweep(
 
     for i, rpm in enumerate(rpm_arr):
         t0 = time.perf_counter()
-        results = solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
-                                       include_coriolis, min_frequency,
-                                       memory_reserve_fraction=memory_reserve_fraction)
+        results = _validate_modal_results(
+            solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
+                                include_coriolis, min_frequency,
+                                memory_reserve_fraction=memory_reserve_fraction))
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 

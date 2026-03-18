@@ -80,6 +80,9 @@ from turbomodal.viz import (
     _removed,
 )
 
+# Modal comparison utilities
+from turbomodal.mac import compute_mac, compute_auto_mac
+
 try:
     from turbomodal._version import version as __version__
 except ImportError:
@@ -168,4 +171,7 @@ __all__ = [
     "_RemovedClass",
     "generate_conditions",
     "_removed",
+    # Modal comparison
+    "compute_mac",
+    "compute_auto_mac",
 ]

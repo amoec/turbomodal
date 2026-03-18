@@ -5,6 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 
+def ensure_rng(rng: np.random.Generator | None) -> np.random.Generator:
+    """Return *rng* if provided, otherwise create a new default generator."""
+    return rng if rng is not None else np.random.default_rng()
+
+
 def progress_bar(
     current: int,
     total: int,
