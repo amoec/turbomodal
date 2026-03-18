@@ -329,7 +329,9 @@ X, y = _removed_func(
     "turbomodal_dataset.h5", sensor_array, signal_config, feat_config,
 )
 # X: (n_samples, n_features)
-# y keys: 'nodal_diameter', 'nodal_circle', 'whirl_direction', 'frequency', 'wave_velocity'
+# y keys: 'active_nd', 'active_nc', 'active_whirl', 'active_freq', 'active_amp',
+#          'active_eo', 'condition_id', 'rpm'
+# Use prepare_multilabel_targets(y) to convert to (N, M) binary matrix for training
 ```
 
 ### Physics-Informed Features
@@ -397,8 +399,8 @@ predictions = predict_mode_id(
     model=best_model, signals=new_signals,
     sample_rate=500_000.0, rpm=5000.0,
 )
-# Keys: 'nodal_diameter', 'nodal_circle', 'frequency',
-#        'whirl_direction', 'amplitude', 'wave_velocity', 'confidence'
+# Keys: 'mode_present' (N, M), 'mode_classes' (M,),
+#        'amplitude' (N, M), 'wave_velocity' (N, M), 'confidence' (N, M)
 ```
 
 ### Uncertainty Quantification

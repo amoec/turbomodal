@@ -16,28 +16,29 @@ The pipeline defines four primary performance targets in `_RemovedClass`
 (see `turbomodal (internal)`). All four must be satisfied simultaneously for
 `_check_targets` to return `True` and halt the complexity ladder.
 
-### Mode Detection (Nodal Diameter)
+### Mode Detection (Multi-Label)
 
 | Property  | Value    |
 |-----------|----------|
-| Metric    | Weighted (macro) F1 score |
+| Metric    | Sample-averaged F1 score |
 | Threshold | >= 0.92  |
 | Config key | `mode_detection_f1_min` |
 
-Mode labels are encoded as `nd * 100 + nc` via `_encode_mode_labels`, so the
-F1 score covers the joint `(ND, NC)` classification. The macro average gives
-equal weight to each class regardless of support, which is important when
-certain nodal diameters are rare in the dataset.
+Each signal may contain multiple simultaneously active (ND, NC) mode pairs.
+The model outputs M independent sigmoid probabilities (one per possible mode
+class). The F1 score is computed as a sample-averaged multi-label metric:
+for each sample, precision and recall are computed over the binary mode
+detection vector, then averaged across all samples.
 
-**Why this threshold**: Correct nodal diameter identification is the
-foundation of resonance avoidance in bladed disk design. Misidentifying the
-ND means misplacing the mode on the Campbell diagram, which can lead to
-undetected crossings with engine order excitations.
+**Why this threshold**: Correct mode identification (both ND and NC) is the
+foundation of resonance avoidance in bladed disk design. Missing an active
+mode or falsely detecting one leads to incorrect Campbell diagram
+interpretation and potentially undetected engine order crossings.
 
 Computed in `evaluate_model` via:
 ```python
 from sklearn.metrics import f1_score
-mode_f1 = f1_score(true_mode, pred_mode, average="macro", zero_division=0)
+mode_f1 = f1_score(true_binary, pred_binary, average="samples", zero_division=0)
 ```
 
 ### Whirl Classification
@@ -205,10 +206,9 @@ The complexity ladder uses a weighted composite score to compare tiers and
 detect diminishing returns. Implemented in `_composite_score`:
 
 ```
-score = 0.30 * mode_detection_f1
-      + 0.20 * whirl_accuracy
-      + 0.25 * (1.0 - amplitude_mape)
-      + 0.25 * velocity_r2
+score = 0.40 * mode_detection_f1
+      + 0.30 * (1.0 - amplitude_mape)
+      + 0.30 * velocity_r2
 ```
 
 | Component              | Weight | Rationale                                     |

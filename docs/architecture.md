@@ -292,8 +292,10 @@ class _RemovedClass(Protocol):
     def load(self, path) -> None: ...
 ```
 
-Every model predicts a dict with keys: `nodal_diameter`, `nodal_circle`,
-`frequency`, `whirl_direction`, `amplitude`, `wave_velocity`, `confidence`.
+Every model predicts a dict with keys: `mode_present` (N, M) sigmoid
+probabilities, `mode_classes` (M,) encoded mode labels, `amplitude` (N, M)
+per-mode amplitude, `wave_velocity` (N, M) per-mode velocity, and
+`confidence` (N, M) per-mode detection confidence.
 
 ### Feature Extraction
 
@@ -353,10 +355,9 @@ Configured via `_RemovedClass`:
 
 | Metric              | Default Target | Description                              |
 |---------------------|----------------|------------------------------------------|
-| `mode_detection_f1` | >= 0.92        | Macro F1 on encoded (ND, NC) labels      |
-| `whirl_accuracy`    | >= 0.95        | Balanced accuracy on whirl direction      |
-| `amplitude_mape`    | <= 0.08        | Mean Absolute Percentage Error on amplitude |
-| `velocity_r2`       | >= 0.93        | R-squared on wave velocity               |
+| `mode_detection_f1` | >= 0.92        | Sample-averaged F1 on multi-label mode presence |
+| `amplitude_mape`    | <= 0.08        | Per-mode MAPE on amplitude (masked)      |
+| `velocity_r2`       | >= 0.93        | Per-mode R-squared on wave velocity (masked) |
 
 ### Prediction Targets
 
