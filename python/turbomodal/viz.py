@@ -2025,16 +2025,23 @@ def _removed_func(
         if families:
             title_parts.append("(" + ", ".join(sorted(families)) + ")")
 
-    n_modes_total = sum(len(r.frequencies) for r in filtered)
-    title_parts.append(f"{n_modes_total} mode{'s' if n_modes_total != 1 else ''}")
     title_parts.append(f"{rpm:.0f} RPM")
-    title = "Sensor Signals: " + "  |  ".join(title_parts)
 
     # --- Generate signals ---
     out = _removed(
         sensor_array, filtered, rpm, config,
         noise_config=noise_config,
     )
+
+    # Mode count for title — use active modes when physics mode provides them
+    active_modes_out = out.get("active_modes")
+    if active_modes_out is not None:
+        n_modes_total = len(active_modes_out)
+        title_parts.insert(-1, f"{n_modes_total} active mode{'s' if n_modes_total != 1 else ''}")
+    else:
+        n_modes_total = sum(len(r.frequencies) for r in filtered)
+        title_parts.insert(-1, f"{n_modes_total} mode{'s' if n_modes_total != 1 else ''}")
+    title = "Sensor Signals: " + "  |  ".join(title_parts)
     signals = out["signals"]
     t = out["time"]
 
@@ -2065,12 +2072,16 @@ def _removed_func(
         freqs = np.fft.rfftfreq(n_samples, d=dt)
         f_nyq = freqs[-1]
 
-        # Collect expected modal frequencies
-        # When physics mode is active, only show frequencies for modes that
-        # were actually excited (avoids covering the plot in dashed lines)
+        # Collect expected modal frequencies for dashed-line markers.
+        # When physics mode is active, show only the dominant modes so the
+        # plot isn't covered in lines.
         active_modes_list = out.get("active_modes")
         if active_modes_list:
-            modal_freqs = sorted(set(am.frequency for am in active_modes_list))
+            # Sort by amplitude descending, keep at most 10 for the plot
+            sorted_am = sorted(active_modes_list,
+                               key=lambda am: am.amplitude, reverse=True)
+            top_am = sorted_am[:10]
+            modal_freqs = sorted(set(am.frequency for am in top_am))
         else:
             modal_freqs: list[float] = []
             for r in filtered:
