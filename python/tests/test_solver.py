@@ -197,3 +197,19 @@ def test_solve_hub_free_spin_softening(wedge_mesh, steel_material):
     # Spin softening (without stress stiffening) should reduce frequency
     assert fhi_elastic[0] < f0_elastic[0], \
         f"Expected spin softening: {fhi_elastic[0]:.1f} Hz should be < {f0_elastic[0]:.1f} Hz"
+
+
+# ---- campbell_data whirl labels ----
+
+def test_campbell_data_whirl_labels(solved_wedge):
+    """campbell_data dict should contain a 'whirl_direction' key."""
+    mesh, mat, results_single = solved_wedge
+    # rpm_sweep expects list-of-lists; wrap the single solve in a list
+    all_results = [results_single]
+    cd = campbell_data(all_results)
+    assert isinstance(cd, dict)
+    assert "whirl_direction" in cd, (
+        f"Expected 'whirl_direction' key in campbell_data, got keys: {list(cd.keys())}"
+    )
+    # whirl_direction should be an array with the same shape as frequencies
+    assert cd["whirl_direction"].shape == cd["frequencies"].shape
