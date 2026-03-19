@@ -57,7 +57,7 @@ ml = [
     "torch>=2.0",
     "internal analysis>=0.42",
     "internal>=3.0",
-    "internal tracker>=2.10",
+    "internal tracker>=3.5",
 ]
 
 [tool.scikit-build.metadata.version]
