@@ -38,6 +38,7 @@ dependencies = [
     "gmsh>=4.12",
     "meshio>=5.3",
     "h5py>=3.7",
+    "Pillow>=9.0",
 ]
 
 [project.urls]
@@ -50,7 +51,9 @@ Changelog = "https://github.com/amoec/turbomodal/blob/main/CHANGELOG.md"
 dev = ["pytest>=7", "pytest-cov"]
 ml = [
     "scikit-learn>=1.2",
+    "joblib>=1.2",
     "internal model>=1.7",
+    "internal model>=3.3",
     "torch>=2.0",
     "internal analysis>=0.42",
     "internal>=3.0",
