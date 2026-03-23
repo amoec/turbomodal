@@ -773,8 +773,4 @@ print(cd["frequencies"].shape)  # (20, H, 10)
 
 ## See also
 
-- [Signals API](signals.md) -- Sensor array and signal generation
-- [Data API](data.md) -- Dataset export and parametric sweeps
 - [Analysis API](analysis.md) -- Campbell and ZZENF visualization
-- [ML API](ml.md) -- Machine learning pipeline
-- [Optimization API](optimization.md) -- Sensor placement optimization

@@ -27,35 +27,12 @@ The core package requires the following dependencies (installed automatically):
 | matplotlib   | 3.5             | 2-D plotting (Campbell, ZZENF)       |
 | gmsh         | 4.12            | CAD import and mesh generation       |
 | meshio       | 5.3             | Mesh file format I/O                 |
-| h5py         | 3.7             | HDF5 dataset storage                 |
 
 ---
 
-## Install with ML Support
+## Install for Development
 
-To use the machine learning pipeline (feature extraction, complexity ladder
-training, SHAP_REMOVEDexplainability, analysis), install with the `ml` extra:
-
-```bash
-pip install -e ".[ml]"
-```
-
-This adds:
-
-| Package       | Minimum Version | Purpose                                    |
-|-------------- |---------------- |------------------------------------------- |
-| scikit-learn  | 1.2             | Tiers 1-3 models, metrics, data splitting  |
-| internal model       | 1.7             | Tier 2 gradient-boosted tree models         |
-| torch         | 2.0             | Tiers 4-6 neural network models            |
-| shape         | 0.42            | SHAP_REMOVEDvalue computation for explainability   |
-| internal        | 3.0             | Bayesian hyperparameter optimization        |
-| internal tracker        | 2.10            | Experiment tracking and model registry      |
-
----
-
-## Install Everything
-
-For development (including test dependencies), install all extras:
+For development (including test dependencies), install with the dev extra:
 
 ```bash
 pip install -e ".[dev]"
@@ -218,17 +195,6 @@ mat = Material(E=200e9, nu=0.3, rho=7800)
 print(f"Material: E={mat.E/1e9:.0f} GPa, nu={mat.nu}, rho={mat.rho}")
 ```
 
-To verify that the ML extras are available:
-
-```python
-    _RemovedClass,
-    _removed_func,
-    _removed_func,
-    _removed_func,
-)
-print("ML and optimization modules loaded successfully.")
-```
-
 Run the test suite:
 
 ```bash
@@ -272,30 +238,6 @@ sudo apt install libopenblas-dev
 
 # Fedora/RHEL
 sudo dnf install openblas-devel
-```
-
-### GPU support for PyTorch (Tiers 4-6)
-
-The `torch` dependency installed via `pip install turbomodal` will
-default to CPU-only on most systems. For CUDA GPU acceleration:
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install turbomodal
-```
-
-The `_RemovedClass.device` parameter controls device selection. Set it to
-`"auto"` (the default) to use CUDA or MPS when available, or explicitly
-to `"cuda"`, `"mps"`, or `"cpu"`.
-
-### macOS Apple Silicon (MPS)
-
-PyTorch MPS backend is supported on macOS with Apple Silicon. The
-`_RemovedClass(device="auto")` setting will automatically select MPS
-when available. If you encounter MPS-related errors, fall back to CPU:
-
-```python
-config = _RemovedClass(device="cpu")
 ```
 
 ### OpenMP not found on macOS

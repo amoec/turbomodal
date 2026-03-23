@@ -21,50 +21,6 @@ def solved_wedge(wedge_mesh_path):
     return mesh, mat, results
 
 
-def test_load_to_hdf5_roundtrip(solved_wedge, tmp_path):
-    """Load mesh → solve → export HDF5 → load HDF5 → frequencies match."""
-    h5py = pytest.importorskip("h5py")
-            _RemovedClass, _RemovedClass,
-        export_modal_results, load_modal_results,
-    )
-
-    mesh, mat, results = solved_wedge
-    cond = _RemovedClass(condition_id=0, rpm=0.0)
-    all_results = {0: results}
-    path = str(tmp_path / "roundtrip.h5")
-
-    cfg = _RemovedClass(output_path=path)
-    export_modal_results(path, mesh, [cond], all_results, cfg)
-
-    mesh_data, loaded_conds, loaded_results = load_modal_results(path)
-    assert 0 in loaded_results
-    assert len(loaded_conds) == 1
-    # Eigenvalues should be present
-    loaded_eigs = loaded_results[0]["eigenvalues"]
-    assert loaded_eigs.size > 0
-
-
-def test_pipeline_with_sensors(solved_wedge):
-    """Solve → _RemovedClass → sample mode shape → check output."""
-    
-    mesh, mat, results = solved_wedge
-    cfg = _RemovedClass.default_btt_array(
-        num_probes=4,
-        casing_radius=0.15,
-        axial_positions=[0.005],
-    )
-    vsa = _RemovedClass(mesh, cfg)
-    assert vsa.n_sensors == 4
-
-    # Sample a mode shape from the first harmonic's first mode
-    for r in results:
-        if len(r.frequencies) > 0 and r.mode_shapes.shape[1] > 0:
-            mode = np.asarray(r.mode_shapes[:, 0]).flatten()
-            sampled = vsa.sample_mode_shape(mode)
-            assert sampled.shape == (4,)
-            break
-
-
 def test_pipeline_mistuning(solved_wedge):
     """Solve tuned → extract frequencies → FMMSolver → magnification >= 1."""
     from turbomodal._core import FMMSolver

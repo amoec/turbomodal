@@ -460,32 +460,6 @@ for fig in diag["figures"]:
 
 ---
 
-### _removed_func
-
-Plot a heatmap of per-sensor SHAP_REMOVEDcontributions across mode families.
-
-```python
-def _removed_func(
-    internal analysis_values: np.ndarray,
-    sensor_names: list[str],
-    mode_names: list[str],
-    figsize: tuple[float, float] = (10, 6),
-) -> matplotlib.figure.Figure
-```
-
-**Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `internal analysis_values` | `ndarray` | required | SHAP_REMOVEDvalues from `| `sensor_names` | `list[str]` | required | Sensor labels for y-axis |
-| `mode_names` | `list[str]` | required | Mode family labels for x-axis |
-| `figsize` | `tuple[float, float]` | `(10, 6)` | Figure size |
-
-**Returns:** `matplotlib.figure.Figure` with a color-mapped heatmap
-showing which sensors contribute most to identifying each mode family.
-
----
-
 ## Boundary Condition Editor
 
 ### bc_editor
@@ -614,7 +588,3 @@ points. It returns a permutation list `perm[rpm_idx][track_id] = mode_idx`.
 ## See also
 
 - [Core API](core.md) -- `solve()`, `rpm_sweep()`, `campbell_data()`
-- [Signals API](signals.md) -- Virtual sensor arrays
-- [Data API](data.md) -- Parametric sweep with HDF5 export
-- [ML API](ml.md) -- Machine learning pipeline
-- [Optimization API](optimization.md) -- Sensor placement optimization

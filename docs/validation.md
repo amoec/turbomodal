@@ -2,117 +2,16 @@
 
 ## Overview
 
-This document defines the acceptance thresholds, physics consistency rules,
-composite scoring formula, and testing strategy that govern turbomodal's modal
-identification pipeline. Every model produced by the complexity ladder is
-evaluated against these criteria before it is selected or promoted to the next
-tier.
-
----
-
-## Performance Thresholds
-
-The pipeline defines four primary performance targets in `_RemovedClass`
-(see `turbomodal (internal)`). All four must be satisfied simultaneously for
-`_check_targets` to return `True` and halt the complexity ladder.
-
-### Mode Detection (Multi-Label)
-
-| Property  | Value    |
-|-----------|----------|
-| Metric    | Sample-averaged F1 score |
-| Threshold | >= 0.92  |
-| Config key | `mode_detection_f1_min` |
-
-Each signal may contain multiple simultaneously active (ND, NC) mode pairs.
-The model outputs M independent sigmoid probabilities (one per possible mode
-class). The F1 score is computed as a sample-averaged multi-label metric:
-for each sample, precision and recall are computed over the binary mode
-detection vector, then averaged across all samples.
-
-**Why this threshold**: Correct mode identification (both ND and NC) is the
-foundation of resonance avoidance in bladed disk design. Missing an active
-mode or falsely detecting one leads to incorrect Campbell diagram
-interpretation and potentially undetected engine order crossings.
-
-Computed in `evaluate_model` via:
-```python
-from sklearn.metrics import f1_score
-mode_f1 = f1_score(true_binary, pred_binary, average="samples", zero_division=0)
-```
-
-### Whirl Classification
-
-| Property  | Value    |
-|-----------|----------|
-| Metric    | Balanced accuracy |
-| Threshold | >= 0.95  |
-| Config key | `whirl_accuracy_min` |
-
-Whirl direction is encoded as `{-1, 0, +1}` corresponding to backward whirl,
-standing wave, and forward whirl respectively.
-
-**Why this threshold**: Forward and backward whirl modes have different
-frequencies in the rotating frame. Confusing them distorts the Campbell diagram
-and can mask dangerous resonance crossings. The high threshold reflects the
-safety-critical nature of this classification.
-
-Computed in `evaluate_model` via:
-```python
-from sklearn.metrics import balanced_accuracy_score
-whirl_acc = balanced_accuracy_score(true_whirl, pred_whirl)
-```
-
-### Amplitude Estimation
-
-| Property  | Value    |
-|-----------|----------|
-| Metric    | Mean Absolute Percentage Error (MAPE) |
-| Threshold | <= 8% (0.08) |
-| Config key | `amplitude_mape_max` |
-
-MAPE is computed with a floor on the denominator to avoid division by zero:
-```python
-denom = max(|y_true|, 1e-8)
-amplitude_mape = mean(|y_true - y_pred| / denom)
-```
-
-**Why this threshold**: Amplitude directly affects blade stress levels and
-fatigue life predictions. An 8% tolerance balances measurement uncertainty
-(BTT systems typically have 2-5% noise) against the engineering need for
-accurate forced-response estimation.
-
-### Velocity Estimation
-
-| Property  | Value    |
-|-----------|----------|
-| Metric    | R-squared (coefficient of determination) |
-| Threshold | >= 0.93  |
-| Config key | `velocity_r2_min` |
-
-Wave velocity is the circumferential phase speed of the traveling wave
-pattern, computed as `v = 2 * pi * f * R / ND` for `ND > 0`.
-
-**Why this threshold**: Wave velocity serves as a cross-check for modal
-identification consistency. If the model correctly identifies frequency and
-nodal diameter, the velocity should follow the physical relationship. An R²
-of 0.93 allows for measurement noise while ensuring the model has learned the
-underlying physics.
-
-Computed in `evaluate_model` via:
-```python
-from sklearn.metrics import r2_score
-velocity_r2 = r2_score(true_vel, pred_vel)
-```
+This document defines the physics consistency rules and testing strategy that
+govern turbomodal's modal identification solver. Predictions are evaluated
+against these criteria to ensure physical plausibility.
 
 ---
 
 ## Physics Consistency Checks
 
-`_removed_func` in `turbomodal (internal)`
-validates predictions against five physical constraints. These checks run
-independently of ML performance metrics and serve as a safety net for
-detecting physically impossible outputs.
+The solver validates predictions against physical constraints. These checks
+serve as a safety net for detecting physically impossible outputs.
 
 ### Check 1: Positive Frequency
 
@@ -174,22 +73,9 @@ frequency and nodal diameter. The tolerance is 50% relative error, which
 accounts for the fact that the predicted velocity and predicted ND/frequency
 may all contain independent errors.
 
-### Check 6: Epistemic Uncertainty Threshold
+### Output
 
-```
-When epistemic_uncertainty is provided:
-    epistemic_uncertainty[i] <= epistemic_threshold (default 0.1)
-```
-
-When uncertainty estimates are available (from MC Dropout, Deep Ensembles,
-or heteroscedastic output heads), predictions with high epistemic
-uncertainty are flagged. This catches cases where the model is extrapolating
-beyond its training distribution, even if the other five physics checks
-pass. The threshold is configurable via the `epistemic_threshold` parameter.
-
-### Output Format
-
-`_removed_func` returns a dict with four keys:
+The consistency check returns a dict with four keys:
 
 | Key                | Shape    | Description                                      |
 |--------------------|----------|--------------------------------------------------|
@@ -200,38 +86,12 @@ pass. The threshold is configurable via the `epistemic_threshold` parameter.
 
 ---
 
-## Composite Score
-
-The complexity ladder uses a weighted composite score to compare tiers and
-detect diminishing returns. Implemented in `_composite_score`:
-
-```
-score = 0.40 * mode_detection_f1
-      + 0.30 * (1.0 - amplitude_mape)
-      + 0.30 * velocity_r2
-```
-
-| Component              | Weight | Rationale                                     |
-|------------------------|--------|-----------------------------------------------|
-| `mode_detection_f1`    | 0.30   | Highest weight: ND is the primary output      |
-| `whirl_accuracy`       | 0.20   | Important but binary; easier to achieve high accuracy |
-| `1 - amplitude_mape`   | 0.25   | Inverted so higher is better; regression quality |
-| `velocity_r2`          | 0.25   | Cross-validation of physical consistency      |
-
-The score ranges from 0 to 1 (approximately). A perfect model scores 1.0.
-
-**Tier promotion rule**: if the composite score improvement from tier `t-1` to
-tier `t` is less than `config.performance_gap_threshold` (default 0.02), the
-ladder stops and returns the best model seen so far.
-
----
-
 ## Test Suite
 
 ### Overview
 
-The project has 15 C++ test suites and 13 Python test files providing
-comprehensive coverage of all four subsystems.
+The project has 15 C++ test suites and 8 Python test files providing
+comprehensive coverage of the solver and Python utilities.
 
 ### C++ Test Suites
 
@@ -264,22 +124,17 @@ Run via `ctest --output-on-failure` from the build directory.
 
 Located under `python/tests/`:
 
-| File                       | Subsystem | Description                                      |
-|----------------------------|-----------|--------------------------------------------------|
-| `test_python_bindings.py`  | A         | C++ binding tests: Material, Mesh, Solver        |
-| `test_io.py`               | A         | Mesh import (Gmsh `.msh`), CAD loading           |
-| `test_viz.py`              | A         | Visualization: mesh plots, mode shapes, Campbell |
-| `test_solver.py`           | A         | High-level `solve()`, `rpm_sweep()`, `campbell_data()` |
-| `test_internal.py          | B         | HDF5 export/import roundtrip, file structure     |
-| `test_internal.py       | B         | LHS sampling, parametric sweep generation        |
-| `test_internal.py          | B         | BTT arrays, virtual sensors, mode shape sampling |
-| `test_internal.py            | B         | Gaussian noise, bandwidth, quantization, dropout |
-| `test_internal.py       | B         | Signal synthesis pipeline                        |
-| `test_ml.py`               | C         | Feature extraction, all 6 model tiers + variants, evaluation, pipeline, label encoding, Internal HPO, _RemovedClass, OOD |
-| `test_optimization.py`     | D         | Fisher information, observability, placement analysis, physics checks, calibration, UQ, model selection report, explanation cards |
-| `test_validation_python.py`| A+C       | Leissa plate theory, Kwak frequency ratios, FMM tuned identity, Campbell ordering, SDOF FRF analytical |
-| `test_integration.py`      | A-D       | End-to-end: HDF5 roundtrip, sensors pipeline, mistuning, forced response |
-| `conftest.py`              | --        | Session-scoped fixtures: mesh paths, solved wedge |
+| File                       | Description                                      |
+|----------------------------|--------------------------------------------------|
+| `test_python_bindings.py`  | C++ binding tests: Material, Mesh, Solver        |
+| `test_io.py`               | Mesh import (Gmsh `.msh`), CAD loading           |
+| `test_viz.py`              | Visualization: mesh plots, mode shapes, Campbell |
+| `test_solver.py`           | High-level `solve()`, `rpm_sweep()`, `campbell_data()` |
+| `test_mac.py`              | Modal Assurance Criterion computation            |
+| `test_utils.py`            | Utility functions                                |
+| `test_validation_python.py`| Leissa plate theory, Kwak frequency ratios, FMM tuned identity, Campbell ordering, SDOF FRF analytical |
+| `test_integration.py`      | End-to-end: mesh loading, solve, mistuning, forced response |
+| `conftest.py`              | Session-scoped fixtures: mesh paths, solved wedge |
 
 ### Running Tests
 
@@ -315,86 +170,6 @@ cmake --build .
 ctest --output-on-failure
 ```
 
-### Test Categories
-
-#### Feature Extraction Tests (test_ml.py)
-
-| Test class                          | What it validates                                      |
-|-------------------------------------|--------------------------------------------------------|
-| `_RemovedTestClassSpectrogram`    | Output shape `(n_sensors * n_freq_bins,)`, 1-D input handling, empty signal edge case |
-| `_RemovedTestClassMel`            | Output shape `(n_sensors * n_mels,)` for mel features  |
-| `TestOrderSpectrum`                 | Correct peak at target engine order; `ValueError` on `rpm=0` |
-| `TestTravelingWaveDecomposition`    | Forward wave energy concentrates at the correct ND     |
-| `_RemovedTestClassOrderTracking`  | Output shape `(n_sensors * max_order * 2,)` for order tracking; `ValueError` on missing RPM |
-| `TestCrossSpectra`                  | Feature vector grows when `include_cross_spectra=True` |
-
-#### Model Tests (test_ml.py)
-
-| Test class         | What it validates                                               |
-|--------------------|-----------------------------------------------------------------|
-| `TestLinearModel`  | Train-predict roundtrip; all output keys present; save/load fidelity; RuntimeError on predict-before-train |
-| `TestTreeModel`    | Train-predict; `feature_importances_` shape and non-negativity  |
-| `TestSVMModel`     | Train-predict; confidence key present                           |
-| `TestTierModels`   | All 6 tiers in `TIER_MODELS` registry; each has `train`, `predict`, `save`, `load` methods |
-| `TestLabelEncoding`| `_encode_mode_labels` / `_decode_mode_labels` roundtrip          |
-
-#### Pipeline Tests (test_ml.py)
-
-| Test class                   | What it validates                                      |
-|------------------------------|--------------------------------------------------------|
-| `TestConditionBasedSplit`    | No condition overlap between train/val/test splits     |
-| `_RemovedTestClass`       | Returns `(model, report)` with correct structure; diminishing returns stops early when gap threshold is set very high |
-| `_RemovedTestClass`          | End-to-end inference from raw signals through feature extraction to predictions |
-| `TestEvaluateModel`          | All 6 metric keys returned; F1 and accuracy in [0, 1]; MAPE and RMSE non-negative |
-
-#### Advanced ML Tests (test_ml.py)
-
-| Test class                    | What it validates                                      |
-|-------------------------------|--------------------------------------------------------|
-| `TestLinearLasso`             | Lasso variant trains and predicts correctly             |
-| `TestTreeInternal model`           | Internal model fallback chain (Internal model -> Internal model -> RF)   |
-| `TestCNNResNet`              | ResNet variant architecture and train/predict cycle    |
-| `TestTemporalTransformer`    | Transformer variant architecture and train/predict     |
-| `TestInternalHPO`              | Internal integration runs trials and returns hyperparams |
-| `TestGroupKFoldCV`           | Cross-validation respects condition grouping            |
-| `Test_RemovedClass`         | Independent sub-task training produces valid _RemovedClass |
-| `TestOODSplit`               | OOD fraction extracts extreme conditions correctly     |
-| `TestECE`                    | Expected Calibration Error computation                 |
-| `TestInferenceLatency`       | Latency measurement included in evaluate_model output  |
-
-#### Uncertainty and Explainability Tests (test_optimization.py)
-
-| Test class                        | What it validates                                  |
-|-----------------------------------|----------------------------------------------------|
-| `TestMCDropout`                   | MC Dropout returns epistemic variance keys         |
-| `Test_RemovedClass`                | Ensemble training and variance-aware predictions   |
-| `_RemovedTestClass`      | Unified UQ interface with variance decomposition   |
-| `TestPhysicsCheckEpistemic`       | Check 6: epistemic uncertainty threshold           |
-| `_RemovedTestClass`         | Binary search finds minimum sensor count           |
-| `TestMLModelFactory`              | ML-based objective in greedy selection              |
-| `TestObservabilityPenalty`        | Condition number penalty in Bayesian refinement    |
-| `TestModelSelectionReport`        | Report generation from training results            |
-| `TestExplanationCard`             | Per-prediction card with SHAP_REMOVEDand physics checks   |
-| `_RemovedTestClass`     | Heatmap visualization of contribution analysiss      |
-| `TestCampbellConfidenceBands`     | Confidence bands on Campbell diagram               |
-| `TestCampbellCrossingMarkers`     | Engine-order crossing detection and marking        |
-
-#### Sensor Optimization Tests (test_optimization.py)
-
-| Test class                        | What it validates                                  |
-|-----------------------------------|----------------------------------------------------|
-| `_RemovedTestClass`    | FIM shape, symmetry, positive semi-definiteness, identity noise equivalence, position-based input |
-| `_RemovedTestClass`        | Output keys; MAC diagonal = 1.0; condition number >= 1.0 |
-| `_RemovedTestClass`     | Greedy selection monotonicity; correct sensor count bounds; empty modal results edge case |
-
-#### Physics and Explainability Tests (test_optimization.py)
-
-| Test class                     | What it validates                                     |
-|--------------------------------|-------------------------------------------------------|
-| `_RemovedTestClass`  | Valid predictions pass all checks; invalid ND flagged; negative frequency flagged; empty predictions handled; whirl ordering violation detected |
-| `_RemovedTestClass`      | Platt, isotonic, temperature, and conformal methods produce valid confidence in [0, 1]; conformal adds prediction intervals; invalid method raises `ValueError` |
-| `TestCalibratedModel`          | Wrapper correctly delegates predict and applies transform |
-
 ---
 
 ## Continuous Integration
@@ -408,48 +183,29 @@ The test suite requires at minimum:
 - `scikit-learn`
 - `pytest`
 
-Optional dependencies for full coverage:
-
-- `internal model` -- enables Internal model path in Tier 2 (falls back to RandomForest)
-- `torch` -- enables Tiers 4-6 tests
-- `internal analysis` -- enables SHAP_REMOVEDvalue tests
-- `internal tracker` -- enables experiment tracking (falls back to no-op proxy)
-- `internal` -- enables Bayesian analysis refinement
-
 ### CI Configuration Notes
 
 1. **Seed determinism**: most tests use explicit RNG seeds
-   (`np.random.default_rng(seed)`) for reproducibility. The condition-based
-   split uses `seed=42`. PyTorch tiers may exhibit minor variation across
-   platforms due to floating-point non-determinism.
+   (`np.random.default_rng(seed)`) for reproducibility.
 
-2. **Device selection**: `_RemovedClass.device="auto"` auto-selects CUDA >
-   MPS > CPU. In CI environments without GPU, tests run on CPU with no
-   configuration changes needed.
-
-3. **Test data**: ML and optimization tests use synthetically generated data
-   via `_make_synthetic_dataset(n_samples, n_features, seed)`. FEA-dependent
-   tests (solver, sensors, signal_gen, dataset, integration, validation)
+2. **Test data**: FEA-dependent tests (solver, integration, validation)
    require mesh files in `tests/test_data/` and will skip if not found.
 
-4. **Timeouts**: Tier 1-3 tests complete in under 5 seconds. Tier 4-6 tests
-   (when PyTorch is available) may take 10-30 seconds depending on hardware.
-   Setting `config.epochs` to a small value (2-5) in test configurations
-   keeps training fast. C++ validation tests take ~10 minutes total (Leissa
-   flat disk, Kwak added mass, and Coriolis splitting each require full
-   cyclic symmetry solves).
+3. **Timeouts**: Python tests complete in under 5 seconds. C++ validation
+   tests take ~10 minutes total (Leissa flat disk, Kwak added mass, and
+   Coriolis splitting each require full cyclic symmetry solves).
 
-5. **Fixture dependencies**: `test_io.py`, `test_viz.py`, and
+4. **Fixture dependencies**: `test_io.py`, `test_viz.py`, and
    `test_python_bindings.py` require the compiled C++ extension module
    (`turbomodal._core`) and mesh fixture files. These tests will be skipped
    if the C++ extension is not built.
 
-6. **Session-scoped fixtures**: `conftest.py` provides session-scoped
+5. **Session-scoped fixtures**: `conftest.py` provides session-scoped
    `wedge_mesh_path` and `leissa_mesh_path` fixtures to avoid redundant
    mesh loading. Module-scoped test fixtures (e.g. `wedge_mesh` in
    `test_solver.py`) depend on these.
 
-7. **Pytest markers**: `@pytest.mark.validation` gates slow Python
+6. **Pytest markers**: `@pytest.mark.validation` gates slow Python
    validation tests (Leissa, Kwak, FMM, Campbell, SDOF FRF).
    `@pytest.mark.slow` is available for other long-running tests. Register
    markers in `conftest.py` via `pytest_configure`.

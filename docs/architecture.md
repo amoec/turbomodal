@@ -2,20 +2,14 @@
 
 ## Overview
 
-turbomodal is structured around four subsystems that form an end-to-end
-pipeline for turbomachinery modal identification. Data flows from finite
-element analysis through signal synthesis and feature extraction into
-machine learning models, with optimisation and explainability layered on
-top.
+turbomodal is a finite element solver and visualisation toolkit for
+turbomachinery modal analysis. Data flows from CAD/mesh import through a
+cyclic-symmetry eigenvalue solver into post-processing and visualisation.
 
-The four subsystems are:
-
-| Subsystem | Concern                      | Language | Key Modules              |
-|-----------|------------------------------|----------|--------------------------|
-| A         | FEA and Geometry             | C++      | `_core`, `io`, `solver`  |
-| B         | Signals and Noise            | Python   | `sensors`, `noise`, `signal_gen` |
-| C         | ML Pipeline                  | Python   | `ml.features`, `ml.models`, `ml.pipeline` |
-| D         | Optimisation and Explainability | Python | `optimization.sensor_placement`, `optimization.explainability` |
+| Layer          | Concern                      | Language | Key Modules                          |
+|----------------|------------------------------|----------|--------------------------------------|
+| FEA Core       | Solver and Geometry          | C++      | `_core`, `io`, `solver`              |
+| Visualisation  | Post-processing and Display  | Python   | `viz`, `bc_editor`, `mac`, `_utils`  |
 
 ## System Architecture
 
@@ -27,89 +21,43 @@ The four subsystems are:
                                |
                                v
                   +------------+----------------+
-                  |       Subsystem A           |
-                  |    FEA & Geometry (C++)     |
-                  |                             |
-                  |  inspect_cad() -> CadInfo   |
-                  |  plot_cad() (preview)       |
-                  |  load_cad() / load_mesh()   |
-                  |  plot_full_mesh() (verify)  |
-                  |             |               |
-                  |             v               |
-                  |    CyclicSymmetrySolver     |
-                  |      .solve_at_rpm()        |
-                  |             |               |
-                  |             v               |
-                  |  ModalResult                |
-                  |    .frequencies             |
-                  |    .mode_shapes             |
-                  |    .harmonic_index          |
-                  |    .whirl_direction         |
-                  +--------------+--------------+
-                                 |               
-                  mode shapes,   |         HDF5 dataset
-                  frequencies    |     (export_modal_results)
-                                 v               |
-                  +-------------------------+    |
-                  |       Subsystem B       |    |
-                  |  Signals & Noise (Py)   |    |
-                  |                         |    |
-                  |  _RemovedClass     |    |
-                  |    .sample_mode_shape() |    |
-                  |    .generate_time_      |    |
-                  |        signal()         |    |
-                  |                         |    |
-                  |  _RemovedClass            |    |
-                  |    + _removed()      |    |
-                  |                         |    |
-                  |  _RemovedClass |    |
-                  |    + generate_signals_  |    |
-                  |       for_condition()   |    |
-                  +------------+------------+    |
-                               |                 |
-                    synthetic  |                 |
-                    signals    |                 |
-                               v                 v
-                  +------------+-------------------+
-                  |       Subsystem C              |
-                  |    ML Pipeline (Python)        |
-                  |                                |
-                  |                    |    (STFT, mel, order tracking, |
-                  |     TWD, cross-spectral,       |
-                  |     physics-informed)          |
-                  |          |                     |
-                  |          v                     |
-                  |                    |          |                     |
-                  |          v                     |
-                  |                    |    Complexity ladder           |
-                  |    Tiers 1-6 + variants        |
-                  |    Internal HPO / GroupKFold CV  |
-                  |          |                     |
-                  |          v                     |
-                  |  _RemovedClass.predict()         |
-                  |                    |  _RemovedClass                |
-                  |    -> nodal_diameter           |
-                  |    -> whirl_direction          |
-                  |    -> amplitude                |
-                  |    -> wave_velocity            |
-                  |    -> confidence               |
-                  +--------------+-----------------+
-                                 |
-                     predictions |
-                                 v
-                  +--------------+----------------+
-                  |       Subsystem D             |
-                  |  Optimisation &               |
-                  |  Explainability (Python)      |
-                  |                               |
-                  |                    |    (minimize_sensors mode)    |
-                  |                    |  compute_grad_cam()           |
-                  |                    |                    |  generate_model_selection_    |
-                  |      report()                 |
-                  |                    |                    +-------------------------------+
+                  |    Geometry Import (Python)  |
+                  |                              |
+                  |  inspect_cad() -> CadInfo    |
+                  |  load_cad() / load_mesh()    |
+                  +------------+----------------+
+                               |
+                               v
+                  +------------+----------------+
+                  |    FEA Solver (C++)          |
+                  |                              |
+                  |  CyclicSymmetrySolver        |
+                  |    .solve_at_rpm()           |
+                  +------------+----------------+
+                               |
+                               v
+                  +------------+----------------+
+                  |    ModalResult               |
+                  |      .frequencies            |
+                  |      .mode_shapes            |
+                  |      .harmonic_index          |
+                  |      .whirl_direction         |
+                  +------------+----------------+
+                               |
+                               v
+                  +------------+----------------+
+                  |    Visualisation (Python)    |
+                  |                              |
+                  |  plot_cad() (CAD preview)    |
+                  |  plot_full_mesh()            |
+                  |  plot_campbell / plot_zzenf   |
+                  |  diagnose_frequencies()      |
+                  |  bc_editor (constraints)     |
+                  |  mac (MAC matrix)            |
+                  +-----------------------------+
 ```
 
-## Subsystem A: FEA and Geometry
+## FEA and Geometry
 
 ### C++ Backend
 
@@ -197,332 +145,34 @@ The `mode_identification.cpp` module provides:
   structs with nodal diameter, nodal circle, whirl direction, frequency,
   wave velocity, participation factor, and family label.
 
-## 
+## Visualisation
 
-### _RemovedClass
+### viz.py
 
-Defined in `internal.py. Maps FE mode shapes to discrete sensor locations
-using a sparse interpolation matrix. Key operations:
+Provides plotting functions built on PyVista and Matplotlib:
 
-- `build_interpolation_matrix()` -- constructs a `(n_sensors, n_dof)` sparse
-  CSR matrix by finding the nearest mesh node to each sensor and projecting
-  the three displacement DOFs onto the sensor measurement direction.
-- `sample_mode_shape(mode_shape)` -- returns a complex `(n_sensors,)` vector
-  of projected sensor readings for one mode.
-- `generate_time_signal(modal_results, rpm, ...)` -- synthesises a
-  `(n_sensors, n_samples)` time-domain signal by superposing all modal
-  contributions.
-
-Four sensor types are supported via the `_RemovedEnum` enum:
-
-| Type                   | Typical Use                                      |
-|------------------------|--------------------------------------------------|
-| `BTT_PROBE`            | Blade tip timing (radial direction)              |
-| `STRAIN_GAUGE`         | On-blade strain (tangential)                     |
-| `CASING_ACCELEROMETER` | Casing vibration monitoring                      |
-| `DISPLACEMENT`         | Direct displacement measurement (any direction)  |
-
-Convenience constructors `_RemovedClass.default_btt_array()` and
-`_RemovedClass.default_strain_gauge_array()` generate uniformly spaced
-circumferential sensor rings. `_RemovedClass.default_displacement_array()`
-places displacement probes at user-specified positions with a configurable
-measurement direction (`"axial"`, `"radial"`, or an arbitrary vector).
-
-### Noise Model
-
-Defined in `internal.py. The `_RemovedClass` dataclass controls six noise effects
-applied in sequence by `_removed()`:
-
-1. Harmonic interference -- sinusoidal tones at configurable frequencies.
-2. Additive Gaussian white noise at a specified SNR (dB).
-3. Bandwidth limiting -- Butterworth low-pass filter.
-4. Sensor drift -- linear ramp or random walk.
-5. ADC quantisation -- bit-depth simulation.
-6. Signal dropout -- random per-sample zeroing.
-
-### Signal Generation Pipeline
-
-Defined in `internal.py. The `_RemovedClass` dataclass controls
-sample rate, duration, amplitude mode (`"unit"`, `"forced_response"`,
-`"random"`), and mode filtering. Two orchestrator functions:
-
-- `_removed()` -- generates signals for a single
-  operating condition from a list of `ModalResult` objects.
-- `_removed()` -- generates signals for an entire parametric
-  dataset across multiple operating conditions.
-
-## 
-
-### Design Rationale -- Complexity Ladder
-
-The ML pipeline implements an iterative complexity ladder. The idea is to
-start with the simplest possible model and escalate only when simpler
-approaches fail to meet performance targets. This design provides:
-
-- Interpretability by default (Tier 1-2 models are fully inspectable).
-- Faster iteration during early development.
-- A principled stopping criterion: the ladder halts when all four performance
-  targets are met or when the marginal improvement between tiers drops below
-  `performance_gap_threshold`.
-
-### Tier Definitions
-
-| Tier | Class                   | Architecture                            | Interpretability |
-|------|-------------------------|-----------------------------------------|------------------|
-| 1    | `Linear_RemovedClass`     | LogisticRegression + Ridge              | Full             |
-| 2    | `Tree_RemovedClass`       | Internal model / Internal model / RandomForest       | High             |
-| 3    | `SVM_RemovedClass`        | SVC + SVR with RBF kernel, StandardScaler | Medium         |
-| 4    | `ShallowNN_RemovedClass`  | 2-hidden-layer MLP (128 -> 64), PyTorch | Medium           |
-| 5    | `CNN_RemovedClass`        | 1-D CNN (Conv-BN-ReLU x2 + pool), PyTorch | Low            |
-| 6    | `Temporal_RemovedClass`   | Conv front-end + BiLSTM, PyTorch        | Low              |
-
-All tiers implement the `_RemovedClass` protocol, which defines four methods:
-
-Tiers 1, 5, and 6 support architectural variants:
-
-- **Tier 1**: `Linear_RemovedClass(variant="lasso")` -- uses Lasso (L1) instead of Ridge (L2).
-- **Tier 5**: `CNN_RemovedClass(variant="resnet")` -- 1-D ResNet with residual blocks.
-- **Tier 6**: `Temporal_RemovedClass(variant="transformer")` -- Transformer encoder with sinusoidal positional encoding.
-
-```python
-class _RemovedClass(Protocol):
-    def train(self, X, y, config) -> dict[str, float]: ...
-    def predict(self, X) -> dict[str, np.ndarray]: ...
-    def save(self, path) -> None: ...
-    def load(self, path) -> None: ...
-```
-
-Every model predicts a dict with keys: `mode_present` (N, M) sigmoid
-probabilities, `mode_classes` (M,) encoded mode labels, `amplitude` (N, M)
-per-mode amplitude, `wave_velocity` (N, M) per-mode velocity, and
-`confidence` (N, M) per-mode detection confidence.
-
-### Feature Extraction
-
-Defined in `internal`. The `_RemovedClass` dataclass selects one of
-four feature types:
-
-| `feature_type`    | Description                                    |
-|-------------------|------------------------------------------------|
-| `"spectrogram"`   | Time-averaged STFT magnitude per sensor        |
-| `"mel"`           | Mel-scale filterbank applied to STFT magnitude |
-| `"order_tracking"`| Complex amplitude at integer engine orders     |
-| `"twd"`           | Traveling Wave Decomposition via spatial DFT   |
-
-An optional cross-spectral density overlay (`include_cross_spectra=True`)
-appends coherence-thresholded CSD magnitudes for all sensor pairs.
-
-A fifth feature type, `"physics"`, computes domain-specific features
-including frequency ratios relative to blade-alone frequencies, centrifugal
-stiffening corrections, and temperature-dependent Young's modulus scaling.
-
-The `returns a 1-D feature vector. The `automates the full loop: load HDF5 dataset, generate signals per condition,
-extract features, and collect ground-truth labels into `(X, y)` arrays.
-
-### Training Pipeline
-
-Defined in `internal`. The `complexity ladder:
-
-1. **Data loading** -- accepts pre-built `(X, y)` arrays or a `.npz` file.
-2. **Data splitting** -- condition-based splitting via `GroupShuffleSplit` to
-   prevent data leakage between operating conditions that share physical
-   parameters. Falls back to random splitting when `split_by_condition=False`.
-3. **Complexity ladder** -- iterates tiers 1 through `max_tier`, trains each,
-   evaluates on the validation set, and stops when targets are met or
-   diminishing returns are detected.
-4. **Final evaluation** -- the best model is evaluated on a held-out test set.
-5. **Internal tracker logging** -- all metrics, parameters, and timing are logged
-   automatically. The `_Internal trackerProxy` class silently no-ops when internal tracker is
-   not installed.
-
-Additional pipeline features:
-
-- **Internal HPO** -- when `use_internal=True`, each tier's hyperparameters are
-  tuned via Internal TPE sampling with cross-validated scoring before training.
-- **GroupKFold CV** -- cross-validation uses `GroupKFold` to prevent condition
-  leakage across folds.
-- **_RemovedClass** -- when `independent_subtasks=True`, each of the four
-  sub-tasks runs its own complexity ladder, potentially selecting different
-  tiers.
-- **OOD evaluation** -- when `ood_fraction > 0`, extreme operating conditions
-  are held out as an out-of-distribution test set.
-- **ECE and latency** -- `evaluate_model` reports Expected Calibration Error
-  and per-sample inference latency alongside the six standard metrics.
-
-### Performance Targets
-
-Configured via `_RemovedClass`:
-
-| Metric              | Default Target | Description                              |
-|---------------------|----------------|------------------------------------------|
-| `mode_detection_f1` | >= 0.92        | Sample-averaged F1 on multi-label mode presence |
-| `amplitude_mape`    | <= 0.08        | Per-mode MAPE on amplitude (masked)      |
-| `velocity_r2`       | >= 0.93        | Per-mode R-squared on wave velocity (masked) |
-
-### Prediction Targets
-
-Every model produces predictions for five quantities:
-
-1. `nodal_diameter` -- integer, the circumferential wave number.
-2. `whirl_direction` -- `+1` (forward), `-1` (backward), `0` (standing).
-3. `amplitude` -- peak vibration amplitude.
-4. `wave_velocity` -- circumferential wave propagation speed in m/s.
-5. `confidence` -- model confidence score in `[0, 1]`.
-
-(Frequency is currently passed through from the feature extraction stage
-rather than predicted by the ML model.)
-
-## 
-
-### Sensor Placement Optimisation
-
-Defined in `internal`. The optimisation proceeds in
-four stages:
-
-**Stage 1 -- FIM Pre-screening.** `the trace of the Fisher Information Matrix at each candidate sensor position.
-Candidates are ranked by information gain and filtered by a minimum angular
-spacing constraint.
-
-**Stage 2 -- Greedy Forward Selection.** Sensors are added one at a time,
-choosing the candidate that maximises `log det(FIM)` (D-optimal design). The
-greedy loop runs until `max_sensors` is reached.
-
-**Stage 3 -- Bayesian Refinement (optional).** When
-`optimization_method="bayesian"`, Internal's TPE sampler fine-tunes the angular
-positions of the sensors selected in Stage 2 within the minimum-spacing
-tolerance band.
-
-**Stage 4 -- Robustness Validation.** Monte Carlo trials simulate sensor
-dropout and position perturbation. The output `_RemovedClass`
-reports the fraction of trials that maintained acceptable conditioning and the
-mean degradation from single-sensor dropout.
-
-The full pipeline is exposed as:
-
-```python
-_removed_func(mesh, modal_results, config) -> _RemovedClass
-```
-
-The `_RemovedClass` dataclass provides `sensor_positions`,
-`num_sensors`, `objective_value`, `observability_matrix`,
-`condition_number`, `robustness_score`, and `dropout_degradation`.
-
-**Minimize-sensors mode**: when `config.mode="minimize_sensors"`, the
-optimizer uses binary search over the sensor count to find the minimum
-number of sensors that achieve acceptable conditioning, rather than
-maximizing performance with a fixed count.
-
-**ML model factory**: when an `ml_model_factory` callable is provided,
-greedy selection uses it as the objective once enough sensors are selected,
-allowing the optimizer to directly optimize ML prediction quality.
-
-**Observability penalty**: during Bayesian refinement, the objective
-includes a penalty term `−weight * log(condition_number)` controlled by
-`config.observability_penalty_weight`, discouraging ill-conditioned
-configurations.
-
-### Observability Analysis
-
-`compute_observability()` computes the condition number and singular values
-of the sensor-space mode shape matrix, plus the Modal Assurance Criterion
-(MAC) matrix for all mode pairs. A high condition number indicates that some
-modes are poorly distinguishable with the current sensor configuration.
-
-### SHAP_REMOVEDValues
-
-`_removed_func(model, signals)` uses TreeSHAP_REMOVEDfor tree-based models
-(Tier 2) and KernelSHAP_REMOVEDfor all other model types. Returns a
-`(n_samples, n_features, n_outputs)` array showing the contribution of each
-feature to each of the four prediction targets (mode class, whirl, amplitude,
-velocity).
-
-### Grad-CAM
-
-`compute_grad_cam(model, signals, target_class)` is applicable to Tiers 5-6
-only. It registers forward and backward hooks on the last convolutional layer,
-computes gradient-weighted activation maps, and returns a `(batch, length)`
-heatmap normalised to `[0, 1]` showing which spectral regions drove the
-classification decision.
-
-### Physics Consistency Check
-
-`_removed_func(predictions, num_sectors, rpm, blade_radius)`
-applies five rule-based constraints:
-
-1. **Positive frequency** -- `f > 0`.
-2. **Valid nodal diameter** -- `0 <= ND <= N/2` where `N` is the blade count.
-3. **Valid whirl direction** -- whirl in `{-1, 0, +1}`.
-4. **Whirl frequency ordering** -- for each ND group, the minimum forward-whirl
-   frequency must be >= the maximum backward-whirl frequency (gyroscopic
-   splitting).
-5. **Velocity consistency** -- `v_predicted` agrees with
-   `2 * pi * f * R / ND` within 50% (for `ND > 0`).
-
-Returns `is_consistent`, `violations`, `consistency_score`, and
-`anomaly_flag` arrays.
-
-A sixth check is available when epistemic uncertainty is provided:
-
-6. **Epistemic uncertainty threshold** -- when `epistemic_uncertainty` is
-   passed, predictions with uncertainty exceeding `epistemic_threshold`
-   (default 0.1) are flagged as violations.
-
-### Uncertainty Quantification
-
-Three mechanisms provide prediction uncertainty:
-
-- **MC Dropout** (`mc_dropout_predict`): stochastic forward passes with
-  dropout enabled at inference time (Tiers 4-6).
-- **Deep Ensembles** (`_RemovedClass`): independently trained model ensemble
-  with majority-vote classification and mean regression.
-- **Heteroscedastic output heads**: optional log-variance heads on all
-  PyTorch architectures for per-sample aleatoric uncertainty.
-
-The `_removed_func(model, X, method)` function returns standard
-predictions plus aleatoric/epistemic/total variance decomposition.
-
-### Model Selection Report and Explanation Cards
-
-`_removed_func(training_report)` produces a structured
-summary of the complexity ladder results, including per-tier metrics, score
-gap analysis, and the rationale for tier selection.
-
-`_removed_func(model, X_single, predictions, ...)` generates a
-per-prediction card with SHAP_REMOVEDattributions, physics consistency results,
-confidence intervals from uncertainty, and a human-readable summary.
-
-### Visualization Extensions
-
-- `plot_cad(filepath, num_sectors, ...)` provides pre-mesh CAD geometry
-  preview using a lightweight surface triangulation. Supports single-sector
-  and full-disk views with dimension annotations.
-- `plot_full_mesh(mesh)` renders the full 360-degree mesh by replicating
+- `plot_cad(filepath, num_sectors, ...)` -- pre-mesh CAD geometry preview
+  using a lightweight surface triangulation. Supports single-sector and
+  full-disk views with dimension annotations.
+- `plot_full_mesh(mesh)` -- renders the full 360-degree mesh by replicating
   the single sector, without requiring a solved `ModalResult`.
-- `plot_campbell` and `plot_zzenf` accept `confidence_bands`, `crossing_markers`,
-  `stator_vanes` (NPF line overlay), and `style` (`DiagramStyle` dataclass) to
-  control all visual properties. Both functions share a unified parameter set.
-- `diagnose_frequencies(results, ground_truth, num_sectors)` compares solver
-  output against a 2-D ground truth matrix and produces error heatmaps,
-  per-ND bar charts, and parity scatter plots.
-- `_removed_func(internal analysis_values, sensor_names, mode_names)` renders
-  a heatmap of per-sensor SHAP_REMOVEDcontributions across mode families.
+- `plot_campbell` and `plot_zzenf` -- interference diagram plotting with
+  `confidence_bands`, `crossing_markers`, `stator_vanes` (NPF line overlay),
+  and `style` (`DiagramStyle` dataclass) to control all visual properties.
+  Both functions share a unified parameter set.
+- `diagnose_frequencies(results, ground_truth, num_sectors)` -- compares
+  solver output against a 2-D ground truth matrix and produces error
+  heatmaps, per-ND bar charts, and parity scatter plots.
 
-### Confidence Calibration
+### bc_editor.py
 
-`_removed_func(model, X_val, y_val, method)` wraps a trained model in
-a `CalibratedModel` that transforms raw confidence scores. Four methods are
-available:
+Interactive boundary condition editor for defining displacement constraints
+on mesh surfaces.
 
-| Method        | Technique                                              |
-|---------------|--------------------------------------------------------|
-| `"platt"`     | Logistic regression on raw confidence vs. correctness  |
-| `"isotonic"`  | Isotonic regression on raw confidence vs. correctness  |
-| `"temperature"` | Temperature scaling that minimises binary cross-entropy |
-| `"conformal"` | Conformal prediction intervals for regression targets  |
+### mac.py
 
-The conformal method additionally adds `prediction_interval_lower` and
-`prediction_interval_upper` keys to the prediction output, providing 90%
-coverage intervals for amplitude and wave velocity.
+Computes the Modal Assurance Criterion (MAC) matrix for comparing mode shape
+similarity between two sets of eigenvectors.
 
 ## C++ / Python Boundary
 
@@ -554,9 +204,9 @@ The Python layer adds:
   Campbell diagram extraction.
 - Visualisation (`viz.py`) via PyVista and Matplotlib, including pre-mesh
   CAD preview (`plot_cad`) and full annulus mesh display (`plot_full_mesh`).
-- Signal synthesis (`internal.py, `internal.py, `internal.py).
-- HDF5 dataset management (`internal.py, `internal.py).
-- The entire ML and optimisation pipeline (`ml/`, `optimization/`).
+- Boundary condition editing (`bc_editor.py`) for interactive constraint
+  definition.
+- Modal Assurance Criterion computation (`mac.py`).
 
 ## Design Decisions
 
@@ -569,41 +219,10 @@ Exploiting this reduces the eigenvalue problem from the full annulus
 is an 18x reduction in problem size, making parametric sweeps over thousands
 of operating conditions tractable.
 
-### Why the Complexity Ladder
-
-Classical approaches to turbomachinery modal identification use
-physics-based signal processing (order tracking, traveling wave
-decomposition). These work well under clean conditions but degrade with noise,
-sensor failures, or closely spaced modes. Pure deep learning approaches
-require large labelled datasets that are expensive to obtain from physical
-test rigs.
-
-The complexity ladder bridges these extremes: Tier 1-3 models are fast,
-interpretable, and need only moderate data. If they fail to meet targets, the
-pipeline automatically escalates to neural network tiers that can learn
-nonlinear patterns from the synthetic datasets generated by Subsystems A-B.
-
-### Why Condition-Based Splitting
-
-Operating conditions (RPM, temperature, pressure ratio) define the physics of
-a measurement. Randomly splitting individual samples would allow the model to
-see signals from the same operating condition in both training and test sets,
-creating data leakage. The `GroupShuffleSplit` strategy ensures entire
-conditions are held out, producing realistic generalisation estimates.
-
 ### Deferred Imports Pattern
 
-Optional dependencies (PyTorch, Internal model, Internal analysis, Internal, Internal tracker) are imported
-inside function bodies rather than at module level. This allows users to
-`import turbomodal` and use the core FEA functionality without installing
-ML-specific packages. An `ImportError` is raised only when a specific
+Optional dependencies (PyVista, gmsh, Matplotlib) are imported inside
+function bodies rather than at module level. This allows users to
+`import turbomodal` and use the core solver without installing heavy
+visualisation packages. An `ImportError` is raised only when a specific
 function that requires the missing dependency is called.
-
-### HDF5 Dataset Layout
-
-Modal results are stored in a hierarchical HDF5 layout with groups for mesh
-data, operating conditions (as a structured NumPy array), and per-condition
-modal results indexed by condition ID. Mode shapes are stored as
-`(n_harmonics, n_modes, n_dof)` complex128 arrays with optional gzip
-compression. This layout supports random access to individual conditions
-without loading the entire file.

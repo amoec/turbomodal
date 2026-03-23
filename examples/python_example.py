@@ -70,17 +70,4 @@ print(f"\nPlotting ZZENF diagram at {rpm_vals[-1]:.0f} RPM...")
 fig = tm.plot_zzenf(sweep[-1], num_sectors=36)
 plt.show()
 
-# --- 9. Generate sensor signals ---
-print("\nGenerating BTT sensor signals...")
-sensors = tm._RemovedClass.default_btt_array(
-    num_probes=8, casing_radius=0.15, axial_positions=[0.0],
-    sample_rate=100_000.0, duration=0.1,
-)
-sensor_array = tm._RemovedClass(mesh, sensors)
-signals = sensor_array.generate_time_signal(results, rpm=10000)
-print(f"  {signals.shape[0]} channels, {signals.shape[1]} samples")
-
-# See data_generation_pipeline.py for the full data generation workflow
-# and ml_pipeline.py for training an ML model on synthetic data.
-
 print("\nDone.")
