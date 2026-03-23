@@ -61,10 +61,6 @@ env/
 .venv/
 .env/
 
-# Internal tracker
-
-
-
 # Jupyter
 .ipynb_checkpoints/
 
@@ -74,5 +70,4 @@ logs/
 tmp/
 filestructure.txt
 build/.cmake
-
 demo_bc_editor.py

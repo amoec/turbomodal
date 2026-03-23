@@ -1,7 +1,7 @@
 """Modal Assurance Criterion (MAC) utilities.
 
 Provides vectorized MAC computation for comparing mode shapes,
-used by analysis, mode tracking, and result validation.
+used by mode tracking and result validation.
 """
 
 from __future__ import annotations

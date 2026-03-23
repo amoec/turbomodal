@@ -9,27 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Full-annulus virtual probe signal generation model with correct
-  circumferential phase factor (`-w·k·θ_s`) for stationary-frame
-  sensors (`_removed`).
-- Rotating vs stationary sensor distinction: strain gauges observe
-  rotating-frame frequency; BTT probes and casing accelerometers
-  observe Doppler-shifted stationary-frame frequency.
-- Blade passage gating via ray tracing against the full-annulus
-  surface mesh — works for any stationary sensor and orientation,
-  no tolerance heuristics required.
-- BTT discrete output: `btt_arrival_times`, `btt_deflections`, and
-  `btt_blade_indices` in signal generation result dict.
-- `is_stationary` field on `_RemovedClass` for explicit rotating/
-  stationary classification (inferred from `sensor_type` by default).
-- `mesh` property on `_RemovedClass`.
-- `sensor_circumferential_angles()` method on `_RemovedClass`.
-- `blade_tip_profile()` method on `_RemovedClass`.
-- Time vector control on `_RemovedClass`: `time` (custom
-  array), `t_start`, `t_end`, and `damping_ratio` fields.
-
 ---
 
 ## [0.1.0] - 2026-02-26
@@ -59,38 +38,6 @@ Initial production release.
 - C++ mode identification: nodal circle counting, family classification,
   and whirl direction (`identify_modes`).
 
-**
-
-- Virtual sensor array with BTT probes, strain gauges, accelerometers, and
-  displacement sensors (`_RemovedClass`, `_RemovedClass`).
-- Signal synthesis pipeline (`_removed`).
-- Noise models: Gaussian, harmonic interference, signal drift, bandwidth
-  limiting, ADC quantisation, and signal dropout (`_RemovedClass`, `_removed`).
-- HDF5 dataset management with parametric sweeps driven by Latin Hypercube
-  Sampling (`_removed`).
-
-**
-
-- 6-tier complexity ladder: Linear, Tree (Internal model/Internal model/RF), SVM,
-  Shallow NN, 1-D CNN (with ResNet variant), Conv+BiLSTM (with Transformer
-  variant).
-- Physics-informed feature extraction: spectrogram, mel, order tracking,
-  traveling wave decomposition, cross-spectral density.
-- Automatic hyperparameter optimization via Internal TPE sampling.
-- Uncertainty quantification: MC Dropout, Deep Ensembles, heteroscedastic
-  output heads.
-- Internal tracker experiment tracking with automatic no-op fallback.
-
-**
-
-- Sensor placement optimization: Fisher Information pre-screening, greedy
-  forward selection, Bayesian refinement, minimize-sensors mode.
-- SHAP_REMOVEDvalues and Grad-CAM attribution for model explainability.
-- Physics consistency validation (6 rule-based checks).
-- Confidence calibration: Platt, isotonic, temperature scaling, conformal
-  prediction.
-- Per-prediction explanation cards and model selection reports.
-
 **Visualization**
 
 - Mesh and full-annulus mesh plotting (`plot_mesh`, `plot_full_mesh`).
@@ -104,7 +51,6 @@ Initial production release.
 - Frequency diagnostic comparison against ground truth with error
   heatmaps, per-ND bar charts, and parity scatter plots
   (`diagnose_frequencies`).
-- Contribution analysis heatmap (`_removed_func`).
 
 **Testing**
 
@@ -112,9 +58,8 @@ Initial production release.
   cyclic symmetry, added mass, potential flow, rotating effects, damping,
   forced response, mistuning, mode identification, validation, and
   integration.
-- 13 Python test files covering bindings, I/O, visualization, solver,
-  datasets, parametric sweeps, sensors, noise, signal generation, ML
-  pipeline, optimization, validation, and end-to-end integration.
+- 8 Python test files covering bindings, I/O, visualization, solver,
+  validation, and end-to-end integration.
 - Validation against Leissa plate theory, Kwak added mass analytical
   solutions, Coriolis splitting, FMM tuned-system identity, and SDOF FRF.
 
