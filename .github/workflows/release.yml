@@ -115,13 +115,9 @@ jobs:
             **From PyPI:**
             ```bash
             pip install turbomodal==${{ github.ref_name }}
-
-            # With ML pipeline (scikit-learn, PyTorch, Internal tracker, etc.):
-            pip install turbomodal
             ```
 
             **From a downloaded wheel:**
             ```bash
             pip install turbomodal-*.whl
-            pip install turbomodal   # adds ML dependencies
             ```

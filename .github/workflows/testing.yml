@@ -70,5 +70,4 @@ jobs:
             Download the `.whl` for your platform and Python version and install with:
             ```
             pip install turbomodal-*.whl --force-reinstall
-            pip install turbomodal   # adds ML dependencies
             ```

@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Sequence
+from typing import Sequence
 
 import numpy as np
 
@@ -25,8 +25,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    
 
 @dataclass
 class BoundaryCondition:
@@ -162,7 +160,7 @@ def solve(
     include_coriolis: bool = False,
     min_frequency: float = 0.0,
     temperature: float | None = None,
-    condition: _RemovedClass | None = None,
+    condition: "Any | None" = None,
     boundary_conditions: list[BoundaryCondition] | None = None,
     show_convergence: bool = False,
     memory_reserve_fraction: float = 0.2,

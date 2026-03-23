@@ -39,7 +39,6 @@ from turbomodal.viz import (
     plot_mesh,
     plot_mode,
     plot_full_mesh,
-    _removed_func,
     plot_cad,
     plot_campbell,
     plot_zzenf,
@@ -48,36 +47,6 @@ from turbomodal.viz import (
     interactive_plane_selector,
     bc_editor,
     plot_boundary_conditions,
-    _removed_func,
-    _removed_func,
-)
-
-# Subsystem B: Signal generation pipeline
-    _RemovedEnum,
-    _RemovedClass,
-    _RemovedClass,
-    _RemovedClass,
-)
-    _RemovedClass,
-    ExcitationModel,
-    RayHitGeometry,
-    _removed,
-    _removed,
-    filter_modal_results,
-    find_resonance_crossings,
-)
-
-# Subsystem A extensions: dataset & parametric sweep
-    _RemovedClass,
-    _RemovedClass,
-    export_modal_results,
-    load_modal_results,
-    load_signals,
-)
-    _RemovedClass,
-    _RemovedClass,
-    generate_conditions,
-    _removed,
 )
 
 # Modal comparison utilities
@@ -136,7 +105,6 @@ __all__ = [
     "plot_mesh",
     "plot_mode",
     "plot_full_mesh",
-    "_removed_func",
     "plot_cad",
     "plot_campbell",
     "plot_zzenf",
@@ -145,32 +113,6 @@ __all__ = [
     "interactive_plane_selector",
     "bc_editor",
     "plot_boundary_conditions",
-    "_removed_func",
-    "_removed_func",
-    # Sensors & noise
-    "_RemovedEnum",
-    "_RemovedClass",
-    "_RemovedClass",
-    "_RemovedClass",
-    "_RemovedClass",
-    "_removed",
-    # Signal generation
-    "_RemovedClass",
-    "ExcitationModel",
-    "RayHitGeometry",
-    "_removed",
-    "_removed",
-    "filter_modal_results",
-    # Dataset & parametric
-    "_RemovedClass",
-    "_RemovedClass",
-    "export_modal_results",
-    "load_modal_results",
-    "load_signals",
-    "_RemovedClass",
-    "_RemovedClass",
-    "generate_conditions",
-    "_removed",
     # Modal comparison
     "compute_mac",
     "compute_auto_mac",
