@@ -19,7 +19,7 @@ struct BoundaryFace {
     double area;
 };
 
-enum class BCType { FIXED, DISPLACEMENT, FRICTIONLESS };
+enum class BCType { FIXED, DISPLACEMENT, FRICTIONLESS, ELASTIC_SUPPORT, CYLINDRICAL };
 
 struct ConstraintGroup {
     std::string name;
@@ -29,6 +29,12 @@ struct ConstraintGroup {
     std::array<bool, 3> constrained_components = {true, true, true};
     // For FRICTIONLESS: outward surface normal (nodes slide in tangent plane)
     Eigen::Vector3d surface_normal = Eigen::Vector3d::Zero();
+    // For ELASTIC_SUPPORT: grounded spring stiffness per DOF (N/m)
+    Eigen::Vector3d spring_stiffness = Eigen::Vector3d::Zero();
+    // For CYLINDRICAL: cylinder axis direction and origin point.
+    // constrained_components[0]=radial, [1]=tangential, [2]=axial
+    Eigen::Vector3d cylinder_axis = Eigen::Vector3d::UnitZ();
+    Eigen::Vector3d cylinder_origin = Eigen::Vector3d::Zero();
 };
 
 class Mesh {

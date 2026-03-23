@@ -61,6 +61,9 @@ private:
     bool m_using_ldlt = true;
     bool m_pattern_set = false;
 
+    // Internal Lanczos implementation (wrapped in try-catch by solve())
+    Result solve_lanczos(const SpMatcd& K, const SpMatcd& M, const Config& cfg, int nev, int n);
+
     // Factorize (K - σM) with pattern caching
     bool factorize_shifted(const SpMatcd& K, const SpMatcd& M, double sigma);
     // Solve (K - σM) x = rhs

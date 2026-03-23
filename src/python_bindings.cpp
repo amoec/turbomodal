@@ -90,7 +90,9 @@ PYBIND11_MODULE(_core, m) {
     py::enum_<BCType>(m, "BCType")
         .value("FIXED", BCType::FIXED)
         .value("DISPLACEMENT", BCType::DISPLACEMENT)
-        .value("FRICTIONLESS", BCType::FRICTIONLESS);
+        .value("FRICTIONLESS", BCType::FRICTIONLESS)
+        .value("ELASTIC_SUPPORT", BCType::ELASTIC_SUPPORT)
+        .value("CYLINDRICAL", BCType::CYLINDRICAL);
 
     // --- ConstraintGroup ---
     py::class_<ConstraintGroup>(m, "ConstraintGroup")
@@ -100,12 +102,17 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("type", &ConstraintGroup::type)
         .def_readwrite("constrained_components", &ConstraintGroup::constrained_components)
         .def_readwrite("surface_normal", &ConstraintGroup::surface_normal)
+        .def_readwrite("spring_stiffness", &ConstraintGroup::spring_stiffness)
+        .def_readwrite("cylinder_axis", &ConstraintGroup::cylinder_axis)
+        .def_readwrite("cylinder_origin", &ConstraintGroup::cylinder_origin)
         .def("__repr__", [](const ConstraintGroup& cg) {
             std::string type_str;
             switch (cg.type) {
                 case BCType::FIXED: type_str = "FIXED"; break;
                 case BCType::DISPLACEMENT: type_str = "DISPLACEMENT"; break;
                 case BCType::FRICTIONLESS: type_str = "FRICTIONLESS"; break;
+                case BCType::ELASTIC_SUPPORT: type_str = "ELASTIC_SUPPORT"; break;
+                case BCType::CYLINDRICAL: type_str = "CYLINDRICAL"; break;
             }
             return "<ConstraintGroup '" + cg.name + "' " + type_str +
                    " with " + std::to_string(cg.node_ids.size()) + " nodes>";
@@ -211,6 +218,26 @@ PYBIND11_MODULE(_core, m) {
                    " num_converged=" + std::to_string(s.num_converged) + ">";
         });
 
+    // --- SolverProgress (rich callback data) ---
+    py::class_<SolverProgress>(m, "SolverProgress")
+        .def(py::init<>())
+        .def_readonly("completed", &SolverProgress::completed)
+        .def_readonly("total", &SolverProgress::total)
+        .def_readonly("harmonic_k", &SolverProgress::harmonic_k)
+        .def_readonly("converged", &SolverProgress::converged)
+        .def_readonly("iterations", &SolverProgress::iterations)
+        .def_readonly("num_converged", &SolverProgress::num_converged)
+        .def_readonly("num_modes", &SolverProgress::num_modes)
+        .def_readonly("max_residual", &SolverProgress::max_residual)
+        .def_readonly("min_freq_hz", &SolverProgress::min_freq_hz)
+        .def_readonly("max_freq_hz", &SolverProgress::max_freq_hz)
+        .def_readonly("elapsed_s", &SolverProgress::elapsed_s)
+        .def("__repr__", [](const SolverProgress& p) {
+            return "<SolverProgress " + std::to_string(p.completed) + "/" +
+                   std::to_string(p.total) + " k=" + std::to_string(p.harmonic_k) +
+                   (p.converged ? " converged" : " NOT converged") + ">";
+        });
+
     // --- ModalResult ---
     py::class_<ModalResult>(m, "ModalResult")
         .def(py::init<>())
@@ -309,9 +336,13 @@ PYBIND11_MODULE(_core, m) {
                 bool allow_condensation, double memory_reserve_fraction) {
                  ProgressCallback cpp_cb = nullptr;
                  if (!progress_cb.is_none()) {
-                     cpp_cb = [progress_cb](int done, int total, int k, bool conv) {
+                     // Wrap in shared_ptr so the lambda can be copied by
+                     // std::function without touching py::object refcount
+                     // (which requires the GIL).
+                     auto py_cb = std::make_shared<py::object>(std::move(progress_cb));
+                     cpp_cb = [py_cb](const SolverProgress& prog) {
                          py::gil_scoped_acquire gil;
-                         progress_cb(done, total, k, conv);
+                         (*py_cb)(prog);
                      };
                  }
                  py::gil_scoped_release release;
@@ -345,9 +376,10 @@ PYBIND11_MODULE(_core, m) {
                 py::object progress_cb) {
                  ProgressCallback cpp_cb = nullptr;
                  if (!progress_cb.is_none()) {
-                     cpp_cb = [progress_cb](int done, int total, int k, bool conv) {
+                     auto py_cb = std::make_shared<py::object>(std::move(progress_cb));
+                     cpp_cb = [py_cb](const SolverProgress& prog) {
                          py::gil_scoped_acquire gil;
-                         progress_cb(done, total, k, conv);
+                         (*py_cb)(prog);
                      };
                  }
                  py::gil_scoped_release release;

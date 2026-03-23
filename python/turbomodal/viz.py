@@ -2426,11 +2426,34 @@ def interactive_plane_selector(mesh: Mesh):
 
 
 _BC_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4"]
-_BC_TYPES = ["fixed", "displacement", "frictionless"]
+_BC_TYPES = ["fixed", "displacement", "frictionless", "elastic_support", "cylindrical"]
 
 
 def bc_editor(mesh: Mesh):
     """Interactive boundary condition editor.
+
+    Opens a Qt-based 3D editor with sidebar controls, multiple selection
+    modes (plane, box, named, face), and full undo/redo support.
+    Falls back to the legacy keyboard-driven editor if Qt is unavailable.
+
+    Parameters
+    ----------
+    mesh : Mesh object with cyclic boundaries identified
+
+    Returns
+    -------
+    list[BoundaryCondition]
+    """
+    try:
+        from turbomodal.bc_editor import BCEditorApp
+    except ImportError:
+        return _bc_editor_legacy(mesh)
+    app = BCEditorApp(mesh)
+    return app.run()
+
+
+def _bc_editor_legacy(mesh: Mesh):
+    """Legacy interactive boundary condition editor (keyboard-driven).
 
     Opens a 3D viewer where you can position cutting planes to define
     boundary condition node groups.  Surface nodes on the positive side
@@ -2501,6 +2524,10 @@ def bc_editor(mesh: Mesh):
     max_radius = bbox_diag * 1.5
 
     # --- Editor state ---
+    # Default cylinder axis from mesh rotation axis
+    _cyl_axis = np.zeros(3)
+    _cyl_axis[mesh.rotation_axis] = 1.0
+
     state = {
         "type_idx": 0,
         "components": [True, True, True],
@@ -2513,6 +2540,9 @@ def bc_editor(mesh: Mesh):
         "suppress_cb": False,
         "ready": False,
         "selection_radius": max_radius,  # start with full (unbounded) selection
+        "spring_k": [1e8, 1e8, 1e8],    # default spring stiffness (N/m) per DOF
+        "cyl_axis": _cyl_axis.copy(),
+        "cyl_origin": np.zeros(3),
     }
 
     def _current_type():
@@ -2546,9 +2576,15 @@ def bc_editor(mesh: Mesh):
         return sel_mask
 
     def _type_display():
+        abbrev = {
+            "displacement": "DISP",
+            "frictionless": "FRICT",
+            "elastic_support": "SPRING",
+            "cylindrical": "CYL",
+        }
         parts = []
         for i, t in enumerate(_BC_TYPES):
-            label = {"displacement": "DISP", "frictionless": "FRICT"}.get(t, t.upper())
+            label = abbrev.get(t, t.upper())
             parts.append(f"[{label}]" if i == state["type_idx"] else f" {label} ")
         return "  ".join(parts)
 
@@ -2556,8 +2592,10 @@ def bc_editor(mesh: Mesh):
         ct = _current_type()
         if ct == "fixed":
             return n_nodes * 3
-        elif ct == "displacement":
+        elif ct in ("displacement", "cylindrical"):
             return n_nodes * sum(state["components"])
+        elif ct == "elastic_support":
+            return n_nodes * sum(1 for k in state["spring_k"] if k > 0)
         return n_nodes  # frictionless: 1 DOF per node
 
     def _add_hud_text(plotter, text, name, position, font_size, color):
@@ -2637,11 +2675,22 @@ def bc_editor(mesh: Mesh):
             f"Editing: {name}",
             f"Type: {_type_display()}",
         ]
-        if _current_type() == "displacement":
+        ct = _current_type()
+        if ct == "displacement":
             labels = ["ux", "uy", "uz"]
             parts = [f"[{labels[i]}=0]" if state["components"][i] else f" {labels[i]} "
                      for i in range(3)]
             hud.append(f"DOFs: {'  '.join(parts)}")
+        elif ct == "cylindrical":
+            labels = ["radial", "tangent", "axial"]
+            parts = [f"[{labels[i]}]" if state["components"][i] else f" {labels[i]} "
+                     for i in range(3)]
+            hud.append(f"DOFs: {'  '.join(parts)}")
+            ax = state["cyl_axis"]
+            hud.append(f"Cyl axis: ({ax[0]:.1f}, {ax[1]:.1f}, {ax[2]:.1f})")
+        elif ct == "elastic_support":
+            k = state["spring_k"]
+            hud.append(f"Stiffness: kx={k[0]:.2e}  ky={k[1]:.2e}  kz={k[2]:.2e}")
         hud += [
             f"Selected: {n_selected} nodes  ({n_dofs} DOFs)",
             f"Available: {n_total - n_claimed}/{n_total} surface nodes",
@@ -2662,6 +2711,11 @@ def bc_editor(mesh: Mesh):
                 if bc.type == "displacement":
                     ax = [c for c, v in zip("xyz", bc.constrained_components) if v]
                     tp += f"({''.join(ax)})"
+                elif bc.type == "cylindrical":
+                    ax = [c for c, v in zip("RTZ", bc.constrained_components) if v]
+                    tp += f"({''.join(ax)})"
+                elif bc.type == "elastic_support" and bc.spring_stiffness is not None:
+                    tp = "SPRING"
                 lines.append(f"  {bc.name}: {tp} {nn}n")
             _add_hud_text(plotter, "\n".join(lines), "accepted_text",
                           "upper_right", 9, "white")
@@ -2670,14 +2724,23 @@ def bc_editor(mesh: Mesh):
                           "upper_right", 9, "gray")
 
         # --- Controls (lower left) — compact ---
-        ct = _current_type().upper()
-        ctrl = f"[T] {ct}  [F] Flip  [Enter] Accept  [Backspace] Undo  [Q] Finish"
+        ct_name = _current_type().upper()
+        ctrl = f"[T] {ct_name}  [F] Flip  [Enter] Accept  [Backspace] Undo  [Q] Finish"
         ctrl += "\n[1/2/3] Snap  [4/5/6] +90  [7/8/9] -90"
-        if _current_type() == "displacement":
+        ct = _current_type()
+        if ct == "displacement":
             cx = "LOCKED" if state["components"][0] else "free"
             cy = "LOCKED" if state["components"][1] else "free"
             cz = "LOCKED" if state["components"][2] else "free"
             ctrl += f"\n[X] ux={cx}  [Y] uy={cy}  [Z] uz={cz}"
+        elif ct == "cylindrical":
+            cr = "LOCKED" if state["components"][0] else "free"
+            ct_ = "LOCKED" if state["components"][1] else "free"
+            ca = "LOCKED" if state["components"][2] else "free"
+            ctrl += f"\n[X] radial={cr}  [Y] tangent={ct_}  [Z] axial={ca}"
+        elif ct == "elastic_support":
+            k = state["spring_k"]
+            ctrl += f"\nStiffness: kx={k[0]:.1e}  ky={k[1]:.1e}  kz={k[2]:.1e}"
         _add_hud_text(plotter, ctrl, "controls_text",
                       "lower_left", 8, "lightgray")
 
@@ -2788,12 +2851,17 @@ def bc_editor(mesh: Mesh):
         _refresh(plotter)
 
     def _toggle_comp(idx):
-        if _current_type() != "displacement":
-            print("  -> X/Y/Z toggles only apply in DISPLACEMENT mode")
+        ct = _current_type()
+        if ct not in ("displacement", "cylindrical"):
+            print("  -> X/Y/Z toggles only apply in DISPLACEMENT or CYLINDRICAL mode")
             return
         state["components"][idx] = not state["components"][idx]
         tag = "LOCKED" if state["components"][idx] else "free"
-        print(f"  -> u{'xyz'[idx]}: {tag}")
+        if ct == "cylindrical":
+            comp_labels = ["radial", "tangent", "axial"]
+        else:
+            comp_labels = ["ux", "uy", "uz"]
+        print(f"  -> {comp_labels[idx]}: {tag}")
         _refresh(plotter)
 
     def _accept():
@@ -2804,21 +2872,33 @@ def bc_editor(mesh: Mesh):
             return
         name = f"bc_{state['counter']}"
         radius = state["selection_radius"]
+        ct = _current_type()
         bc = BoundaryCondition(
             name=name,
-            type=_current_type(),
+            type=ct,
             plane_point=state["origin"].copy(),
             plane_normal=state["normal"].copy(),
             constrained_components=tuple(state["components"]),
             node_ids=selected_ids.tolist(),
             selection_radius=radius if radius < max_radius * 0.99 else None,
         )
+        if ct == "elastic_support":
+            bc.spring_stiffness = np.array(state["spring_k"], dtype=np.float64)
+        elif ct == "cylindrical":
+            bc.cylinder_axis = state["cyl_axis"].copy()
+            bc.cylinder_origin = state["cyl_origin"].copy()
         state["accepted"].append(bc)
         state["accepted_ids"].append(selected_ids.copy())
-        tp = _current_type().upper()
-        if _current_type() == "displacement":
+        tp = ct.upper()
+        if ct == "displacement":
             ax = [c for c, v in zip("xyz", state["components"]) if v]
             tp += f" ({''.join(ax)})"
+        elif ct == "cylindrical":
+            ax = [c for c, v in zip("RTZ", state["components"]) if v]
+            tp += f" ({''.join(ax)})"
+        elif ct == "elastic_support":
+            k = state["spring_k"]
+            tp += f" (k={k[0]:.1e},{k[1]:.1e},{k[2]:.1e})"
         print(f"  -> Accepted: {name} | {tp} | {len(selected_ids)} nodes")
         state["counter"] += 1
         state["type_idx"] = 0
@@ -2915,9 +2995,27 @@ def plot_boundary_conditions(mesh: Mesh, bcs, off_screen: bool = False):
     surface = grid.extract_surface(algorithm="dataset_surface")
     nodes_arr = np.asarray(mesh.nodes)
 
+    # Type-specific color map for professional appearance
+    _type_colors = {
+        "fixed": "#2563EB",
+        "displacement": "#059669",
+        "frictionless": "#7C3AED",
+        "elastic_support": "#DC2626",
+        "cylindrical": "#D97706",
+    }
+
     plotter = pv.Plotter(off_screen=off_screen)
-    plotter.add_mesh(surface, color="lightgray", opacity=0.3, show_edges=True,
-                     edge_color="gray", line_width=0.5)
+    plotter.add_mesh(surface, color="lightgray", opacity=0.35, show_edges=True,
+                     edge_color="#9CA3AF", line_width=0.5)
+
+    # 3-point lighting
+    try:
+        plotter.remove_all_lights()
+        plotter.add_light(pv.Light(position=(2, 1, 3), focal_point=(0, 0, 0), intensity=0.8))
+        plotter.add_light(pv.Light(position=(-2, -1, 1), focal_point=(0, 0, 0), intensity=0.3))
+        plotter.add_light(pv.Light(position=(0, -3, 2), focal_point=(0, 0, 0), intensity=0.4))
+    except Exception:
+        pass
 
     # Glyph sphere for cross-platform rendering (GPU-based
     # render_points_as_spheres is unreliable on Windows OpenGL).
@@ -2930,7 +3028,7 @@ def plot_boundary_conditions(mesh: Mesh, bcs, off_screen: bool = False):
     sphere_geom = pv.Sphere(radius=diag * 0.004)
 
     for i, bc in enumerate(bcs):
-        color = _BC_COLORS[i % len(_BC_COLORS)]
+        color = _type_colors.get(bc.type, _BC_COLORS[i % len(_BC_COLORS)])
         if bc.node_ids is not None:
             selected = list(bc.node_ids)
         else:
@@ -2948,6 +3046,13 @@ def plot_boundary_conditions(mesh: Mesh, bcs, off_screen: bool = False):
                 labels = "xyz"
                 active = [labels[j] for j in range(3) if bc.constrained_components[j]]
                 tp += f" ({','.join(active)})"
+            elif bc.type == "cylindrical":
+                labels = "RTZ"
+                active = [labels[j] for j in range(3) if bc.constrained_components[j]]
+                tp += f" ({','.join(active)})"
+            elif bc.type == "elastic_support" and bc.spring_stiffness is not None:
+                k = bc.spring_stiffness
+                tp = f"SPRING (k={k[0]:.1e},{k[1]:.1e},{k[2]:.1e})"
             plotter.add_mesh(glyphs, color=color,
                              label=f"{bc.name}: {tp}, {len(selected)} nodes")
 

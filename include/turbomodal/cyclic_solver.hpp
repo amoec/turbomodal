@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 
 #include "turbomodal/common.hpp"
@@ -11,9 +12,23 @@
 
 namespace turbomodal {
 
+// Rich progress information emitted after each harmonic completes.
+struct SolverProgress {
+    int completed = 0;           // harmonics solved so far
+    int total = 0;               // total harmonics to solve
+    int harmonic_k = 0;          // harmonic index that just finished
+    bool converged = true;       // did the eigensolver converge?
+    int iterations = 0;          // Lanczos/Arnoldi iterations used
+    int num_converged = 0;       // number of converged eigenpairs
+    int num_modes = 0;           // modes found for this harmonic
+    double max_residual = 0.0;   // worst eigenpair residual
+    double min_freq_hz = 0.0;    // lowest frequency found (Hz)
+    double max_freq_hz = 0.0;    // highest frequency found (Hz)
+    double elapsed_s = 0.0;      // wall-clock seconds since solve start
+};
+
 // Callback invoked from worker threads as each harmonic finishes.
-// Args: completed, total, harmonic_index k, did the eigensolver converge.
-using ProgressCallback = std::function<void(int completed, int total, int harmonic_k, bool converged)>;
+using ProgressCallback = std::function<void(const SolverProgress&)>;
 
 struct FluidConfig {
     enum class Type {
@@ -63,7 +78,7 @@ public:
         int max_threads = 0,
         bool include_coriolis = false,
         double min_frequency = 0.0,
-        ProgressCallback progress_cb = nullptr,
+        const ProgressCallback& progress_cb = nullptr,
         bool allow_condensation = false,
         double memory_reserve_fraction = 0.2);
 
@@ -85,7 +100,7 @@ public:
         double min_frequency = 0.0,
         bool allow_condensation = false,
         double memory_reserve_fraction = 0.2,
-        ProgressCallback progress_cb = nullptr);
+        const ProgressCallback& progress_cb = nullptr);
 
     void export_campbell_csv(const std::string& filename,
                              const std::vector<std::vector<ModalResult>>& results);
@@ -124,6 +139,9 @@ private:
 
     // Build the full list of constrained DOF indices from all constraint groups
     std::vector<int> build_constrained_dofs() const;
+
+    // Build diagonal spring stiffness matrix from ELASTIC_SUPPORT constraints
+    SpMatd build_spring_stiffness() const;
 
     // DOF classification for cyclic symmetry
     std::vector<int> interior_dofs_;

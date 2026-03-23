@@ -35,27 +35,38 @@ class BoundaryCondition:
     Parameters
     ----------
     name : descriptive name for this constraint group
-    type : ``"fixed"``, ``"displacement"``, or ``"frictionless"``
+    type : ``"fixed"``, ``"displacement"``, ``"frictionless"``,
+        ``"elastic_support"``, or ``"cylindrical"``
     plane_point : (3,) point on the cutting plane
     plane_normal : (3,) outward normal — surface nodes on the positive side are selected
     constrained_components : for ``"displacement"`` type, which DOF components
-        are locked (x, y, z).  Ignored for other types.
+        are locked (x, y, z).  For ``"cylindrical"``, components are
+        (radial, tangential, axial).  Ignored for other types.
     tolerance : distance tolerance for plane selection
     node_ids : pre-selected node IDs (from interactive editor).  When provided,
         ``_build_constraint_groups`` uses these directly instead of calling
         ``select_nodes_by_plane``.
     selection_radius : radius used during interactive selection (stored for
         reproducibility / display).  Has no effect at solve time.
+    spring_stiffness : (3,) grounded spring stiffness per DOF in N/m
+        (kx, ky, kz).  Only used for ``"elastic_support"`` type.
+    cylinder_axis : (3,) cylinder axis direction for ``"cylindrical"`` type.
+        Defaults to the mesh rotation axis.
+    cylinder_origin : (3,) cylinder axis origin for ``"cylindrical"`` type.
+        Defaults to world origin.
     """
 
     name: str
-    type: str  # "fixed", "displacement", "frictionless"
+    type: str  # "fixed", "displacement", "frictionless", "elastic_support", "cylindrical"
     plane_point: np.ndarray
     plane_normal: np.ndarray
     constrained_components: tuple[bool, bool, bool] = (True, True, True)
     tolerance: float = 1e-6
     node_ids: list[int] | None = None
     selection_radius: float | None = None
+    spring_stiffness: np.ndarray | None = None
+    cylinder_axis: np.ndarray | None = None
+    cylinder_origin: np.ndarray | None = None
 
 
 def _build_constraint_groups(
@@ -67,14 +78,17 @@ def _build_constraint_groups(
         "fixed": BCType.FIXED,
         "displacement": BCType.DISPLACEMENT,
         "frictionless": BCType.FRICTIONLESS,
+        "elastic_support": BCType.ELASTIC_SUPPORT,
+        "cylindrical": BCType.CYLINDRICAL,
     }
+    valid_types = ", ".join(f"'{k}'" for k in type_map)
     for bc in bcs:
         cg = ConstraintGroup()
         cg.name = bc.name
         bc_type = type_map.get(bc.type.lower())
         if bc_type is None:
             raise ValueError(
-                f"Unknown BC type '{bc.type}'. Must be 'fixed', 'displacement', or 'frictionless'."
+                f"Unknown BC type '{bc.type}'. Must be one of {valid_types}."
             )
         cg.type = bc_type
         if bc.node_ids is not None:
@@ -88,6 +102,24 @@ def _build_constraint_groups(
         cg.constrained_components = list(bc.constrained_components)
         if bc_type == BCType.FRICTIONLESS:
             cg.surface_normal = mesh.compute_surface_normal(cg.node_ids)
+        elif bc_type == BCType.ELASTIC_SUPPORT:
+            if bc.spring_stiffness is None:
+                raise ValueError(
+                    f"BC '{bc.name}': elastic_support requires spring_stiffness (3,) array."
+                )
+            cg.spring_stiffness = np.asarray(bc.spring_stiffness, dtype=np.float64)
+        elif bc_type == BCType.CYLINDRICAL:
+            axis = bc.cylinder_axis
+            if axis is None:
+                # Default to mesh rotation axis
+                ax = np.zeros(3)
+                ax[mesh.rotation_axis] = 1.0
+                axis = ax
+            cg.cylinder_axis = np.asarray(axis, dtype=np.float64)
+            cg.cylinder_origin = np.asarray(
+                bc.cylinder_origin if bc.cylinder_origin is not None else np.zeros(3),
+                dtype=np.float64,
+            )
         groups.append(cg)
     return groups
 
@@ -221,12 +253,14 @@ def solve(
     else:
         progress_cb = None
         if verbose >= PROGRESS:
-            def _on_progress(done: int, total: int, k: int, converged: bool) -> None:
-                elapsed = time.perf_counter() - t0
-                bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+            def _on_progress(prog) -> None:
+                bar = _progress_bar(
+                    prog.completed, prog.total,
+                    prefix="  ", elapsed=prog.elapsed_s,
+                )
                 sys.stdout.write(bar)
                 sys.stdout.flush()
-                if done == total:
+                if prog.completed == prog.total:
                     sys.stdout.write("\n")
             progress_cb = _on_progress
 
@@ -310,15 +344,17 @@ def _solve_with_convergence_plot(
 
     k_to_bar = {k: i for i, k in enumerate(hi_list)}
 
-    def _progress_cb(done: int, total: int, k: int, converged: bool) -> None:
+    def _progress_cb(prog) -> None:
         if verbose >= PROGRESS:
-            elapsed = time.perf_counter() - t0
-            bar = _progress_bar(done, total, prefix="  ", elapsed=elapsed)
+            bar = _progress_bar(
+                prog.completed, prog.total,
+                prefix="  ", elapsed=prog.elapsed_s,
+            )
             sys.stdout.write(bar)
             sys.stdout.flush()
-            if done == total:
+            if prog.completed == prog.total:
                 sys.stdout.write("\n")
-        update_queue.put((done, k, converged))
+        update_queue.put((prog.completed, prog.harmonic_k, prog.converged))
 
     def _run() -> None:
         results_holder.append(

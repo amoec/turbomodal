@@ -37,6 +37,8 @@ class BCType:
     FIXED: BCType
     DISPLACEMENT: BCType
     FRICTIONLESS: BCType
+    ELASTIC_SUPPORT: BCType
+    CYLINDRICAL: BCType
 
 # --- ConstraintGroup ---
 
@@ -46,6 +48,9 @@ class ConstraintGroup:
     type: BCType
     constrained_components: list[bool]
     surface_normal: npt.NDArray[np.float64]
+    spring_stiffness: npt.NDArray[np.float64]
+    cylinder_axis: npt.NDArray[np.float64]
+    cylinder_origin: npt.NDArray[np.float64]
 
     def __init__(self) -> None: ...
 
@@ -140,6 +145,23 @@ class SolverStatus:
 
     def __init__(self) -> None: ...
 
+# --- SolverProgress (rich callback data from solve_at_rpm) ---
+
+class SolverProgress:
+    completed: int
+    total: int
+    harmonic_k: int
+    converged: bool
+    iterations: int
+    num_converged: int
+    num_modes: int
+    max_residual: float
+    min_freq_hz: float
+    max_freq_hz: float
+    elapsed_s: float
+
+    def __init__(self) -> None: ...
+
 # --- ModalResult ---
 
 class ModalResult:
@@ -223,7 +245,7 @@ class CyclicSymmetrySolver:
         max_threads: int = 0,
         include_coriolis: bool = False,
         min_frequency: float = 0.0,
-        progress_cb: object = None,
+        progress_cb: object = None,  # Callable[[SolverProgress], None]
         allow_condensation: bool = False,
         memory_reserve_fraction: float = 0.2,
     ) -> list[ModalResult]: ...
@@ -246,7 +268,7 @@ class CyclicSymmetrySolver:
         min_frequency: float = 0.0,
         allow_condensation: bool = False,
         memory_reserve_fraction: float = 0.2,
-        progress_cb: object = None,
+        progress_cb: object = None,  # Callable[[SolverProgress], None]
     ) -> list[list[list[ModalResult]]]: ...
     @staticmethod
     def compute_stationary_frame(

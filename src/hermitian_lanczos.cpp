@@ -4,6 +4,7 @@
 #include <numeric>
 #include <random>
 #include <iostream>
+#include <stdexcept>
 
 namespace turbomodal {
 
@@ -284,6 +285,20 @@ HermitianLanczosEigenSolver::solve(
         return solve_dense(K, M, nev);
     }
 
+    try {
+    return solve_lanczos(K, M, cfg, nev, n);
+    } catch (const std::exception& e) {
+        result.message = std::string("Lanczos solver threw: ") + e.what();
+        return result;
+    }
+}
+
+HermitianLanczosEigenSolver::Result
+HermitianLanczosEigenSolver::solve_lanczos(
+    const SpMatcd& K, const SpMatcd& M, const Config& cfg, int nev, int n) {
+
+    Result result;
+
     int ncv = cfg.ncv;
     if (ncv <= 0) {
         ncv = std::min(std::max(4 * nev + 1, 40), n);
@@ -291,8 +306,13 @@ HermitianLanczosEigenSolver::solve(
     ncv = std::min(ncv, n);
 
     // Factorize (K - σM)
-    if (!factorize_shifted(K, M, cfg.shift)) {
-        result.message = "Factorization failed for shift-invert operator";
+    try {
+        if (!factorize_shifted(K, M, cfg.shift)) {
+            result.message = "Factorization failed for shift-invert operator";
+            return result;
+        }
+    } catch (const std::exception& e) {
+        result.message = std::string("Factorization threw: ") + e.what();
         return result;
     }
 
@@ -322,9 +342,17 @@ HermitianLanczosEigenSolver::solve(
         int j_start = (restart == 0) ? 0 : nev;
 
         // Lanczos iteration from j_start to ncv-1
+        bool solve_threw = false;
         for (int j = j_start; j < ncv; j++) {
             // w = (K - σM)^{-1} M v_j
-            Eigen::VectorXcd w = solve_shifted(MV.col(j));
+            Eigen::VectorXcd w;
+            try {
+                w = solve_shifted(MV.col(j));
+            } catch (const std::exception& e) {
+                result.message = std::string("Shift-invert solve threw: ") + e.what();
+                solve_threw = true;
+                break;
+            }
 
             // α_j = real(v_j^H M w) — always real for Hermitian
             alpha(j) = std::real(MV.col(j).dot(w));
@@ -376,8 +404,22 @@ HermitianLanczosEigenSolver::solve(
             }
         }
 
+        if (solve_threw) return result;
+
         // Build and solve the tridiagonal eigenproblem
         int active_ncv = std::min(ncv, n);
+        // After early truncation (degenerate subspace), ensure alpha/beta
+        // are consistently sized to prevent out-of-bounds access.
+        alpha.conservativeResize(active_ncv);
+        beta.conservativeResize(active_ncv);
+
+        if (active_ncv < 1) {
+            result.nconv = 0;
+            result.converged = false;
+            result.message = "Lanczos subspace collapsed (active_ncv=0)";
+            return result;
+        }
+
         Eigen::MatrixXd T = Eigen::MatrixXd::Zero(active_ncv, active_ncv);
         for (int i = 0; i < active_ncv; i++) {
             T(i, i) = alpha(i);
@@ -432,6 +474,7 @@ HermitianLanczosEigenSolver::solve(
 
             for (int i = 0; i < num_extract; i++) {
                 int ii = idx[i];
+                if (ii < 0 || ii >= active_ncv) continue;
                 result.eigenvalues(i) = lambda_vals[ii];
                 // Eigenvector in original space: x = V * s
                 result.eigenvectors.col(i) =

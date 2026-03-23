@@ -89,6 +89,9 @@ public:
         int full_ndof,
         const std::vector<int>& free_dof_map);
 
+    // Reset cached factorization pattern (needed when retrying with different shift)
+    void reset_hermitian_pattern() { m_hermitian_lanczos.reset_pattern(); }
+
 private:
     // Persistent Hermitian Lanczos solver — caches symbolic factorization
     // across calls with the same sparsity pattern (i.e., across harmonics).

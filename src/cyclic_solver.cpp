@@ -146,10 +146,69 @@ std::vector<int> CyclicSymmetrySolver::build_constrained_dofs() const {
                     dof_set.insert(3 * node_id + max_comp);
                     break;
                 }
+                case BCType::ELASTIC_SUPPORT:
+                    // Springs add to K matrix, they don't eliminate DOFs
+                    break;
+                case BCType::CYLINDRICAL: {
+                    // Constrain radial/tangential/axial DOFs in cylindrical coordinates.
+                    // constrained_components[0]=radial, [1]=tangential, [2]=axial.
+                    Eigen::Vector3d axis = cg.cylinder_axis.normalized();
+                    Eigen::Vector3d pos = mesh_.nodes.row(node_id).transpose() - cg.cylinder_origin;
+                    Eigen::Vector3d axial_proj = pos.dot(axis) * axis;
+                    Eigen::Vector3d radial = pos - axial_proj;
+                    double r = radial.norm();
+                    if (r < 1e-12) {
+                        // Node is on the cylinder axis — constrain all requested DOFs
+                        for (int k = 0; k < 3; k++) {
+                            if (cg.constrained_components[k])
+                                dof_set.insert(3 * node_id + k);
+                        }
+                        break;
+                    }
+                    radial /= r;
+                    Eigen::Vector3d tangential = axis.cross(radial).normalized();
+
+                    // Map cylindrical directions to most-aligned Cartesian DOF
+                    Eigen::Vector3d dirs[3] = {radial, tangential, axis};
+                    for (int c = 0; c < 3; c++) {
+                        if (!cg.constrained_components[c]) continue;
+                        int best = 0;
+                        double best_val = std::abs(dirs[c](0));
+                        for (int k = 1; k < 3; k++) {
+                            if (std::abs(dirs[c](k)) > best_val) {
+                                best_val = std::abs(dirs[c](k));
+                                best = k;
+                            }
+                        }
+                        dof_set.insert(3 * node_id + best);
+                    }
+                    break;
+                }
             }
         }
     }
     return std::vector<int>(dof_set.begin(), dof_set.end());
+}
+
+SpMatd CyclicSymmetrySolver::build_spring_stiffness() const {
+    int ndof = mesh_.num_dof();
+    std::vector<Eigen::Triplet<double>> trips;
+    for (const auto& cg : constraints_) {
+        if (cg.type != BCType::ELASTIC_SUPPORT) continue;
+        for (int node_id : cg.node_ids) {
+            for (int k = 0; k < 3; k++) {
+                if (cg.spring_stiffness(k) > 0.0) {
+                    trips.emplace_back(3 * node_id + k, 3 * node_id + k,
+                                       cg.spring_stiffness(k));
+                }
+            }
+        }
+    }
+    SpMatd K_spring(ndof, ndof);
+    if (!trips.empty()) {
+        K_spring.setFromTriplets(trips.begin(), trips.end());
+    }
+    return K_spring;
 }
 
 void CyclicSymmetrySolver::classify_dofs() {
@@ -669,7 +728,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     int max_threads,
     bool include_coriolis,
     double min_frequency,
-    ProgressCallback progress_cb,
+    const ProgressCallback& progress_cb,
     bool allow_condensation,
     double memory_reserve_fraction) {
 
@@ -684,6 +743,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     }
     SpMatd K_sector = K_base_;
     SpMatd M_sector = M_base_;
+
+    // Step 1b: Add grounded spring stiffness (ELASTIC_SUPPORT BCs)
+    SpMatd K_spring = build_spring_stiffness();
+    if (K_spring.nonZeros() > 0) {
+        K_sector += K_spring;
+    }
 
     // Step 2: Rotating effects
     SpMatd K_eff = K_sector;
@@ -867,7 +932,9 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     int n_harmonics = static_cast<int>(harmonics_to_solve.size());
 
     // Per-harmonic solve using precomputed projections
-    auto solve_harmonic = [&](int k, ModalSolver& modal_solver) -> std::optional<ModalResult> {
+    // Returns (ModalResult, SolverStatus) or nullopt on failure.
+    using HarmonicResult = std::optional<std::pair<ModalResult, SolverStatus>>;
+    auto solve_harmonic = [&](int k, ModalSolver& modal_solver) -> HarmonicResult {
         try {
             if (n_free <= 1) return std::nullopt;
 
@@ -945,10 +1012,8 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 config.nev = std::min(nev_target + n_extra, n_free - 1);
                 if (config.nev <= 0) return std::nullopt;
                 config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
-                // Shift for shift-invert: eigenvalues nearest sigma are found first.
-                // sigma=1.0 targets the lowest positive ω² (bending modes).
-                config.shift = 1.0;
-
+                // Adaptive shift for shift-invert: σ ≈ ||K||/||M|| targets the
+                // middle of the eigenvalue spectrum regardless of unit system.
                 bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
 
                 if (is_real_case) {
@@ -969,14 +1034,29 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                                 if (std::abs(it.value().real()) > 1e-15)
                                     mr.emplace_back(it.row(), it.col(), it.value().real());
                         M_real.setFromTriplets(mr.begin(), mr.end());
+                        double k_n = K_real.norm();
+                        double m_n = M_real.norm();
+                        config.shift = (m_n > 0) ? k_n / m_n : 1.0;
                         std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                     } else {
                         const SpMatd& M_real = (k == 0) ? M0_real_ : Mhalf_real_;
+                        double k_n = K_real.norm();
+                        double m_n = M_real.norm();
+                        config.shift = (m_n > 0) ? k_n / m_n : 1.0;
                         std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                     }
                 } else {
+                    double k_n = K_free.norm();
+                    double m_n = M_free.norm();
+                    double base_shift = (m_n > 0) ? k_n / m_n : 1.0;
+                    config.shift = base_shift;
+                    std::cerr << "[DEBUG] k=" << k << " shift=" << config.shift
+                              << " n=" << n_free << std::endl;
                     std::tie(result, status) = modal_solver.solve_complex_hermitian(
                         K_free, M_free, config);
+                    std::cerr << "[DEBUG] k=" << k << " result: nconv="
+                              << status.num_converged << " msg=" << status.message
+                              << std::endl;
                 }
             }
 
@@ -1146,7 +1226,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
             result.harmonic_index = k;
             result.rpm = rpm;
             result.converged = status.converged;
-            return result;
+            return std::make_pair(std::move(result), status);
         } catch (const std::bad_alloc&) {
             std::cerr << "[CyclicSolver] k=" << k << " out of memory, will retry" << std::endl;
             return std::nullopt;
@@ -1207,10 +1287,12 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
 
     std::atomic<int> next_idx{0};
     std::atomic<int> completed{0};
-    std::vector<std::optional<ModalResult>> results_vec(n_harmonics);
+    std::vector<HarmonicResult> results_vec(n_harmonics);
     // Track OOM failures for sequential retry
     std::vector<int> oom_indices;
     std::mutex oom_mutex;
+
+    auto wall_start = std::chrono::steady_clock::now();
 
     std::vector<std::thread> workers;
     workers.reserve(max_concurrent);
@@ -1232,11 +1314,30 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                     std::lock_guard<std::mutex> lock(oom_mutex);
                     oom_indices.push_back(idx);
                 }
-                // Report progress
+                // Report progress with rich SolverProgress struct
                 int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
                 if (progress_cb) {
-                    bool conv = results_vec[idx].has_value() && results_vec[idx]->converged;
-                    progress_cb(done, n_harmonics, k, conv);
+                    SolverProgress prog;
+                    prog.completed = done;
+                    prog.total = n_harmonics;
+                    prog.harmonic_k = k;
+                    auto now = std::chrono::steady_clock::now();
+                    prog.elapsed_s = std::chrono::duration<double>(now - wall_start).count();
+                    if (results_vec[idx].has_value()) {
+                        auto& [res, st] = results_vec[idx].value();
+                        prog.converged = res.converged;
+                        prog.iterations = st.iterations;
+                        prog.num_converged = st.num_converged;
+                        prog.max_residual = st.max_residual;
+                        prog.num_modes = static_cast<int>(res.frequencies.size());
+                        if (prog.num_modes > 0) {
+                            prog.min_freq_hz = res.frequencies.minCoeff();
+                            prog.max_freq_hz = res.frequencies.maxCoeff();
+                        }
+                    } else {
+                        prog.converged = false;
+                    }
+                    progress_cb(prog);
                 }
             }
         });
@@ -1256,7 +1357,7 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
     std::vector<ModalResult> results;
     for (auto& opt : results_vec) {
         if (opt.has_value()) {
-            results.push_back(std::move(*opt));
+            results.push_back(std::move(opt->first));
         }
     }
 
@@ -1293,7 +1394,7 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_parametric(
     double min_frequency,
     bool allow_condensation,
     double memory_reserve_fraction,
-    ProgressCallback progress_cb) {
+    const ProgressCallback& progress_cb) {
 
     if (conditions.empty()) return {};
 
@@ -1337,6 +1438,12 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_parametric(
         // Build K_eff for this condition
         SpMatd K_eff = E_scale * K_base_;
 
+        // Add grounded spring stiffness (not scaled by temperature)
+        SpMatd K_spring = build_spring_stiffness();
+        if (K_spring.nonZeros() > 0) {
+            K_eff += K_spring;
+        }
+
         if (std::abs(omega) > 0.0) {
             // Spin softening: K_omega = omega^2 * K_omega_unit
             SpMatd K_omega = omega * omega * K_omega_unit_;
@@ -1378,7 +1485,12 @@ std::vector<std::vector<ModalResult>> CyclicSymmetrySolver::solve_parametric(
 
         int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
         if (progress_cb) {
-            progress_cb(done, total_conditions, -1, true);
+            SolverProgress prog;
+            prog.completed = done;
+            prog.total = total_conditions;
+            prog.harmonic_k = -1;
+            prog.converged = true;
+            progress_cb(prog);
         }
     }
 
