@@ -1012,8 +1012,10 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                 config.nev = std::min(nev_target + n_extra, n_free - 1);
                 if (config.nev <= 0) return std::nullopt;
                 config.ncv = std::min(std::max(4 * config.nev + 1, 40), n_free);
-                // Adaptive shift for shift-invert: σ ≈ ||K||/||M|| targets the
-                // middle of the eigenvalue spectrum regardless of unit system.
+                // Shift for shift-invert: eigenvalues nearest sigma are found first.
+                // sigma=1.0 targets the lowest positive ω² (bending modes).
+                config.shift = 1.0;
+
                 bool is_real_case = (k == 0) || (mesh_.num_sectors % 2 == 0 && k == max_k);
 
                 if (is_real_case) {
@@ -1034,29 +1036,14 @@ std::vector<ModalResult> CyclicSymmetrySolver::solve_at_rpm(
                                 if (std::abs(it.value().real()) > 1e-15)
                                     mr.emplace_back(it.row(), it.col(), it.value().real());
                         M_real.setFromTriplets(mr.begin(), mr.end());
-                        double k_n = K_real.norm();
-                        double m_n = M_real.norm();
-                        config.shift = (m_n > 0) ? k_n / m_n : 1.0;
                         std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                     } else {
                         const SpMatd& M_real = (k == 0) ? M0_real_ : Mhalf_real_;
-                        double k_n = K_real.norm();
-                        double m_n = M_real.norm();
-                        config.shift = (m_n > 0) ? k_n / m_n : 1.0;
                         std::tie(result, status) = modal_solver.solve_real(K_real, M_real, config);
                     }
                 } else {
-                    double k_n = K_free.norm();
-                    double m_n = M_free.norm();
-                    double base_shift = (m_n > 0) ? k_n / m_n : 1.0;
-                    config.shift = base_shift;
-                    std::cerr << "[DEBUG] k=" << k << " shift=" << config.shift
-                              << " n=" << n_free << std::endl;
                     std::tie(result, status) = modal_solver.solve_complex_hermitian(
                         K_free, M_free, config);
-                    std::cerr << "[DEBUG] k=" << k << " result: nconv="
-                              << status.num_converged << " msg=" << status.message
-                              << std::endl;
                 }
             }
 
