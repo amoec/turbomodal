@@ -14,6 +14,7 @@ from turbomodal._core import (
     ConstraintGroup,
     CyclicSymmetrySolver,
     FluidConfig,
+    GlobalAssembler,
     Material,
     Mesh,
     ModalResult,
@@ -24,6 +25,93 @@ from turbomodal._utils import progress_bar as _progress_bar
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EnrichedModalResult:
+    """ModalResult enriched with Python-computed quantities.
+
+    Wraps a C++ ``ModalResult`` and adds derived fields that require the
+    global mass matrix (not exposed by the C++ solver).
+
+    All original ``ModalResult`` attributes (``harmonic_index``,
+    ``frequencies``, ``mode_shapes``, ``whirl_direction``, ``converged``,
+    ``rpm``) are accessible directly on this object via delegation.
+
+    Attributes
+    ----------
+    modal_mass_kg : ndarray, shape (n_modes,)
+        Generalized modal mass for the full annulus in **kg** (SI).
+        Computed as ``N_sectors * Re(phi_sector^H M_sector phi_sector)``
+        where ``M_sector`` is the single-sector consistent mass matrix.
+    """
+
+    _result: ModalResult = field(repr=False)
+    modal_mass_kg: np.ndarray
+
+    def __getattr__(self, name):
+        return getattr(self._result, name)
+
+
+def compute_modal_mass(
+    mesh: Mesh,
+    material: Material,
+    results: list[ModalResult],
+    *,
+    temperature: float | None = None,
+) -> list[np.ndarray]:
+    """Compute full-annulus generalized modal mass for each mode.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        Sector mesh with cyclic boundaries identified.
+    material : Material
+        Material properties.  When *temperature* is given, the material is
+        adjusted via ``material.at_temperature(temperature)`` before
+        assembling the mass matrix.
+    results : list of ModalResult
+        One result per harmonic index, as returned by :func:`solve`.
+    temperature : float, optional
+        Bulk temperature in Kelvin.
+
+    Returns
+    -------
+    list of ndarray
+        One ``(n_modes,)`` float64 array per harmonic index.
+        Units: **kg** (SI).
+    """
+    if temperature is not None:
+        material = material.at_temperature(temperature)
+    assembler = GlobalAssembler()
+    assembler.assemble(mesh, material)
+    return _modal_mass_from_M(assembler.M, results, mesh.num_sectors)
+
+
+def _modal_mass_from_M(M_sector, results, num_sectors):
+    """Vectorised modal-mass computation from a pre-assembled sector M."""
+    modal_masses = []
+    for r in results:
+        shapes = np.asarray(r.mode_shapes)
+        if shapes.size == 0:
+            modal_masses.append(np.array([], dtype=np.float64))
+            continue
+        # shapes is (n_dof, n_modes) — each column is a mode
+        M_phi = M_sector @ shapes  # sparse @ dense → dense (n_dof, n_modes)
+        mm = num_sectors * np.real(np.sum(shapes.conj() * M_phi, axis=0))
+        modal_masses.append(np.asarray(mm, dtype=np.float64))
+    return modal_masses
+
+
+def _enrich_results(mesh, material, results):
+    """Wrap raw ModalResult objects with computed modal mass."""
+    assembler = GlobalAssembler()
+    assembler.assemble(mesh, material)
+    masses = _modal_mass_from_M(assembler.M, results, mesh.num_sectors)
+    return [
+        EnrichedModalResult(_result=r, modal_mass_kg=mm)
+        for r, mm in zip(results, masses)
+    ]
 
 
 @dataclass
@@ -164,7 +252,7 @@ def solve(
     boundary_conditions: list[BoundaryCondition] | None = None,
     show_convergence: bool = False,
     memory_reserve_fraction: float = 0.2,
-) -> list[ModalResult]:
+) -> list[EnrichedModalResult]:
     """Solve cyclic symmetry modal analysis at a given RPM.
 
     Parameters
@@ -206,7 +294,10 @@ def solve(
 
     Returns
     -------
-    List of ModalResult, one per harmonic index (0 to N/2)
+    List of EnrichedModalResult, one per harmonic index (0 to N/2).
+    Each result includes ``modal_mass_kg`` — full-annulus generalized
+    modal mass in **kg** (SI) — in addition to all standard ModalResult
+    fields.
     """
     # Resolve operating condition overrides
     if condition is not None:
@@ -271,12 +362,17 @@ def solve(
     if verbose >= PROGRESS:
         print(f"  Solved {len(results)} harmonic indices in {elapsed:.1f}s")
 
+    results = _validate_modal_results(results)
+    results = _enrich_results(mesh, material, results)
+
     if verbose >= DETAILED:
         for r in results:
             freqs = ", ".join(f"{f:.1f}" for f in r.frequencies[:4])
+            masses = ", ".join(f"{m:.4e}" for m in r.modal_mass_kg[:4])
             print(f"    ND={r.harmonic_index:2d}: [{freqs}] Hz (rotating frame)")
+            print(f"           modal mass [kg]: [{masses}]")
 
-    return _validate_modal_results(results)
+    return results
 
 
 def _solve_with_convergence_plot(
@@ -415,7 +511,7 @@ def rpm_sweep(
     temperature: float | None = None,
     boundary_conditions: list[BoundaryCondition] | None = None,
     memory_reserve_fraction: float = 0.2,
-) -> list[list[ModalResult]]:
+) -> list[list[EnrichedModalResult]]:
     """Solve modal analysis over a range of RPM values.
 
     Parameters
@@ -444,7 +540,9 @@ def rpm_sweep(
 
     Returns
     -------
-    List of lists: results[rpm_idx][harmonic_idx] = ModalResult
+    List of lists: results[rpm_idx][harmonic_idx] = EnrichedModalResult.
+    Each result includes ``modal_mass_kg`` (full-annulus generalized
+    modal mass in **kg**, SI).
     """
     if temperature is not None:
         material = material.at_temperature(temperature)
@@ -476,6 +574,12 @@ def rpm_sweep(
     else:
         apply_hub = hub_constraint == "fixed"
         solver = CyclicSymmetrySolver(mesh, material, fluid, apply_hub)
+
+    # Assemble sector mass matrix once for modal mass computation
+    _assembler = GlobalAssembler()
+    _assembler.assemble(mesh, material)
+    _M_sector = _assembler.M
+
     all_results = []
     t_start = time.perf_counter()
 
@@ -485,6 +589,11 @@ def rpm_sweep(
             solver.solve_at_rpm(float(rpm), num_modes, hi, max_threads,
                                 include_coriolis, min_frequency,
                                 memory_reserve_fraction=memory_reserve_fraction))
+        masses = _modal_mass_from_M(_M_sector, results, mesh.num_sectors)
+        results = [
+            EnrichedModalResult(_result=r, modal_mass_kg=mm)
+            for r, mm in zip(results, masses)
+        ]
         dt = time.perf_counter() - t0
         elapsed = time.perf_counter() - t_start
 
@@ -633,3 +742,168 @@ def campbell_data(
         "harmonic_index": harmonic_index,
         "whirl_direction": whirl,
     }
+
+
+# ---------------------------------------------------------------------------
+# Save / load results
+# ---------------------------------------------------------------------------
+
+def save_results(
+    path: str,
+    results: list[EnrichedModalResult] | list[list[EnrichedModalResult]],
+    *,
+    include_mode_shapes: bool = True,
+) -> None:
+    """Save modal results to a compressed ``.npz`` file.
+
+    Works with both single-RPM results (from :func:`solve`) and RPM-sweep
+    results (from :func:`rpm_sweep`).  No extra dependencies beyond NumPy.
+
+    The file stores one array per field, keyed so that :func:`load_results`
+    can reconstruct the same nested structure.
+
+    Parameters
+    ----------
+    path : str
+        Output file path.  A ``.npz`` suffix is appended automatically
+        by NumPy if not already present.
+    results : list of EnrichedModalResult *or* list of list of EnrichedModalResult
+        Results from :func:`solve` (single RPM) or :func:`rpm_sweep`.
+    include_mode_shapes : bool
+        If ``False``, mode shapes are omitted to reduce file size.
+
+    File contents
+    -------------
+    ==================== =============================== =====
+    Key                  Shape                           Unit
+    ==================== =============================== =====
+    ``is_sweep``         scalar bool                     —
+    ``rpm``              ``(N,)``                        RPM
+    ``harmonic_index``   ``(H,)``                        —
+    ``frequencies``      ``(N, H, M)``                   Hz
+    ``whirl_direction``  ``(N, H, M)``                   —
+    ``modal_mass_kg``    ``(N, H, M)``                   kg
+    ``converged``        ``(N, H)``                      —
+    ``mode_shapes``      ``(N, H, M, D)`` *(optional)*   m
+    ==================== =============================== =====
+
+    ``N`` = number of RPM points (1 for single solve), ``H`` = harmonics,
+    ``M`` = modes per harmonic, ``D`` = DOFs per sector.
+    """
+    from pathlib import Path as _Path
+
+    # Normalise to list-of-lists (sweep) layout
+    if results and not isinstance(results[0], list):
+        sweep = [results]  # type: ignore[list-item]
+        is_sweep = False
+    else:
+        sweep = results  # type: ignore[assignment]
+        is_sweep = True
+
+    n_rpm = len(sweep)
+    if n_rpm == 0:
+        np.savez_compressed(path, is_sweep=is_sweep)
+        return
+
+    # Determine array dimensions from first RPM point
+    n_harmonics = len(sweep[0])
+    n_modes = max(len(r.frequencies) for row in sweep for r in row) if n_rpm else 0
+    harmonics = np.array([r.harmonic_index for r in sweep[0]], dtype=np.int32)
+    h_to_idx = {int(h): i for i, h in enumerate(harmonics)}
+
+    rpms = np.zeros(n_rpm, dtype=np.float64)
+    freq_arr = np.full((n_rpm, n_harmonics, n_modes), np.nan, dtype=np.float64)
+    whirl_arr = np.zeros((n_rpm, n_harmonics, n_modes), dtype=np.int32)
+    mass_arr = np.full((n_rpm, n_harmonics, n_modes), np.nan, dtype=np.float64)
+    conv_arr = np.ones((n_rpm, n_harmonics), dtype=bool)
+
+    # Probe DOF count for mode shapes
+    n_dof = 0
+    if include_mode_shapes:
+        for row in sweep:
+            for r in row:
+                s = np.asarray(r.mode_shapes)
+                if s.size > 0:
+                    n_dof = s.shape[0]
+                    break
+            if n_dof > 0:
+                break
+
+    shape_arr = None
+    if include_mode_shapes and n_dof > 0:
+        shape_arr = np.zeros(
+            (n_rpm, n_harmonics, n_modes, n_dof), dtype=np.complex128,
+        )
+
+    for i, row in enumerate(sweep):
+        if row:
+            rpms[i] = row[0].rpm
+        for r in row:
+            hi = h_to_idx.get(r.harmonic_index)
+            if hi is None:
+                continue
+            nm = len(r.frequencies)
+            freq_arr[i, hi, :nm] = np.asarray(r.frequencies)[:nm]
+            w = np.asarray(r.whirl_direction)
+            whirl_arr[i, hi, :min(nm, len(w))] = w[:nm]
+            conv_arr[i, hi] = r.converged
+            if hasattr(r, "modal_mass_kg"):
+                mm = np.asarray(r.modal_mass_kg)
+                mass_arr[i, hi, :min(nm, len(mm))] = mm[:nm]
+            if shape_arr is not None:
+                shapes = np.asarray(r.mode_shapes)
+                if shapes.size > 0:
+                    ns = min(nm, shapes.shape[1])
+                    # shapes is (n_dof, n_modes) → store as (n_modes, n_dof)
+                    shape_arr[i, hi, :ns, :] = shapes[:, :ns].T
+
+    arrays: dict[str, np.ndarray] = {
+        "is_sweep": np.bool_(is_sweep),
+        "rpm": rpms,
+        "harmonic_index": harmonics,
+        "frequencies": freq_arr,
+        "whirl_direction": whirl_arr,
+        "modal_mass_kg": mass_arr,
+        "converged": conv_arr,
+    }
+    if shape_arr is not None:
+        arrays["mode_shapes"] = shape_arr
+
+    np.savez_compressed(path, **arrays)
+    logger.info("Saved results to %s", _Path(path).with_suffix(".npz"))
+
+
+def load_results(
+    path: str,
+) -> dict[str, np.ndarray]:
+    """Load modal results previously saved with :func:`save_results`.
+
+    Parameters
+    ----------
+    path : str
+        Path to the ``.npz`` file.
+
+    Returns
+    -------
+    dict with keys:
+
+    ==================== =============================== =====
+    Key                  Shape                           Unit
+    ==================== =============================== =====
+    ``is_sweep``         scalar bool                     —
+    ``rpm``              ``(N,)``                        RPM
+    ``harmonic_index``   ``(H,)``                        —
+    ``frequencies``      ``(N, H, M)``                   Hz
+    ``whirl_direction``  ``(N, H, M)``                   —
+    ``modal_mass_kg``    ``(N, H, M)``                   kg
+    ``converged``        ``(N, H)``                      —
+    ``mode_shapes``      ``(N, H, M, D)`` *(if stored)*  m
+    ==================== =============================== =====
+
+    For single-RPM results (``is_sweep == False``), ``N == 1``.
+    """
+    data = dict(np.load(path, allow_pickle=False))
+    # Convert 0-d arrays to scalars where appropriate
+    if "is_sweep" in data:
+        data["is_sweep"] = bool(data["is_sweep"])
+    return data

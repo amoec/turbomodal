@@ -33,7 +33,16 @@ from turbomodal._core import (
 )
 
 from turbomodal.io import load_mesh, load_cad, inspect_cad, CadInfo
-from turbomodal.solver import solve, rpm_sweep, campbell_data, BoundaryCondition
+from turbomodal.solver import (
+    solve,
+    rpm_sweep,
+    campbell_data,
+    BoundaryCondition,
+    EnrichedModalResult,
+    compute_modal_mass,
+    save_results,
+    load_results,
+)
 from turbomodal.viz import (
     DiagramStyle,
     plot_mesh,
@@ -100,6 +109,10 @@ __all__ = [
     "solve",
     "rpm_sweep",
     "campbell_data",
+    "EnrichedModalResult",
+    "compute_modal_mass",
+    "save_results",
+    "load_results",
     # Visualization
     "DiagramStyle",
     "plot_mesh",
